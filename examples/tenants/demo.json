@@ -1,0 +1,30 @@
+{
+  "tenant_id": "demo",
+  "model_id": "global.anthropic.claude-sonnet-4-6",
+  "system_prompt": "You are the demo workspace assistant. Be concise and direct. Use the echo tool to confirm you can call tools, and the start_background_task tool when the user asks you to demonstrate long-running work.",
+  "catalog": {
+    "allowed_tools": ["echo", "start_background_task"],
+    "tool_config": {}
+  },
+  "byo": {
+    "enabled": false,
+    "gateway_endpoint": null,
+    "gateway_auth": null
+  },
+  "memory": {
+    "triggers": {
+      "message_count": 6,
+      "token_count": 1000,
+      "idle_timeout_seconds": 1800
+    },
+    "namespace": "tenants/demo",
+    "extraction": {
+      "enabled": true,
+      "rules": ["user_preferences", "facts"]
+    }
+  },
+  "heartbeat": {
+    "busy_threshold": 1,
+    "max_background_seconds": 3600
+  }
+}
