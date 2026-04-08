@@ -13,10 +13,17 @@ from typing import Any, Protocol
 
 @dataclass
 class InboundMessage:
-    """Normalized inbound message from any client transport."""
+    """Normalized inbound message from any client transport.
+
+    `channel_id` is the client's room/channel identifier (Slack channel ID,
+    Discord channel ID, Teams thread, etc.). Used by tools that need to
+    know "where" the conversation is happening (e.g. `read_thread_context`,
+    channel-aware personas in week 4) and by the audit log for traceability.
+    """
     workspace_id: str
     user_id: str
     text: str
+    channel_id: str | None = None
     thread_id: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 

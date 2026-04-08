@@ -1,0 +1,26 @@
+{
+  "name": "agentcore-data-infra",
+  "version": "0.1.0",
+  "description": "DynamoDB tables + IAM managed policy for the AgentCore multi-tenant agent platform. Sibling to coreAgent/agentcore/cdk/ (CLI-managed); this one is hand-authored.",
+  "bin": {
+    "data": "dist/bin/data.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc -w",
+    "clean": "rm -rf dist cdk.out",
+    "cdk": "npm run build && cdk",
+    "synth": "npm run build && cdk synth",
+    "deploy": "npm run build && cdk deploy",
+    "diff": "npm run build && cdk diff"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "aws-cdk": "^2.1107.0",
+    "typescript": "~5.9.3"
+  },
+  "dependencies": {
+    "aws-cdk-lib": "2.243.0",
+    "constructs": "^10.0.0"
+  }
+}

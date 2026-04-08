@@ -27,6 +27,7 @@ class DebugAdapter:
             workspace_id=body.get("workspace_id", "demo-ws"),
             user_id=body.get("user_id", "u1"),
             text=body.get("text", ""),
+            channel_id=body.get("channel_id"),
             thread_id=body.get("thread_id"),
         )
 

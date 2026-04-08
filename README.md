@@ -28,18 +28,21 @@ Each customer (tenant) has a `TenantConfig` defining: model, system prompt, allo
 
 ## Local development
 
-Two terminals:
+Two terminals. `LOCAL_DEV=1` selects the JSON-file fallbacks for tenant
+config and workspace mapping so you don't need any AWS resources to run
+the local loop.
 
 ```bash
 # Terminal 1 — agent
 cd coreAgent
 uv sync                          # creates .venv with Python 3.13
-agentcore dev                    # local server on 0.0.0.0:8080
+LOCAL_DEV=1 agentcore dev        # local server on 0.0.0.0:8080
 
 # Terminal 2 — bridge
 cd bridge
 uv sync
-LOCAL_AGENT_URL=http://localhost:8080 uvicorn bridge.main:app --reload
+LOCAL_DEV=1 LOCAL_AGENT_URL=http://localhost:8080 \
+  uvicorn bridge.main:app --reload
 ```
 
 Test the bridge → agent flow without Slack:
@@ -58,8 +61,10 @@ agentcorePlayground/
 │   ├── agentcore/               # CLI-managed config + CDK (don't edit cdk/)
 │   └── app/coreAgent/
 │       ├── main.py              # @app.entrypoint, builds per-invocation Agent
-│       ├── tenant.py            # TenantConfig + JSON loader
-│       ├── tools.py             # CATALOG: in-process @tool registry
+│       ├── tenant.py            # TenantStore (JSON | DynamoDB)
+│       ├── tools.py             # CATALOG: @audited_tool registry
+│       ├── audit.py             # AuditStore (Null | InMemory | Dynamo)
+│       ├── request_context.py   # ContextVar for per-invocation context
 │       ├── ping.py              # custom @app.ping (HealthyBusy)
 │       ├── memory_store.py      # MemoryStore protocol + InMemoryStore
 │       ├── model/load.py        # Bedrock model loader (tenant-driven)
@@ -68,14 +73,24 @@ agentcorePlayground/
 │   └── bridge/
 │       ├── main.py              # routes
 │       ├── client.py            # boto3 invoke wrapper
-│       ├── tenant_resolver.py   # workspace → tenant
+│       ├── tenant_resolver.py   # WorkspaceResolver (JSON | DynamoDB)
 │       ├── async_dispatcher.py  # ack-then-post
 │       └── adapters/{core,slack,debug}.py
-└── examples/
+├── infra/                       # hand-authored infra (not CLI-managed)
+│   └── data/                    # CDK: DynamoDB tables + IAM managed policy
+└── examples/                    # LOCAL_DEV=1 fixtures
     ├── tenants/demo.json
     └── workspace_to_tenant.json
 ```
 
+## Infrastructure
+
+Hand-authored CDK for the shared data layer (DynamoDB tables + IAM managed
+policy) lives at [`infra/data/`](./infra/data/README.md). Deploy once per
+environment before running `agentcore deploy`; see that README for the
+runbook.
+
 ## Status
 
-Local-only scaffold. **No `agentcore deploy` yet** — review IAM, cost, and Gateway provisioning first. See `/path/to/project` for the full plan.
+Scaffold + week-1 hosted-agent infra in progress. Follows the plan at
+[`BUILD_PLAN.md`](./BUILD_PLAN.md).

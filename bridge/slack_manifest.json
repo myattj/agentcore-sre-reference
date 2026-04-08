@@ -1,0 +1,45 @@
+{
+  "_comment": "Slack app manifest for the Model A shared app. Paste this into api.slack.com → Create New App → From an app manifest. Before pasting, replace REPLACE_ME.ngrok-free.app with your current ngrok hostname. Keep oauth_config.scopes.bot in sync with bridge/bridge/slack_oauth.py::_SCOPES — the bridge rebuilds its authorize URL from that constant, so any drift here silently breaks new installs.",
+  "display_information": {
+    "name": "agent-core",
+    "description": "Internal-ops AI agent for alert triage, team Q&A, and workflow automation.",
+    "background_color": "#0b1021"
+  },
+  "features": {
+    "bot_user": {
+      "display_name": "agent-core",
+      "always_online": true
+    }
+  },
+  "oauth_config": {
+    "redirect_urls": [
+      "https://8982-76-170-49-132.ngrok-free.app/slack/oauth/callback"
+    ],
+    "scopes": {
+      "bot": [
+        "app_mentions:read",
+        "chat:write",
+        "channels:history",
+        "groups:history",
+        "im:history",
+        "mpim:history",
+        "users:read",
+        "team:read"
+      ]
+    }
+  },
+  "settings": {
+    "event_subscriptions": {
+      "request_url": "https://8982-76-170-49-132.ngrok-free.app/slack/events",
+      "bot_events": [
+        "app_mention"
+      ]
+    },
+    "interactivity": {
+      "is_enabled": false
+    },
+    "org_deploy_enabled": false,
+    "socket_mode_enabled": false,
+    "token_rotation_enabled": false
+  }
+}
