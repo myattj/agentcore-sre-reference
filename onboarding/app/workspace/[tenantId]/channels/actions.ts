@@ -33,6 +33,6 @@ export async function saveChannelPersona(
     }
     return { ok: false, error: "unexpected error" };
   }
-  revalidatePath(`/onboarding/${tenantId}/channels`);
+  revalidatePath(`/workspace/${tenantId}/channels`);
   return { ok: true };
 }

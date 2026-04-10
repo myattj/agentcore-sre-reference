@@ -5,7 +5,7 @@
  * the bridge URL or session token to the browser. The cookie is read
  * server-side via `requireSession`, the bridge fetch happens server-side
  * in `lib/bridge.ts`, and on success we `revalidatePath` so the next
- * server-side render of `/onboarding/[tenantId]/config` shows fresh
+ * server-side render of `/workspace/[tenantId]/prompt` shows fresh
  * values.
  *
  * The action validates auth with `requireSession`, which throws (via
@@ -36,6 +36,6 @@ export async function saveTenantConfig(
     }
     return { ok: false, error: "unexpected error" };
   }
-  revalidatePath(`/onboarding/${tenantId}/config`);
+  revalidatePath(`/workspace/${tenantId}/prompt`);
   return { ok: true };
 }

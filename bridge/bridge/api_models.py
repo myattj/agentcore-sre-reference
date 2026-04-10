@@ -56,6 +56,7 @@ class MemoryConfigOut(BaseModel):
     triggers: MemoryTriggersOut = Field(default_factory=MemoryTriggersOut)
     namespace: str = ""
     extraction: MemoryExtractionOut = Field(default_factory=MemoryExtractionOut)
+    isolated_channels: list[str] = Field(default_factory=list)
 
 
 class HeartbeatConfigOut(BaseModel):
@@ -75,6 +76,38 @@ class ChannelPersonaOut(BaseModel):
     memory_rules: list[str] | None = None
 
 
+class BotPolicyConfigOut(BaseModel):
+    allow_all_bots: bool = True
+    trusted_bot_ids: list[str] = Field(default_factory=list)
+    open_channels: list[str] = Field(default_factory=list)
+
+
+class ContextAssemblyConfigOut(BaseModel):
+    resolve_permalinks: bool = True
+    inject_thread_history: bool = True
+    thread_history_depth: int = 25
+    max_permalinks: int = 3
+
+
+class SkillDefOut(BaseModel):
+    trigger: str
+    name: str
+    prompt_template: str
+    required_tools: list[str] = Field(default_factory=list)
+    channels: list[str] = Field(default_factory=list)
+
+
+class EscalationRouteOut(BaseModel):
+    team_name: str
+    channel_id: str
+    description: str = ""
+    contacts: list[str] = Field(default_factory=list)
+
+
+class EscalationConfigOut(BaseModel):
+    routes: list[EscalationRouteOut] = Field(default_factory=list)
+
+
 class TenantConfigOut(BaseModel):
     """Full tenant config returned by GET /api/tenants/{tenant_id}.
 
@@ -87,6 +120,9 @@ class TenantConfigOut(BaseModel):
 
     tenant_id: str
     model_id: str = "global.anthropic.claude-sonnet-4-6"
+    # Fallback only — real new tenants get the full ``DEFAULT_SYSTEM_PROMPT``
+    # from ``tenant_write.build_default_config_dict``. This one-liner is
+    # just a safety net for legacy rows that somehow lost the field.
     system_prompt: str = "You are a helpful assistant."
     catalog: CatalogConfigOut = Field(default_factory=CatalogConfigOut)
     byo: ByoConfigOut = Field(default_factory=ByoConfigOut)
@@ -94,6 +130,10 @@ class TenantConfigOut(BaseModel):
     heartbeat: HeartbeatConfigOut = Field(default_factory=HeartbeatConfigOut)
     cost_cap: CostCapConfigOut = Field(default_factory=CostCapConfigOut)
     channels: dict[str, ChannelPersonaOut] = Field(default_factory=dict)
+    bot_policy: BotPolicyConfigOut = Field(default_factory=BotPolicyConfigOut)
+    context_assembly: ContextAssemblyConfigOut = Field(default_factory=ContextAssemblyConfigOut)
+    skills: list[SkillDefOut] = Field(default_factory=list)
+    escalation: EscalationConfigOut = Field(default_factory=EscalationConfigOut)
 
 
 # ----------------------------------------------------------------------------
@@ -132,6 +172,7 @@ class MemoryConfigPatch(BaseModel):
     triggers: MemoryTriggersPatch | None = None
     namespace: str | None = None
     extraction: MemoryExtractionPatch | None = None
+    isolated_channels: list[str] | None = None
 
 
 class HeartbeatConfigPatch(BaseModel):
@@ -154,6 +195,44 @@ class ChannelPersonaPatch(BaseModel):
     memory_rules: list[str] | None = None
 
 
+class BotPolicyConfigPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    allow_all_bots: bool | None = None
+    trusted_bot_ids: list[str] | None = None
+    open_channels: list[str] | None = None
+
+
+class ContextAssemblyConfigPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    resolve_permalinks: bool | None = None
+    inject_thread_history: bool | None = None
+    thread_history_depth: int | None = None
+    max_permalinks: int | None = None
+
+
+class SkillDefPatch(BaseModel):
+    """Skill definition for PATCH. Skills list is replaced wholesale."""
+    model_config = ConfigDict(extra="forbid")
+    trigger: str
+    name: str
+    prompt_template: str
+    required_tools: list[str] = Field(default_factory=list)
+    channels: list[str] = Field(default_factory=list)
+
+
+class EscalationRoutePatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    team_name: str
+    channel_id: str
+    description: str = ""
+    contacts: list[str] = Field(default_factory=list)
+
+
+class EscalationConfigPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    routes: list[EscalationRoutePatch] | None = None
+
+
 class TenantConfigPatch(BaseModel):
     """Partial TenantConfig for PATCH /api/tenants/{tenant_id}.
 
@@ -173,6 +252,10 @@ class TenantConfigPatch(BaseModel):
     heartbeat: HeartbeatConfigPatch | None = None
     cost_cap: CostCapConfigPatch | None = None
     channels: dict[str, ChannelPersonaPatch] | None = None
+    bot_policy: BotPolicyConfigPatch | None = None
+    context_assembly: ContextAssemblyConfigPatch | None = None
+    skills: list[SkillDefPatch] | None = None
+    escalation: EscalationConfigPatch | None = None
 
 
 # ----------------------------------------------------------------------------

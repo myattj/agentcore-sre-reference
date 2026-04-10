@@ -1,9 +1,17 @@
 {
   "tenant_id": "demo",
   "model_id": "global.anthropic.claude-sonnet-4-6",
-  "system_prompt": "You are the demo workspace assistant. Be concise and direct. When a user references 'this thread' or 'this conversation', call read_thread_context to fetch the full thread before responding. When searching for information, check all available documentation tools.",
+  "system_prompt": "You are the demo workspace assistant. Be concise and direct. When a user references 'this thread' or 'this conversation', call read_thread_context to fetch the full thread before responding. When searching for information, check all available documentation tools. When a user reports an issue, always check team history for similar known issues before investigating further. When asked to escalate, use the escalate tool with the appropriate team name.",
   "catalog": {
-    "allowed_tools": ["echo", "start_background_task", "search_team_history", "read_thread_context", "search_docs"],
+    "allowed_tools": [
+      "echo",
+      "start_background_task",
+      "search_team_history",
+      "read_thread_context",
+      "search_docs",
+      "post_to_channel",
+      "escalate"
+    ],
     "tool_config": {}
   },
   "byo": {
@@ -21,7 +29,10 @@
     "namespace": "tenants/demo",
     "extraction": {
       "enabled": true,
-      "rules": ["user_preferences", "facts"]
+      "rules": [
+        "user_preferences",
+        "facts"
+      ]
     }
   },
   "heartbeat": {
@@ -35,18 +46,65 @@
   "channels": {
     "C_ASK_DATA": {
       "system_prompt": "You are a data team Q&A bot. Answer questions about data pipelines, schemas, and dashboards. Search docs and team history before answering.",
-      "allowed_tools": ["search_team_history", "search_docs"],
-      "memory_rules": ["faq_in_channel"]
+      "allowed_tools": [
+        "search_team_history",
+        "search_docs"
+      ],
+      "memory_rules": [
+        "faq_in_channel"
+      ]
     },
     "C_ASK_PLATFORM": {
       "system_prompt": "You are a platform engineering Q&A bot. Answer questions about infrastructure, deployments, and internal tools. Search docs and read threads for context.",
-      "allowed_tools": ["search_team_history", "search_docs", "read_thread_context"],
-      "memory_rules": ["faq_in_channel"]
+      "allowed_tools": [
+        "search_team_history",
+        "search_docs",
+        "read_thread_context"
+      ],
+      "memory_rules": [
+        "faq_in_channel"
+      ]
     },
     "C_WORKFLOWS": {
       "system_prompt": "You are a workflow automation bot. When asked, read thread context and help create tickets or take actions based on the conversation.",
-      "allowed_tools": ["read_thread_context"],
+      "allowed_tools": [
+        "read_thread_context",
+        "post_to_channel"
+      ],
       "memory_rules": []
     }
+  },
+  "bot_policy": {
+    "trusted_bot_ids": [],
+    "open_channels": []
+  },
+  "context_assembly": {
+    "resolve_permalinks": true,
+    "inject_thread_history": true,
+    "thread_history_depth": 25,
+    "max_permalinks": 3
+  },
+  "skills": [],
+  "escalation": {
+    "routes": [
+      {
+        "team_name": "sre",
+        "channel_id": "C_SRE_ESCALATIONS",
+        "description": "Site Reliability Engineering \u2014 infrastructure, availability, incidents",
+        "contacts": []
+      },
+      {
+        "team_name": "data-eng",
+        "channel_id": "C_DATA_ESCALATIONS",
+        "description": "Data Engineering \u2014 pipelines, schemas, data quality",
+        "contacts": []
+      },
+      {
+        "team_name": "security",
+        "channel_id": "C_SECURITY",
+        "description": "Security \u2014 access control, vulnerabilities, compliance",
+        "contacts": []
+      }
+    ]
   }
 }

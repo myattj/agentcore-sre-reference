@@ -2,8 +2,9 @@
  * Done page — onboarding complete.
  *
  * Static instructions: invite the bot to a channel, mention it, you're
- * done. No "complete" flag is written to the tenant row this week —
- * "is the user done?" can be inferred later from audit_log invocations.
+ * done. Includes a single link to `/workspace/{id}` for anyone who
+ * wants to tune things after the fact — no in-wizard customization
+ * steps.
  */
 import Link from "next/link";
 
@@ -20,11 +21,17 @@ export default async function DonePage({
   return (
     <div>
       <header className="mb-8">
+        <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-[color:var(--muted)]">
+          Step 2 of 2
+        </p>
         <h1 className="mb-2 text-3xl font-semibold tracking-tight">
           You&apos;re ready
         </h1>
         <p className="text-sm text-[color:var(--muted)]">
-          Your tenant is provisioned. Here&apos;s how to take it for a spin.
+          Your bot is provisioned with sensible defaults — all tools
+          enabled, shared memory across channels, and a prompt that
+          already knows how to triage alerts, answer questions, and do
+          on-call handoffs. Here&apos;s how to take it for a spin.
         </p>
       </header>
 
@@ -43,7 +50,8 @@ export default async function DonePage({
               <code className="rounded bg-[color:var(--card)] px-1.5 py-0.5 font-mono text-xs">
                 /invite @agent-core
               </code>
-              . The bot only sees channels it&apos;s been invited to.
+              . The bot sees channels it&apos;s been invited to, and
+              shares memory across all of them so context carries over.
             </>
           }
         />
@@ -52,42 +60,52 @@ export default async function DonePage({
           title="Mention the bot"
           body={
             <>
-              In that channel, type{" "}
+              In that channel, try{" "}
               <code className="rounded bg-[color:var(--card)] px-1.5 py-0.5 font-mono text-xs">
-                @agent-core hi
+                @agent-core what&apos;s open?
+              </code>{" "}
+              or{" "}
+              <code className="rounded bg-[color:var(--card)] px-1.5 py-0.5 font-mono text-xs">
+                @agent-core catch me up on this thread
               </code>
-              . The first reply may take a few seconds while the agent warms
-              up.
+              . The first reply may take a few seconds while the agent
+              warms up.
             </>
           }
         />
         <Step
           number={4}
-          title="Iterate"
+          title="Talk to the bot to configure it"
           body={
             <>
-              Reply not quite right? Come back to{" "}
-              <Link
-                href={`/onboarding/${encodeURIComponent(tenantId)}/config`}
-                className="underline"
-              >
-                Configure
-              </Link>{" "}
-              and tweak the system prompt. Changes take effect on the next
-              message.
+              Need to add a trusted bot, remember a team fact, or
+              restrict a skill to one channel? Just tell the bot in
+              Slack — e.g.{" "}
+              <code className="rounded bg-[color:var(--card)] px-1.5 py-0.5 font-mono text-xs">
+                @agent-core remember that the data team uses Snowflake
+              </code>
+              . It edits its own config and the change persists
+              immediately.
             </>
           }
         />
       </ol>
 
-      <div className="mt-12 rounded-lg border border-[color:var(--border)] bg-[color:var(--card)] p-6">
-        <h3 className="mb-2 text-sm font-semibold">What&apos;s next</h3>
-        <p className="text-sm text-[color:var(--muted)]">
-          Pattern 1 (alert triage with Datadog/PagerDuty/GitHub) and channel
-          personas land in the next release. We&apos;ll email you when they
-          ship.
+      <section className="mt-12 rounded-lg border border-[color:var(--border)] bg-[color:var(--card)] p-5">
+        <h2 className="mb-1 text-sm font-semibold">Prefer a GUI?</h2>
+        <p className="mb-3 text-xs text-[color:var(--muted)]">
+          Most teams never come back here — the bot can edit its own
+          config from Slack. But if you want to tune the prompt,
+          per-channel overrides, skills, or bot policy by hand, the
+          settings live in your workspace.
         </p>
-      </div>
+        <Link
+          href={`/workspace/${encodeURIComponent(tenantId)}`}
+          className="inline-flex items-center gap-2 text-sm font-medium text-[color:var(--accent)] hover:text-[color:var(--accent-hover)]"
+        >
+          Open workspace settings &rarr;
+        </Link>
+      </section>
     </div>
   );
 }

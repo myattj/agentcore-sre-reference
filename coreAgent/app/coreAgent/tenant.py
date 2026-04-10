@@ -71,6 +71,7 @@ class MemoryConfig(BaseModel):
     triggers: MemoryTriggers = Field(default_factory=MemoryTriggers)
     namespace: str = ""
     extraction: MemoryExtraction = Field(default_factory=MemoryExtraction)
+    isolated_channels: list[str] = Field(default_factory=list)
 
 
 class HeartbeatConfig(BaseModel):
@@ -115,16 +116,194 @@ class ChannelPersona(BaseModel):
     memory_rules: list[str] | None = None
 
 
+class BotPolicyConfig(BaseModel):
+    """Bot-to-bot interaction policy. Evaluated bridge-side BEFORE dispatch
+    to prevent Bedrock spend on bot loops.
+
+    Four tiers (evaluated in order):
+      1. allow_all_bots — if True, ANY bot can trigger the agent (the
+         "magical default" for new tenants: PagerDuty/Datadog alerts
+         auto-triage without configuration)
+      2. trusted_bot_ids — always allowed (explicit whitelist)
+      3. open_channels — any bot can trigger in these channels
+      4. default — humans only (bot messages are dropped)
+    """
+    allow_all_bots: bool = True
+    trusted_bot_ids: list[str] = Field(default_factory=list)
+    open_channels: list[str] = Field(default_factory=list)
+
+
+class ContextAssemblyConfig(BaseModel):
+    """Controls the pre-LLM context assembly pipeline in context_assembler.py.
+
+    Each flag enables/disables one assembly step. Depth params control how
+    much context to fetch. All steps run in the agent before the Strands
+    Agent is constructed.
+    """
+    resolve_permalinks: bool = True
+    inject_thread_history: bool = True
+    thread_history_depth: int = 25
+    max_permalinks: int = 3
+
+
+class SkillDef(BaseModel):
+    """A single skill/runbook definition.
+
+    trigger: regex pattern OR exact slash-command. If it starts with "/",
+        it's an exact prefix match against the message text. Otherwise
+        it's compiled as a regex and searched against the full message.
+    name: human-readable name for logging/audit.
+    prompt_template: markdown prompt injected into the system prompt when
+        the trigger matches. Supports {user_id}, {channel_id},
+        {thread_id}, {workspace_id} placeholders resolved from ctx.
+    required_tools: tools that MUST be available for this skill. Merged
+        with the channel's effective tool list at runtime.
+    """
+    trigger: str
+    name: str
+    prompt_template: str
+    required_tools: list[str] = Field(default_factory=list)
+    channels: list[str] = Field(default_factory=list)
+
+
+class EscalationRoute(BaseModel):
+    """A single escalation routing entry."""
+    team_name: str
+    channel_id: str
+    description: str = ""
+    contacts: list[str] = Field(default_factory=list)
+
+
+class EscalationConfig(BaseModel):
+    """Escalation routing table. Used by the ``escalate`` catalog tool."""
+    routes: list[EscalationRoute] = Field(default_factory=list)
+
+
+# ----------------------------------------------------------------------------
+# Default system prompt for new tenants
+# ----------------------------------------------------------------------------
+#
+# This prompt is the "magical default" for Novari: a new tenant gets a bot
+# that's useful from minute one without any skill definitions, channel
+# personas, or tool configuration. It bakes in the three core workflows
+# (triage, Q&A, handoffs) as natural-language instructions so the agent
+# doesn't need explicit skill triggers to act on them.
+#
+# **KEEP IN SYNC** with the duplicate copy in
+# ``bridge/bridge/tenant_write.py:DEFAULT_SYSTEM_PROMPT`` — the bridge and
+# agent have separate venvs and can't share constants. A divergence here
+# surfaces as "OAuth-created tenants behave differently from seed-script
+# tenants," which is subtle and hard to debug.
+DEFAULT_SYSTEM_PROMPT = """You are a Slack-based operations assistant for your team. You help with three things: triaging alerts and incidents, answering questions about how systems work, and automating workflow handoffs. You have shared memory across all channels in your workspace — what you learn in one channel is available in the others.
+
+## Core principles
+
+1. **Act, don't narrate.** When given a task, do it. Use your tools proactively rather than describing what you would do.
+2. **Read before you write.** Never modify or answer about something you haven't looked at first. Search history and docs before answering from general knowledge. Read the thread before summarizing it.
+3. **Simplest approach first.** Try the obvious thing before building something clever. Don't over-engineer.
+4. **Diagnose before pivoting.** When a tool call fails or returns unexpected output, read the error carefully before switching approaches. Don't retry blindly, but don't abandon a viable path after one failure.
+5. **Measure twice, cut once.** For read-only work (search, fetch, summarize), act freely. For externally-visible actions (posting to another channel, escalating, changing config), confirm intent if the request is ambiguous.
+
+## Tool usage
+
+Tools are how you do things — use them instead of guessing or describing.
+
+- **Run independent calls in parallel.** "Search team history AND search docs" is two calls in the same turn, not one after the other.
+- **Use the right tool for the job:**
+  - `read_thread_context` — when the user references "this thread" or "this conversation"
+  - `search_team_history` — past discussions in the current channel
+  - `search_docs` — runbooks, Confluence, Notion, and other connected documentation
+  - `escalate` — hand off to another team via your routing table
+  - `post_to_channel` — cross-channel actions (tell the user where you posted)
+  - `manage_config` — change your own settings (see Self-configuration below)
+- **Don't narrate tool calls step-by-step.** Just use them and share the result.
+- **If you don't have the tool you need, say so.** Don't invent an answer to fill the gap.
+
+## How you handle common requests
+
+**Someone reports an issue, asks about an alert, or says "what's going on with X":**
+Search team history and docs in parallel. If they reference "this thread", read it. Summarize what's known — causes, past fixes, relevant runbooks. Suggest next steps. If severe or stuck, offer to escalate.
+
+**Someone asks a question:**
+Search docs and team history first. Cite sources ("per the runbook..." or "@alice mentioned this in #ops last week..."). If you genuinely don't know, say so and offer to escalate.
+
+**Someone asks to summarize a thread or says "catch me up":**
+Read the full thread. Give a tight summary: what happened, current status, action items, who's on it.
+
+**Someone asks for an on-call handoff or "what's open":**
+Check recent team history for open incidents and unresolved threads. Summarize by priority — needs attention now / in progress / resolved. Link the threads.
+
+**Someone asks to escalate, or you hit a wall:**
+Use the escalate tool with the right team name. If no route matches, ask which team they want.
+
+**A bot posts an alert (PagerDuty, Datadog, etc.):**
+Treat it like a user reporting an issue — triage automatically.
+
+## Self-configuration
+
+You know your own config. When a user asks to change something — "add B_PAGERDUTY to trusted bots", "remember that the data team uses Snowflake", "only fire /triage in #sre-alerts", "isolate memory for #secret-project" — use `manage_config` to persist the change immediately. Users shouldn't need to visit a portal to configure you.
+
+## Communication style
+
+- Be concise. Slack, not email. Lead with the answer, then the evidence. Bullets for lists, short paragraphs otherwise.
+- Skip preamble and filler. Don't restate the user's question.
+- If one sentence will do, don't use three.
+- When uncertain, say so — don't invent.
+- When you post to another channel or escalate, tell the user where.
+
+## When you're stuck
+
+1. Re-read the error or unexpected tool output carefully.
+2. Check your assumptions — is the channel / thread / config what you expected?
+3. Try a focused fix.
+4. Only ask the user when you've genuinely investigated and hit a wall.
+
+## What not to do
+
+- Don't make up information. If you don't know, search or say so.
+- Don't give time estimates.
+- Don't ask multiple clarifying questions when you could try the obvious interpretation and adjust.
+- Don't take destructive actions (clobbering other channels' configs, deleting routes) as shortcuts to bypass problems.
+- When you encounter unexpected state, investigate before overwriting — it may be someone's in-progress work.
+"""
+
+
+# ----------------------------------------------------------------------------
+# Default catalog tools for new tenants
+# ----------------------------------------------------------------------------
+#
+# Every new tenant gets the full set of catalog tools enabled out of the
+# box. The old default of just ``["echo"]`` forced users to manually enable
+# each tool before the bot was useful, which contradicted the
+# "zero-config magic" goal. Users can still disable individual tools from
+# the onboarding UI or via ``manage_config``.
+#
+# **KEEP IN SYNC** with ``bridge/bridge/tenant_write.py:DEFAULT_CATALOG_TOOLS``.
+DEFAULT_CATALOG_TOOLS = [
+    "echo",
+    "start_background_task",
+    "search_team_history",
+    "read_thread_context",
+    "search_docs",
+    "post_to_channel",
+    "escalate",
+]
+
+
 class TenantConfig(BaseModel):
     tenant_id: str
     model_id: str = "global.anthropic.claude-sonnet-4-6"
-    system_prompt: str = "You are a helpful assistant."
+    system_prompt: str = DEFAULT_SYSTEM_PROMPT
     catalog: CatalogConfig = Field(default_factory=CatalogConfig)
     byo: ByoConfig = Field(default_factory=ByoConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     heartbeat: HeartbeatConfig = Field(default_factory=HeartbeatConfig)
     cost_cap: CostCapConfig = Field(default_factory=CostCapConfig)
     channels: dict[str, ChannelPersona] = Field(default_factory=dict)
+    bot_policy: BotPolicyConfig = Field(default_factory=BotPolicyConfig)
+    context_assembly: ContextAssemblyConfig = Field(default_factory=ContextAssemblyConfig)
+    skills: list[SkillDef] = Field(default_factory=list)
+    escalation: EscalationConfig = Field(default_factory=EscalationConfig)
 
 
 def _iso_now() -> str:
@@ -138,23 +317,32 @@ def build_default_config(tenant_id: str) -> TenantConfig:
     connects. Customers customize their config from the onboarding UI
     after this initial row exists.
 
+    The defaults are intentionally permissive: a new tenant should feel
+    magical out of the box, not like a blank canvas waiting to be
+    configured. Everything that can reasonably be on by default IS on.
+
     Defaults:
       - Model: the platform default (Claude Sonnet 4.6)
-      - System prompt: a generic helpful-assistant default. **Must be
-        non-empty** — Bedrock's Converse API rejects empty system blocks
-        with a `system[0].text min length: 1` validation error. Customers
-        override this in the onboarding UI (week 3).
-      - Catalog: only `echo` enabled (proves the bot works without
-        exposing anything sensitive)
-      - BYO: disabled
-      - Memory: extraction enabled with the default rules; namespace
-        scoped to the tenant
-      - Heartbeat: defaults
+      - System prompt: the full ``DEFAULT_SYSTEM_PROMPT`` that teaches
+        the agent triage, Q&A, handoff, and self-configuration workflows.
+        No skill definitions needed — the workflows are baked into the
+        prompt.
+      - Catalog: all catalog tools enabled so the bot can search, read
+        threads, escalate, and post cross-channel from minute one.
+      - Bot policy: ``allow_all_bots=True`` so PagerDuty / Datadog
+        alerts get auto-triaged.
+      - Memory: shared-by-default (empty ``isolated_channels``);
+        extraction enabled with default rules; namespace scoped to
+        the tenant.
+      - Context assembly: permalink resolution and thread history
+        injection both on (already the BaseModel defaults).
+      - BYO: disabled (users opt in via the integrations page).
+      - Heartbeat: defaults.
     """
     return TenantConfig(
         tenant_id=tenant_id,
-        system_prompt="You are a helpful assistant.",
-        catalog=CatalogConfig(allowed_tools=["echo"]),
+        system_prompt=DEFAULT_SYSTEM_PROMPT,
+        catalog=CatalogConfig(allowed_tools=list(DEFAULT_CATALOG_TOOLS)),
         memory=MemoryConfig(
             namespace=f"tenants/{tenant_id}",
             extraction=MemoryExtraction(enabled=True, rules=["user_preferences", "facts"]),
@@ -355,6 +543,14 @@ def load_tenant_config(tenant_id: str) -> TenantConfig:
     backing store is chosen lazily on first call.
     """
     return _store().get(tenant_id)
+
+
+def save_tenant_config(config: TenantConfig) -> None:
+    """Save a modified tenant config. Read-modify-write callers should
+    ``load_tenant_config()``, modify the returned object, then call this
+    to persist. Used by the ``manage_config`` catalog tool to let the bot
+    update its own configuration at runtime."""
+    _store().upsert(config)
 
 
 def create_default_tenant(tenant_id: str) -> TenantConfig:

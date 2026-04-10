@@ -39,6 +39,7 @@ export type MemoryConfig = {
   triggers: MemoryTriggers;
   namespace: string;
   extraction: MemoryExtraction;
+  isolated_channels: string[];
 };
 
 export type HeartbeatConfig = {
@@ -57,6 +58,38 @@ export type ChannelPersona = {
   memory_rules?: string[] | null;
 };
 
+export type BotPolicyConfig = {
+  allow_all_bots: boolean;
+  trusted_bot_ids: string[];
+  open_channels: string[];
+};
+
+export type ContextAssemblyConfig = {
+  resolve_permalinks: boolean;
+  inject_thread_history: boolean;
+  thread_history_depth: number;
+  max_permalinks: number;
+};
+
+export type SkillDef = {
+  trigger: string;
+  name: string;
+  prompt_template: string;
+  required_tools: string[];
+  channels: string[];
+};
+
+export type EscalationRoute = {
+  team_name: string;
+  channel_id: string;
+  description: string;
+  contacts: string[];
+};
+
+export type EscalationConfig = {
+  routes: EscalationRoute[];
+};
+
 export type TenantConfig = {
   tenant_id: string;
   model_id: string;
@@ -67,6 +100,10 @@ export type TenantConfig = {
   heartbeat: HeartbeatConfig;
   cost_cap: CostCapConfig;
   channels: Record<string, ChannelPersona>;
+  bot_policy: BotPolicyConfig;
+  context_assembly: ContextAssemblyConfig;
+  skills: SkillDef[];
+  escalation: EscalationConfig;
 };
 
 /** Sparse partial used as the body of `PATCH /api/tenants/{id}`. */
@@ -79,6 +116,10 @@ export type TenantConfigPatch = Partial<{
   heartbeat: Partial<HeartbeatConfig>;
   cost_cap: Partial<CostCapConfig>;
   channels: Record<string, ChannelPersona>;
+  bot_policy: Partial<BotPolicyConfig>;
+  context_assembly: Partial<ContextAssemblyConfig>;
+  skills: SkillDef[];
+  escalation: Partial<EscalationConfig>;
 }>;
 
 export type ChannelInfo = {
@@ -139,5 +180,17 @@ export const KNOWN_CATALOG_TOOLS: { id: string; label: string; description: stri
     label: "Search docs",
     description:
       "Fan out a search across all configured doc sources (Confluence, Notion).",
+  },
+  {
+    id: "post_to_channel",
+    label: "Post to channel",
+    description:
+      "Post a message to any Slack channel the bot is a member of (cross-channel actions).",
+  },
+  {
+    id: "escalate",
+    label: "Escalate",
+    description:
+      "Escalate an issue to a specific team using the configured routing table.",
   },
 ];

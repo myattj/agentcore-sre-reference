@@ -48,6 +48,8 @@ async def dispatch_async(
         "channel_id": inbound.channel_id,
         "thread_id": inbound.thread_id,
         "workspace_id": inbound.workspace_id,
+        "bot_id": inbound.metadata.get("bot_id"),
+        "permalinks": inbound.metadata.get("permalinks", []),
     }
 
     # Streaming path: adapter supports stream_reply + client supports invoke_stream

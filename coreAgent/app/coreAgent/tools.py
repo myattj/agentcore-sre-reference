@@ -270,6 +270,194 @@ def search_docs(query: str) -> str:
     )
 
 
+@audited_tool("post_to_channel")
+def post_to_channel(channel_id: str, message: str, thread_ts: str | None = None) -> str:
+    """Post a message to any Slack channel the bot is a member of.
+
+    Use this when you need to send information to a different channel than
+    the one you're currently in (e.g., posting a summary to #incidents,
+    sending a notification to #team-updates, cross-posting an update).
+
+    Args:
+        channel_id: The Slack channel ID to post to (e.g. C0123456789).
+        message: The message text to post. Supports Slack mrkdwn formatting.
+        thread_ts: Optional thread timestamp to reply in a specific thread.
+    """
+    import slack_api
+
+    ctx = get_context()
+    token = slack_api.get_bot_token(ctx.get("tenant_id", ""))
+    if not token:
+        return "Error: no Slack bot token configured for this tenant."
+    return slack_api.post_message(token, channel_id, message, thread_ts)
+
+
+@audited_tool("escalate")
+def escalate(team_name: str, summary: str, severity: str = "medium") -> str:
+    """Escalate an issue to a specific team using the configured routing table.
+
+    Looks up the team in the tenant's escalation routing config, posts a
+    formatted escalation message to their channel, and @-mentions the
+    configured contacts.
+
+    Args:
+        team_name: The logical team name to escalate to (e.g. "sre", "data-eng", "security").
+        summary: A concise summary of the issue being escalated, including what was checked and what evidence was gathered.
+        severity: One of "low", "medium", "high", "critical". Determines formatting urgency.
+    """
+    import slack_api
+
+    ctx = get_context()
+    routes = ctx.get("escalation_routes", [])
+    if not routes:
+        return "No escalation routing table configured for this tenant."
+
+    # Find the matching route (case-insensitive)
+    route = next(
+        (r for r in routes if r["team_name"].lower() == team_name.lower()),
+        None,
+    )
+    if not route:
+        available = [r["team_name"] for r in routes]
+        return f"No escalation route for '{team_name}'. Available teams: {available}"
+
+    # Build the escalation message
+    mentions = " ".join(f"<@{uid}>" for uid in route.get("contacts", []))
+    parts = [f"*[{severity.upper()}] Escalation*"]
+    if mentions:
+        parts.append(mentions)
+    if route.get("description"):
+        parts.append(f"_Routing to: {route['description']}_")
+    parts.append(f"\n{summary}")
+
+    msg = "\n".join(parts)
+    token = slack_api.get_bot_token(ctx.get("tenant_id", ""))
+    if not token:
+        return "Error: no Slack bot token configured for this tenant."
+    return slack_api.post_message(token, route["channel_id"], msg)
+
+
+@audited_tool("manage_config")
+def manage_config(action: str, section: str, data: str | None = None) -> str:
+    """View or update this bot's configuration.
+
+    Call this when a user asks to view or change the bot's settings: adding
+    skills/runbooks, modifying bot-to-bot policy, updating escalation routes,
+    toggling context assembly, changing which tools are enabled, or
+    configuring per-channel personas.
+
+    Args:
+        action: "view" to see current settings, "update" to change them.
+        section: Which part to view/update. One of: "skills", "bot_policy",
+                 "escalation", "context_assembly", "catalog_tools",
+                 "system_prompt", "channels", or "all" (view-only).
+        data: JSON string with the new value (required for "update"). Shape
+              must match the section being updated. For "channels", provide
+              a dict of channel_id -> persona object; keys are merged into
+              the existing channels dict (set a persona to null to remove it).
+    """
+    from tenant import (
+        BotPolicyConfig,
+        ChannelPersona,
+        ContextAssemblyConfig,
+        EscalationConfig,
+        SkillDef,
+        load_tenant_config,
+        save_tenant_config,
+    )
+
+    ctx = get_context()
+    tenant_id = ctx.get("tenant_id", "")
+    if not tenant_id:
+        return "Error: no tenant_id in request context."
+
+    allowed_sections = {
+        "skills", "bot_policy", "escalation", "context_assembly",
+        "catalog_tools", "system_prompt", "channels", "all",
+    }
+    if section not in allowed_sections:
+        return f"Error: unknown section '{section}'. Choose from: {sorted(allowed_sections)}"
+
+    if action == "view":
+        config = load_tenant_config(tenant_id)
+        if section == "all":
+            return json.dumps({
+                "skills": [s.model_dump() for s in config.skills],
+                "bot_policy": config.bot_policy.model_dump(),
+                "escalation": config.escalation.model_dump(),
+                "context_assembly": config.context_assembly.model_dump(),
+                "catalog_tools": config.catalog.allowed_tools,
+                "channels": {cid: p.model_dump() for cid, p in config.channels.items()},
+                "system_prompt": config.system_prompt[:200] + (
+                    "..." if len(config.system_prompt) > 200 else ""
+                ),
+            }, indent=2)
+        if section == "skills":
+            return json.dumps([s.model_dump() for s in config.skills], indent=2)
+        if section == "bot_policy":
+            return json.dumps(config.bot_policy.model_dump(), indent=2)
+        if section == "escalation":
+            return json.dumps(config.escalation.model_dump(), indent=2)
+        if section == "context_assembly":
+            return json.dumps(config.context_assembly.model_dump(), indent=2)
+        if section == "catalog_tools":
+            return json.dumps(config.catalog.allowed_tools, indent=2)
+        if section == "channels":
+            return json.dumps(
+                {cid: p.model_dump() for cid, p in config.channels.items()},
+                indent=2,
+            )
+        if section == "system_prompt":
+            return config.system_prompt
+        return "Error: unhandled section."
+
+    if action == "update":
+        if section == "all":
+            return "Error: cannot update 'all' at once. Update individual sections."
+        if not data:
+            return "Error: 'data' is required for updates. Provide a JSON string."
+        try:
+            parsed = json.loads(data)
+        except json.JSONDecodeError as e:
+            return f"Error: invalid JSON in data: {e}"
+
+        config = load_tenant_config(tenant_id)
+        try:
+            if section == "skills":
+                config.skills = [SkillDef.model_validate(s) for s in parsed]
+            elif section == "bot_policy":
+                config.bot_policy = BotPolicyConfig.model_validate(parsed)
+            elif section == "escalation":
+                config.escalation = EscalationConfig.model_validate(parsed)
+            elif section == "context_assembly":
+                config.context_assembly = ContextAssemblyConfig.model_validate(parsed)
+            elif section == "catalog_tools":
+                if not isinstance(parsed, list):
+                    return "Error: catalog_tools must be a list of tool IDs."
+                config.catalog.allowed_tools = parsed
+            elif section == "channels":
+                if not isinstance(parsed, dict):
+                    return "Error: channels must be a dict of channel_id -> persona object."
+                for cid, val in parsed.items():
+                    if val is None:
+                        config.channels.pop(cid, None)
+                    else:
+                        config.channels[cid] = ChannelPersona.model_validate(val)
+            elif section == "system_prompt":
+                if not isinstance(parsed, str):
+                    return "Error: system_prompt must be a string."
+                if not parsed.strip():
+                    return "Error: system_prompt cannot be empty."
+                config.system_prompt = parsed
+        except Exception as e:
+            return f"Error: invalid data for '{section}': {e}"
+
+        save_tenant_config(config)
+        return f"Updated '{section}' successfully. Changes take effect on the next message."
+
+    return f"Error: unknown action '{action}'. Use 'view' or 'update'."
+
+
 # ----------------------------------------------------------------------------
 # Selection
 # ----------------------------------------------------------------------------

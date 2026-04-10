@@ -39,8 +39,8 @@ from model.load import load_model
 from pricing import compute_cost_cents
 from runtime import app
 from spend_tracker import build_spend_tracker
-from tenant import load_tenant_config
-from tools import build_catalog_tools
+from tenant import TenantConfig, load_tenant_config
+from tools import CATALOG, build_catalog_tools
 
 # Side-effect import: registers @app.ping handler. Keep this so the runtime
 # uses our HealthyBusy logic for the heartbeat lifecycle.
@@ -155,6 +155,7 @@ def _build_memory_session_manager(
     tenant_id: str,
     ctx: dict[str, Any],
     invocation_id: str,
+    config: TenantConfig | None = None,
 ) -> Any | None:
     """Build an AgentCoreMemorySessionManager for the real memory resource.
 
@@ -163,8 +164,9 @@ def _build_memory_session_manager(
     of AGENT_LOCAL_STORES — that flag only controls tenant config + audit
     stores, not memory.
 
-    Namespace mapping:
-      - Channels: actorId = {tenant_id}_{channel_id} (workspace-per-channel)
+    Namespace mapping (shared-by-default):
+      - Channels: actorId = {tenant_id} (shared brain across all channels)
+      - Isolated channels: actorId = {tenant_id}_{channel_id} (opt-in silo)
       - DMs:      actorId = {tenant_id}_{user_id}    (per-user)
       - sessionId = thread_id (groups a conversation thread) or invocation_id
     """
@@ -175,8 +177,16 @@ def _build_memory_session_manager(
     from bedrock_agentcore.memory.integrations.strands.config import AgentCoreMemoryConfig
 
     channel_id = ctx.get("channel_id", "")
-    if channel_id:
+    isolated = (
+        config is not None
+        and channel_id
+        and channel_id in config.memory.isolated_channels
+    )
+
+    if isolated:
         actor_id = f"{tenant_id}_{channel_id}"
+    elif channel_id:
+        actor_id = tenant_id
     else:
         actor_id = f"{tenant_id}_{ctx.get('user_id', 'anon')}"
 
@@ -216,6 +226,78 @@ def _build_memory_session_manager(
     )
 
 
+def _build_self_awareness_block(
+    config: TenantConfig,
+    effective_tools: list[str],
+) -> str:
+    """Generate a system prompt appendix describing the bot's own configuration.
+
+    Appended to the effective system prompt so the bot knows its own skills,
+    bot policy, escalation routes, and tools. Always includes guidance on
+    using ``manage_config`` since it's a system tool (always available).
+    """
+    parts = ["\n\n## Your Configuration"]
+
+    # Skills
+    if config.skills:
+        skill_lines = []
+        for s in config.skills:
+            kind = "slash command" if s.trigger.startswith("/") else "regex"
+            line = f"- `{s.trigger}` ({kind}) -> {s.name}"
+            if s.channels:
+                line += f" [only in: {', '.join(s.channels)}]"
+            skill_lines.append(line)
+        parts.append(
+            f"**Skills:** {len(config.skills)} configured\n"
+            + "\n".join(skill_lines)
+        )
+    else:
+        parts.append("**Skills:** none configured")
+
+    # Bot policy
+    bp = config.bot_policy
+    bp_parts = []
+    if bp.trusted_bot_ids:
+        bp_parts.append(f"Trusted bots: {', '.join(bp.trusted_bot_ids)}")
+    if bp.open_channels:
+        bp_parts.append(f"Open channels: {', '.join(bp.open_channels)}")
+    if bp_parts:
+        parts.append("**Bot Policy:** " + ". ".join(bp_parts))
+    else:
+        parts.append("**Bot Policy:** humans only (no trusted bots or open channels)")
+
+    # Escalation routes
+    if config.escalation.routes:
+        route_lines = [
+            f"- {r.team_name} -> {r.channel_id}"
+            for r in config.escalation.routes
+        ]
+        parts.append("**Escalation Routes:**\n" + "\n".join(route_lines))
+
+    # Enabled tools
+    parts.append(f"**Enabled Tools:** {', '.join(effective_tools)}")
+
+    # Context assembly
+    ca = config.context_assembly
+    flags = []
+    if ca.resolve_permalinks:
+        flags.append("permalink resolution")
+    if ca.inject_thread_history:
+        flags.append(f"thread history ({ca.thread_history_depth} msgs)")
+    if flags:
+        parts.append(f"**Context Assembly:** {', '.join(flags)}")
+
+    # Self-modification guidance (manage_config is always available)
+    parts.append(
+        "\n**Updating Settings:** Users can ask you to add skills, change "
+        "bot policy, update escalation routes, or modify other settings at "
+        "any time. Use the `manage_config` tool to view or update your "
+        "configuration. Changes persist and take effect on the next message."
+    )
+
+    return "\n\n".join(parts)
+
+
 @app.entrypoint
 async def invoke(payload, context):
     """Per-invocation: hydrate tenant config, build agent, stream response,
@@ -231,18 +313,6 @@ async def invoke(payload, context):
     invocation_id = uuid.uuid4().hex
     start = time.time()
 
-    # Set the request context BEFORE building the agent so any tool whose
-    # construction happens to call into the audit path (unlikely but
-    # possible) sees a valid context.
-    request_context.set_context(
-        tenant_id=tenant_id,
-        invocation_id=invocation_id,
-        user_id=ctx.get("user_id", ""),
-        channel_id=ctx.get("channel_id", ""),
-        thread_id=ctx.get("thread_id", ""),
-        workspace_id=ctx.get("workspace_id", ""),
-    )
-
     log.info(f"Invoking tenant={tenant_id} invocation_id={invocation_id} prompt_len={len(user_message)}")
 
     success = True
@@ -256,6 +326,19 @@ async def invoke(payload, context):
     try:
         config = load_tenant_config(tenant_id)
         model_id = config.model_id
+
+        # Set the request context after config is loaded so escalation_routes
+        # is available. The finally block calls clear_context() which is safe
+        # even if set_context wasn't called (sets to None, a no-op).
+        request_context.set_context(
+            tenant_id=tenant_id,
+            invocation_id=invocation_id,
+            user_id=ctx.get("user_id", ""),
+            channel_id=ctx.get("channel_id", ""),
+            thread_id=ctx.get("thread_id", ""),
+            workspace_id=ctx.get("workspace_id", ""),
+            escalation_routes=[r.model_dump() for r in config.escalation.routes],
+        )
 
         # Cost-cap pre-flight check: reject the invocation before any
         # Bedrock spend if the tenant has exceeded their monthly cap.
@@ -293,6 +376,29 @@ async def invoke(payload, context):
             if cp.memory_rules is not None:
                 effective_rules = cp.memory_rules
 
+        # Context assembly: resolve permalinks, inject thread history,
+        # match skills. Runs AFTER channel-persona merge so effective_prompt
+        # and effective_tools reflect per-channel overrides.
+        from .context_assembler import assemble_context
+
+        assembled = assemble_context(
+            user_message=user_message,
+            ctx=ctx,
+            assembly_config=config.context_assembly,
+            skills=config.skills,
+            effective_prompt=effective_prompt,
+            tenant_id=tenant_id,
+        )
+        effective_prompt = assembled.system_prompt
+        user_message = assembled.enriched_message
+        effective_tools = list(set(effective_tools) | set(assembled.extra_tools))
+        if assembled.matched_skill:
+            log.info("Skill matched: %s for tenant=%s", assembled.matched_skill, tenant_id)
+
+        # Self-awareness: the bot knows its own config so it can explain
+        # itself and help users modify settings via manage_config.
+        effective_prompt += _build_self_awareness_block(config, effective_tools)
+
         catalog_tools = build_catalog_tools(
             effective_tools,
             config.catalog.tool_config,
@@ -313,6 +419,11 @@ async def invoke(payload, context):
         )
 
         tools = list(catalog_tools)
+        # manage_config is a system tool — always available so the bot can
+        # explain and modify its own settings at the user's request.
+        _manage_config = CATALOG.get("manage_config")
+        if _manage_config:
+            tools.append(_manage_config)
         if byo_client is not None:
             # Strands accepts an MCPClient as a tool collection; it lists and
             # exposes the remote tools to the model lazily.
@@ -320,7 +431,7 @@ async def invoke(payload, context):
 
         # Build the memory session manager (real AgentCore Memory when
         # AGENTCORE_MEMORY_ID is set, None for local dev).
-        session_mgr = _build_memory_session_manager(tenant_id, ctx, invocation_id)
+        session_mgr = _build_memory_session_manager(tenant_id, ctx, invocation_id, config)
 
         # FAQ injection: local dev only (when session_mgr is None).
         # With real memory, channel-scoped FAQ is handled automatically

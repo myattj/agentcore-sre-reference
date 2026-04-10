@@ -38,12 +38,17 @@ export default async function IntegrationsPage({
   return (
     <div>
       <header className="mb-8">
+        <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-[color:var(--muted)]">
+          Step 1 of 2
+        </p>
         <h1 className="mb-2 text-2xl font-semibold tracking-tight">
-          Integrations
+          Connect your data
         </h1>
         <p className="text-sm text-[color:var(--muted)]">
-          Connect the data sources the agent uses to answer questions and
-          triage alerts.
+          Your bot is already running with a default prompt, shared
+          memory, and all tools on. Connecting your actual docs, alerts,
+          and tickets is what makes it useful for your team. Connect
+          what you have now — you can add more later.
         </p>
       </header>
 
@@ -57,18 +62,12 @@ export default async function IntegrationsPage({
         <li><LinearForm tenantId={tenantId} initialConnected={connected.includes("linear")} /></li>
       </ul>
 
-      <footer className="mt-12 flex items-center justify-between border-t border-[color:var(--border)] pt-6">
-        <Link
-          href={`/onboarding/${encodeURIComponent(tenantId)}/channels`}
-          className="text-sm text-[color:var(--muted)] hover:text-[color:var(--foreground)]"
-        >
-          &larr; Back to channels
-        </Link>
+      <footer className="mt-12 flex items-center justify-end border-t border-[color:var(--border)] pt-6">
         <Link
           href={`/onboarding/${encodeURIComponent(tenantId)}/done`}
-          className="rounded-full bg-[color:var(--accent)] px-5 py-2 text-sm font-medium text-white hover:bg-[color:var(--accent-hover)]"
+          className="rounded-full bg-[color:var(--accent)] px-6 py-2 text-sm font-medium text-white shadow-sm transition hover:bg-[color:var(--accent-hover)]"
         >
-          Continue &rarr;
+          Next: try it in Slack &rarr;
         </Link>
       </footer>
     </div>

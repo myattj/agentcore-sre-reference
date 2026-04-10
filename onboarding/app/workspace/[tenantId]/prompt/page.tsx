@@ -1,19 +1,18 @@
 /**
- * Config page — first step of the onboarding flow.
+ * Prompt settings — the one thing most teams might want to edit: the
+ * bot's system prompt. Everything else (tools, context assembly) is
+ * intentionally on by default and editable via the bot in Slack.
  *
- * Server component that:
- *   1. Verifies the session cookie via `requireSession`
- *   2. Fetches the current tenant config from the bridge API
- *   3. Renders the client form, prefilled with the current values
+ * This page lives outside onboarding — new tenants land straight on
+ * integrations and never see it. Power users who want to change the
+ * personality come back here from `/workspace/{id}`.
  */
-import Link from "next/link";
-
 import { BridgeApiError, getTenant } from "@/lib/bridge";
 import { requireSession } from "@/lib/session";
 
 import ConfigForm from "./ConfigForm";
 
-export default async function ConfigPage({
+export default async function PromptSettingsPage({
   params,
 }: {
   params: Promise<{ tenantId: string }>;
@@ -43,24 +42,17 @@ export default async function ConfigPage({
     <div>
       <header className="mb-8">
         <h1 className="mb-2 text-2xl font-semibold tracking-tight">
-          Configure your agent
+          System prompt
         </h1>
         <p className="text-sm text-[color:var(--muted)]">
-          Set the system prompt and pick which tools the agent can use.
-          You can change these any time by re-running the install link.
+          The personality and instructions your bot uses for every reply.
+          The default already knows how to triage alerts, answer
+          questions, and do on-call handoffs — only edit this if you
+          want to change the voice or add team-specific context.
         </p>
       </header>
 
       <ConfigForm tenantId={tenantId} initial={tenant} />
-
-      <footer className="mt-12 flex items-center justify-end gap-4 border-t border-[color:var(--border)] pt-6">
-        <Link
-          href={`/onboarding/${encodeURIComponent(tenantId)}/channels`}
-          className="rounded-full border border-[color:var(--border)] px-5 py-2 text-sm font-medium hover:bg-[color:var(--card)]"
-        >
-          Next: channels →
-        </Link>
-      </footer>
     </div>
   );
 }

@@ -40,17 +40,24 @@ def set_context(
     channel_id: str = "",
     thread_id: str = "",
     workspace_id: str = "",
+    **extra: Any,
 ) -> None:
     """Populate the current invocation's context. Called once at the top of
-    `@app.entrypoint` before the agent runs."""
-    _ctx.set({
+    `@app.entrypoint` before the agent runs.
+
+    Extra keyword arguments (e.g. ``escalation_routes``) are merged into
+    the context dict so tools can read them via ``get_context()``.
+    """
+    ctx = {
         "tenant_id": tenant_id,
         "invocation_id": invocation_id,
         "user_id": user_id,
         "channel_id": channel_id,
         "thread_id": thread_id,
         "workspace_id": workspace_id,
-    })
+    }
+    ctx.update(extra)
+    _ctx.set(ctx)
 
 
 def get_context() -> dict[str, Any]:

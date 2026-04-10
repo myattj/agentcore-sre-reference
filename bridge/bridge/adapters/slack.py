@@ -38,6 +38,7 @@ import hashlib
 import hmac
 import json
 import logging
+import re
 import time
 from collections.abc import AsyncIterator
 from typing import Any
@@ -143,15 +144,28 @@ class SlackAdapter:
         body = json.loads(raw_body) if raw_body else {}
 
         event = body.get("event", {})
+        text = event.get("text", "")
+
+        # Extract Slack permalinks from message text for cross-channel
+        # context assembly (resolved by the agent's context_assembler).
+        _PERMALINK_RE = re.compile(
+            r"https://[a-zA-Z0-9-]+\.slack\.com/archives/[A-Z0-9]+/p\d+"
+        )
+        permalinks = _PERMALINK_RE.findall(text)
+
         return InboundMessage(
             workspace_id=body.get("team_id", "T_LOCAL"),
             user_id=event.get("user", "U_LOCAL"),
-            text=event.get("text", ""),
+            text=text,
             channel_id=event.get("channel"),
             thread_id=event.get("thread_ts") or event.get("ts"),
             metadata={
                 "event_type": event.get("type"),
                 "event_id": body.get("event_id"),
+                "bot_id": event.get("bot_id"),
+                "subtype": event.get("subtype"),
+                "app_id": event.get("app_id"),
+                "permalinks": permalinks,
             },
         )
 

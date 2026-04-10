@@ -7,7 +7,7 @@
  * This handler:
  *   1. Validates `t` is a real session token for `tenant_id`
  *   2. Sets the HttpOnly `tenant_session` cookie on the onboarding origin
- *   3. Redirects to the clean `/onboarding/<tenant_id>/config` URL
+ *   3. Redirects to the clean `/onboarding/<tenant_id>/integrations` URL
  *      (so the token doesn't sit in browser history / referer headers)
  *
  * This MUST be a Route Handler, not a Server Component page — Next.js 16
@@ -49,7 +49,7 @@ export async function GET(
   }
 
   const response = NextResponse.redirect(
-    new URL(`/onboarding/${encodeURIComponent(tenantId)}/config`, origin),
+    new URL(`/onboarding/${encodeURIComponent(tenantId)}/integrations`, origin),
     { status: 302 },
   );
   response.cookies.set({

@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 
 # Configure root logger so our app-level log.warning/info calls
 # actually appear in container stdout (uvicorn only configures its own).
@@ -34,8 +35,13 @@ from .dedup import is_duplicate
 from .gateway_jwt import get_jwks, get_oidc_configuration
 from .slack_oauth import build_install_redirect, handle_oauth_callback
 from .tenant_resolver import resolve_tenant_id
+from .tenant_write import get_tenant_row
 
 log = logging.getLogger(__name__)
+
+# Slack app ID for self-message filtering. Set via env to avoid the bot
+# processing its own messages in channels where it's a member.
+_SLACK_APP_ID = os.getenv("SLACK_APP_ID", "")
 
 LOCAL_DEV = os.getenv("LOCAL_DEV") == "1"
 
@@ -56,6 +62,53 @@ client = AgentCoreClient(
     runtime_arn=os.getenv("AGENT_RUNTIME_ARN"),
     local_agent_url=os.getenv("LOCAL_AGENT_URL"),
 )
+
+
+# ---------------------------------------------------------------------------
+# Bot policy helpers
+# ---------------------------------------------------------------------------
+
+_bot_policy_cache: dict[str, tuple[float, dict]] = {}
+_BOT_POLICY_TTL = 60.0  # seconds
+
+
+def _get_bot_policy(tenant_id: str) -> dict:
+    """Return the bot_policy sub-dict from the tenant config, cached for 60s."""
+    now = time.monotonic()
+    cached = _bot_policy_cache.get(tenant_id)
+    if cached and now - cached[0] < _BOT_POLICY_TTL:
+        return cached[1]
+    try:
+        region = os.getenv("AWS_REGION", "us-west-2")
+        config = get_tenant_row(tenant_id, region)
+        policy = config.get("bot_policy", {})
+    except KeyError:
+        policy = {}
+    _bot_policy_cache[tenant_id] = (now, policy)
+    return policy
+
+
+def _bot_allowed(policy: dict, bot_id: str, channel_id: str | None) -> bool:
+    """Evaluate the four-tier bot policy. Returns True if the bot is allowed.
+
+    Tier 0 (``allow_all_bots``) is the "magical default" for new tenants:
+    any bot can trigger the agent without explicit configuration, so
+    PagerDuty/Datadog alerts get auto-triaged. Missing-key defaults to
+    ``False`` so existing tenants that pre-date this field keep the
+    conservative posture until they explicitly opt in (their DDB row
+    simply doesn't have the key).
+    """
+    # Tier 0: fully open — any bot allowed (new-tenant default)
+    if policy.get("allow_all_bots", False):
+        return True
+    # Tier 1: explicitly trusted bots
+    if bot_id in policy.get("trusted_bot_ids", []):
+        return True
+    # Tier 2: open channels where any bot can trigger
+    if channel_id and channel_id in policy.get("open_channels", []):
+        return True
+    # Tier 3: default — block
+    return False
 
 
 @app.get("/healthz")
@@ -131,6 +184,22 @@ async def slack_events(request: Request, background: BackgroundTasks):
             inbound.workspace_id,
         )
         return {"ok": True}
+
+    # 5b. Bot policy filtering — must happen before dispatch to save Bedrock
+    #     spend on bot loops. Also filter our own app's messages.
+    bot_id = inbound.metadata.get("bot_id")
+    if bot_id:
+        app_id = inbound.metadata.get("app_id")
+        if _SLACK_APP_ID and app_id == _SLACK_APP_ID:
+            log.debug("slack_events: dropping self-message app_id=%s", app_id)
+            return {"ok": True}
+        policy = _get_bot_policy(tenant_id)
+        if not _bot_allowed(policy, bot_id, inbound.channel_id):
+            log.info(
+                "slack_events: bot_id=%s blocked by policy for tenant=%s channel=%s",
+                bot_id, tenant_id, inbound.channel_id,
+            )
+            return {"ok": True}
 
     background.add_task(dispatch_async, slack, inbound, client, tenant_id)
     return await slack.ack(request)

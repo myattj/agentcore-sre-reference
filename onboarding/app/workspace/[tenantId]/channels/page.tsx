@@ -7,8 +7,6 @@
  * (including any existing channel personas). The ChannelTabs client
  * component provides a tab per channel with inline editing.
  */
-import Link from "next/link";
-
 import { BridgeApiError, getTenant, listChannels } from "@/lib/bridge";
 import { getBridgeInstallUrl } from "@/lib/env";
 import { requireSession } from "@/lib/session";
@@ -52,9 +50,12 @@ export default async function ChannelsPage({
       <header className="mb-8">
         <h1 className="mb-2 text-2xl font-semibold tracking-tight">Channels</h1>
         <p className="text-sm text-[color:var(--muted)]">
-          Channels the bot can see in your Slack workspace. Invite @agent-core
-          to a channel in Slack and refresh this page to add it. Select a tab
-          below to customize the bot&apos;s persona per channel.
+          By default the bot works in any channel it&apos;s invited to,
+          with one shared memory across all of them. Use this page to
+          override the prompt, tools, or what gets remembered for a
+          specific channel — e.g. a strict persona for #sre-alerts, or
+          a narrower toolset for #ask-data. Most teams don&apos;t need
+          this on day one.
         </p>
       </header>
 
@@ -105,21 +106,6 @@ export default async function ChannelsPage({
           config={config}
         />
       ) : null}
-
-      <footer className="mt-12 flex items-center justify-between border-t border-[color:var(--border)] pt-6">
-        <Link
-          href={`/onboarding/${encodeURIComponent(tenantId)}/config`}
-          className="text-sm text-[color:var(--muted)] hover:text-[color:var(--foreground)]"
-        >
-          &larr; Back to config
-        </Link>
-        <Link
-          href={`/onboarding/${encodeURIComponent(tenantId)}/integrations`}
-          className="rounded-full border border-[color:var(--border)] px-5 py-2 text-sm font-medium hover:bg-[color:var(--card)]"
-        >
-          Next: integrations &rarr;
-        </Link>
-      </footer>
     </div>
   );
 }

@@ -8,7 +8,7 @@
  */
 "use client";
 
-import { useState, useTransition } from "react";
+import { useCallback, useState } from "react";
 
 import {
   KNOWN_CATALOG_TOOLS,
@@ -16,6 +16,7 @@ import {
   type ChannelPersona,
   type TenantConfig,
 } from "@/lib/types";
+import { type AutoSaveStatus, useAutoSave } from "@/lib/useAutoSave";
 
 import { type SaveChannelResult, saveChannelPersona } from "./actions";
 
@@ -24,12 +25,6 @@ const KNOWN_MEMORY_RULES = [
   { id: "facts", label: "Facts", description: "Extract factual statements from conversation." },
   { id: "faq_in_channel", label: "FAQ in channel", description: "Store every Q&A pair as an FAQ for this channel." },
 ];
-
-type Status =
-  | { kind: "idle" }
-  | { kind: "pending" }
-  | { kind: "saved" }
-  | { kind: "error"; message: string };
 
 type Props = {
   tenantId: string;
@@ -106,8 +101,26 @@ function ChannelPanel({
     persona.memory_rules ?? baseConfig.memory.extraction.rules,
   );
   const [useCustomRules, setUseCustomRules] = useState(persona.memory_rules != null);
-  const [status, setStatus] = useState<Status>({ kind: "idle" });
-  const [isPending, startTransition] = useTransition();
+
+  const data: ChannelPersona = {
+    system_prompt: useCustomPrompt ? systemPrompt : null,
+    allowed_tools: useCustomTools ? allowedTools : null,
+    memory_rules: useCustomRules ? memoryRules : null,
+  };
+
+  const save = useCallback(
+    async (patch: ChannelPersona): Promise<{ ok: boolean; error?: string }> => {
+      const result: SaveChannelResult = await saveChannelPersona(
+        tenantId,
+        channelId,
+        patch,
+      );
+      return result.ok ? { ok: true } : { ok: false, error: result.error };
+    },
+    [tenantId, channelId],
+  );
+
+  const status = useAutoSave(data, save);
 
   function toggleTool(toolId: string) {
     setAllowedTools((current) =>
@@ -125,36 +138,15 @@ function ChannelPanel({
     );
   }
 
-  function onSave() {
-    if (isPending) return;
-    setStatus({ kind: "pending" });
-
-    const patch: ChannelPersona = {
-      system_prompt: useCustomPrompt ? systemPrompt : null,
-      allowed_tools: useCustomTools ? allowedTools : null,
-      memory_rules: useCustomRules ? memoryRules : null,
-    };
-
-    startTransition(async () => {
-      const result: SaveChannelResult = await saveChannelPersona(
-        tenantId,
-        channelId,
-        patch,
-      );
-      if (result.ok) {
-        setStatus({ kind: "saved" });
-      } else {
-        setStatus({ kind: "error", message: result.error });
-      }
-    });
-  }
-
   return (
     <div className="space-y-6 p-5">
-      <p className="text-xs text-[color:var(--muted)]">
-        Overrides for <strong>#{channelName}</strong> ({channelId}). Leave a
-        section unchecked to inherit from the tenant-level defaults.
-      </p>
+      <div className="flex items-center justify-between">
+        <p className="text-xs text-[color:var(--muted)]">
+          Overrides for <strong>#{channelName}</strong> ({channelId}). Leave a
+          section unchecked to inherit from the tenant-level defaults.
+        </p>
+        <StatusIndicator status={status} />
+      </div>
 
       {/* System prompt override */}
       <div className="space-y-2">
@@ -165,23 +157,26 @@ function ChannelPanel({
             onChange={(e) => {
               setUseCustomPrompt(e.target.checked);
               if (!e.target.checked) setSystemPrompt("");
-              setStatus({ kind: "idle" });
             }}
             className="h-4 w-4 rounded border-[color:var(--border)] text-[color:var(--accent)]"
           />
           Custom system prompt
         </label>
         {useCustomPrompt ? (
-          <textarea
-            rows={4}
-            value={systemPrompt}
-            onChange={(e) => {
-              setSystemPrompt(e.target.value);
-              setStatus({ kind: "idle" });
-            }}
-            placeholder={baseConfig.system_prompt}
-            className="w-full rounded-lg border border-[color:var(--border)] bg-white p-3 font-mono text-sm shadow-sm focus:border-[color:var(--accent)] focus:outline-none focus:ring-2 focus:ring-[color:var(--accent)]/20"
-          />
+          <>
+            <textarea
+              rows={4}
+              value={systemPrompt}
+              onChange={(e) => setSystemPrompt(e.target.value)}
+              placeholder={"You are the SRE on-call assistant for #" + channelName + ". When someone says /oncall-start, search this channel for active incidents and summarize with action items."}
+              className="w-full rounded-lg border border-[color:var(--border)] bg-white p-3 font-mono text-sm shadow-sm focus:border-[color:var(--accent)] focus:outline-none focus:ring-2 focus:ring-[color:var(--accent)]/20"
+            />
+            <p className="text-[10px] text-[color:var(--muted)]">
+              Define this channel&apos;s personality, team-specific workflows,
+              and behavioral rules. This replaces the tenant-level prompt for
+              messages in this channel.
+            </p>
+          </>
         ) : (
           <p className="text-xs italic text-[color:var(--muted)]">
             Using tenant default: &ldquo;{baseConfig.system_prompt.slice(0, 80)}
@@ -201,7 +196,6 @@ function ChannelPanel({
               if (!e.target.checked) {
                 setAllowedTools(baseConfig.catalog.allowed_tools);
               }
-              setStatus({ kind: "idle" });
             }}
             className="h-4 w-4 rounded border-[color:var(--border)] text-[color:var(--accent)]"
           />
@@ -215,10 +209,7 @@ function ChannelPanel({
                   <input
                     type="checkbox"
                     checked={allowedTools.includes(tool.id)}
-                    onChange={() => {
-                      toggleTool(tool.id);
-                      setStatus({ kind: "idle" });
-                    }}
+                    onChange={() => toggleTool(tool.id)}
                     className="mt-0.5 h-4 w-4 rounded border-[color:var(--border)] text-[color:var(--accent)]"
                   />
                   <div className="min-w-0 flex-1">
@@ -236,7 +227,11 @@ function ChannelPanel({
         )}
       </div>
 
-      {/* Memory rules override */}
+      {/* Memory rules override — what to remember in this channel.
+          Note: this controls *what* the agent extracts, not *where* it
+          stores the memory. All channels share one memory brain by
+          default; isolation lives on tenant-level ``memory.isolated_channels``
+          and is set via the bot's ``manage_config`` tool. */}
       <div className="space-y-2">
         <label className="flex items-center gap-2 text-sm font-medium">
           <input
@@ -247,11 +242,10 @@ function ChannelPanel({
               if (!e.target.checked) {
                 setMemoryRules(baseConfig.memory.extraction.rules);
               }
-              setStatus({ kind: "idle" });
             }}
             className="h-4 w-4 rounded border-[color:var(--border)] text-[color:var(--accent)]"
           />
-          Custom memory rules
+          Custom: what to remember in this channel
         </label>
         {useCustomRules ? (
           <ul className="space-y-1.5">
@@ -261,10 +255,7 @@ function ChannelPanel({
                   <input
                     type="checkbox"
                     checked={memoryRules.includes(rule.id)}
-                    onChange={() => {
-                      toggleRule(rule.id);
-                      setStatus({ kind: "idle" });
-                    }}
+                    onChange={() => toggleRule(rule.id)}
                     className="mt-0.5 h-4 w-4 rounded border-[color:var(--border)] text-[color:var(--accent)]"
                   />
                   <div className="min-w-0 flex-1">
@@ -281,26 +272,25 @@ function ChannelPanel({
           </p>
         )}
       </div>
-
-      {/* Save */}
-      <div className="flex items-center gap-4 border-t border-[color:var(--border)] pt-4">
-        <button
-          type="button"
-          onClick={onSave}
-          disabled={isPending}
-          className="rounded-full bg-[color:var(--accent)] px-5 py-2 text-sm font-medium text-white shadow-sm transition hover:bg-[color:var(--accent-hover)] disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          {isPending ? "Saving..." : "Save channel config"}
-        </button>
-        {status.kind === "saved" ? (
-          <span className="text-sm text-green-600">Saved.</span>
-        ) : null}
-        {status.kind === "error" ? (
-          <span className="text-sm text-red-600">
-            Couldn&apos;t save: {status.message}
-          </span>
-        ) : null}
-      </div>
     </div>
+  );
+}
+
+function StatusIndicator({ status }: { status: AutoSaveStatus }) {
+  if (status.kind === "idle") return null;
+  return (
+    <span className="text-xs">
+      {status.kind === "saving" ? (
+        <span className="text-[color:var(--muted)]">Saving...</span>
+      ) : null}
+      {status.kind === "saved" ? (
+        <span className="text-green-600">Saved</span>
+      ) : null}
+      {status.kind === "error" ? (
+        <span className="text-red-600">
+          Couldn&apos;t save: {status.message}
+        </span>
+      ) : null}
+    </span>
   );
 }
