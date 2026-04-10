@@ -160,12 +160,13 @@ export class DataStack extends Stack {
       description: 'Grants the AgentCore runtime role read/write to the data layer tables and read on tenant secrets.',
       statements: [
         new PolicyStatement({
-          sid: 'TenantConfigRead',
+          sid: 'TenantConfigReadWrite',
           effect: Effect.ALLOW,
           actions: [
             'dynamodb:GetItem',
             'dynamodb:BatchGetItem',
             'dynamodb:Query',
+            'dynamodb:UpdateItem',  // spend_tracker.py: atomic increment of monthly_spend_cents
           ],
           resources: [
             this.tenantsTable.tableArn,

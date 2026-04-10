@@ -63,6 +63,11 @@ class HeartbeatConfigOut(BaseModel):
     max_background_seconds: int = 3600
 
 
+class CostCapConfigOut(BaseModel):
+    monthly_limit_dollars: float = 50.0
+    enabled: bool = True
+
+
 class ChannelPersonaOut(BaseModel):
     """Per-channel overrides. Mirrors ``coreAgent.tenant.ChannelPersona``."""
     system_prompt: str | None = None
@@ -87,6 +92,7 @@ class TenantConfigOut(BaseModel):
     byo: ByoConfigOut = Field(default_factory=ByoConfigOut)
     memory: MemoryConfigOut = Field(default_factory=MemoryConfigOut)
     heartbeat: HeartbeatConfigOut = Field(default_factory=HeartbeatConfigOut)
+    cost_cap: CostCapConfigOut = Field(default_factory=CostCapConfigOut)
     channels: dict[str, ChannelPersonaOut] = Field(default_factory=dict)
 
 
@@ -134,6 +140,12 @@ class HeartbeatConfigPatch(BaseModel):
     max_background_seconds: int | None = None
 
 
+class CostCapConfigPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    monthly_limit_dollars: float | None = None
+    enabled: bool | None = None
+
+
 class ChannelPersonaPatch(BaseModel):
     """Per-channel persona overrides for PATCH. Mirrors ``ChannelPersonaOut``."""
     model_config = ConfigDict(extra="forbid")
@@ -159,6 +171,7 @@ class TenantConfigPatch(BaseModel):
     byo: ByoConfigPatch | None = None
     memory: MemoryConfigPatch | None = None
     heartbeat: HeartbeatConfigPatch | None = None
+    cost_cap: CostCapConfigPatch | None = None
     channels: dict[str, ChannelPersonaPatch] | None = None
 
 

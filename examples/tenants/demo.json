@@ -28,6 +28,10 @@
     "busy_threshold": 1,
     "max_background_seconds": 3600
   },
+  "cost_cap": {
+    "monthly_limit_dollars": 50.0,
+    "enabled": true
+  },
   "channels": {
     "C_ASK_DATA": {
       "system_prompt": "You are a data team Q&A bot. Answer questions about data pipelines, schemas, and dashboards. Search docs and team history before answering.",

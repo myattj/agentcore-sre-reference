@@ -84,6 +84,22 @@ class HeartbeatConfig(BaseModel):
     max_background_seconds: int = 3600
 
 
+class CostCapConfig(BaseModel):
+    """Per-tenant monthly cost cap. Enforced at invocation time in main.py.
+
+    When ``enabled`` is True, the agent checks accumulated spend for the
+    current calendar month before building the Agent. If spend exceeds
+    ``monthly_limit_dollars``, the invocation is blocked with a friendly
+    message and no Bedrock tokens are consumed.
+
+    The running spend counter lives on the DynamoDB tenant row as
+    top-level attributes (``monthly_spend_cents``, ``spend_month``),
+    NOT inside the config blob. See ``spend_tracker.py``.
+    """
+    monthly_limit_dollars: float = 50.0
+    enabled: bool = True
+
+
 class ChannelPersona(BaseModel):
     """Per-channel overrides. When present, these fields REPLACE (not merge)
     the tenant-level defaults for invocations in this channel. ``None``
@@ -107,6 +123,7 @@ class TenantConfig(BaseModel):
     byo: ByoConfig = Field(default_factory=ByoConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     heartbeat: HeartbeatConfig = Field(default_factory=HeartbeatConfig)
+    cost_cap: CostCapConfig = Field(default_factory=CostCapConfig)
     channels: dict[str, ChannelPersona] = Field(default_factory=dict)
 
 

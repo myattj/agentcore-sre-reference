@@ -9,6 +9,10 @@
     "bot_user": {
       "display_name": "agent-core",
       "always_online": true
+    },
+    "assistant_view": {
+      "assistant_description": "Internal-ops AI agent for alert triage, team Q&A, and workflow automation.",
+      "suggested_prompts": []
     }
   },
   "oauth_config": {
@@ -18,6 +22,7 @@
     "scopes": {
       "bot": [
         "app_mentions:read",
+        "assistant:write",
         "chat:write",
         "channels:history",
         "channels:read",

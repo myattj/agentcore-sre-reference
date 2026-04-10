@@ -73,6 +73,7 @@ log = logging.getLogger(__name__)
 # week-2 entry. Add new scopes here as features land.
 _SCOPES = ",".join([
     "app_mentions:read",
+    "assistant:write",  # required for assistant.threads.setStatus (thinking indicator)
     "chat:write",
     "channels:history",
     "channels:read",  # required for users.conversations on public channels

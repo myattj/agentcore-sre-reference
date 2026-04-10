@@ -16,6 +16,13 @@ import json
 import logging
 import os
 
+# Configure root logger so our app-level log.warning/info calls
+# actually appear in container stdout (uvicorn only configures its own).
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(levelname)s:%(name)s: %(message)s",
+)
+
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 
 from .adapters.debug import DebugAdapter

@@ -46,6 +46,11 @@ export type HeartbeatConfig = {
   max_background_seconds: number;
 };
 
+export type CostCapConfig = {
+  monthly_limit_dollars: number;
+  enabled: boolean;
+};
+
 export type ChannelPersona = {
   system_prompt?: string | null;
   allowed_tools?: string[] | null;
@@ -60,6 +65,7 @@ export type TenantConfig = {
   byo: ByoConfig;
   memory: MemoryConfig;
   heartbeat: HeartbeatConfig;
+  cost_cap: CostCapConfig;
   channels: Record<string, ChannelPersona>;
 };
 
@@ -71,6 +77,7 @@ export type TenantConfigPatch = Partial<{
   byo: Partial<ByoConfig>;
   memory: Partial<MemoryConfig>;
   heartbeat: Partial<HeartbeatConfig>;
+  cost_cap: Partial<CostCapConfig>;
   channels: Record<string, ChannelPersona>;
 }>;
 

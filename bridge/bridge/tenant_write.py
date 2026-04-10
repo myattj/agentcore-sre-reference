@@ -50,10 +50,22 @@ import json
 import logging
 import os
 from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
 log = logging.getLogger(__name__)
+
+
+def _floats_to_decimals(obj: Any) -> Any:
+    """Recursively convert float values to Decimal for DynamoDB compatibility."""
+    if isinstance(obj, float):
+        return Decimal(str(obj))
+    if isinstance(obj, dict):
+        return {k: _floats_to_decimals(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_floats_to_decimals(v) for v in obj]
+    return obj
 
 
 # ----------------------------------------------------------------------------
@@ -106,6 +118,10 @@ def build_default_config_dict(tenant_id: str) -> dict[str, Any]:
             "busy_threshold": 1,
             "max_background_seconds": 3600,
         },
+        "cost_cap": {
+            "monthly_limit_dollars": 50,
+            "enabled": True,
+        },
         "channels": {},
     }
 
@@ -118,7 +134,7 @@ def build_default_config_dict(tenant_id: str) -> dict[str, Any]:
 # wholesale-replaced. A PATCH like `{"catalog": {"allowed_tools": [...]}}`
 # should preserve `catalog.tool_config`; Pydantic's `model_copy(update=...)`
 # is SHALLOW and would drop the sibling field.
-_DEEP_MERGE_FIELDS = frozenset({"catalog", "byo", "memory", "heartbeat", "channels"})
+_DEEP_MERGE_FIELDS = frozenset({"catalog", "byo", "memory", "heartbeat", "cost_cap", "channels"})
 
 
 def deep_merge(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
@@ -279,7 +295,7 @@ def upsert_default_tenant_row(tenant_id: str, region: str) -> None:
         ),
         ExpressionAttributeNames={"#config": "config"},
         ExpressionAttributeValues={
-            ":config": build_default_config_dict(tenant_id),
+            ":config": _floats_to_decimals(build_default_config_dict(tenant_id)),
             ":now": now,
         },
     )
@@ -359,7 +375,7 @@ def update_tenant_row(
             ConditionExpression="attribute_exists(tenant_id)",
             ExpressionAttributeNames={"#config": "config"},
             ExpressionAttributeValues={
-                ":config": full_config,
+                ":config": _floats_to_decimals(full_config),
                 ":now": now,
             },
         )

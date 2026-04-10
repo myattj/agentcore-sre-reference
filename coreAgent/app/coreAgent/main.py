@@ -36,7 +36,9 @@ from audit import build_audit_store
 from mcp_client.client import build_byo_mcp_client
 from memory_store import InMemoryStore, extract_records
 from model.load import load_model
+from pricing import compute_cost_cents
 from runtime import app
+from spend_tracker import build_spend_tracker
 from tenant import load_tenant_config
 from tools import build_catalog_tools
 
@@ -63,6 +65,9 @@ _USER_PREF_STRATEGY_ID = os.getenv("AGENTCORE_USER_PREF_STRATEGY_ID", "")
 # Shared with tools.py (same factory call, same backend configuration) so
 # tool-level and invocation-level rows land in the same place.
 _audit = build_audit_store()
+
+# Spend tracker for per-tenant cost caps. Same env-var wiring as audit.
+_spend = build_spend_tracker()
 
 
 def _iso_now() -> str:
@@ -246,10 +251,31 @@ async def invoke(payload, context):
     input_tokens = 0
     output_tokens = 0
     model_id = ""
+    config = None  # set inside try; guarded in finally for spend tracking
 
     try:
         config = load_tenant_config(tenant_id)
         model_id = config.model_id
+
+        # Cost-cap pre-flight check: reject the invocation before any
+        # Bedrock spend if the tenant has exceeded their monthly cap.
+        if config.cost_cap.enabled:
+            cap_cents = int(config.cost_cap.monthly_limit_dollars * 100)
+            allowed, current_spend = _spend.check_budget(tenant_id, cap_cents)
+            if not allowed:
+                cap_msg = (
+                    f"Your organization has reached its monthly usage cap "
+                    f"(${config.cost_cap.monthly_limit_dollars:.2f}). "
+                    f"Please contact your administrator to increase the limit "
+                    f"or wait until the next billing period."
+                )
+                log.info(
+                    "Cost cap exceeded for tenant=%s spend=%d cap=%d",
+                    tenant_id, current_spend, cap_cents,
+                )
+                yield cap_msg
+                success = True  # not an error — deliberate block
+                return
 
         # Channel persona merge: override system_prompt, allowed_tools, and
         # memory rules when a ChannelPersona is configured for this channel.
@@ -388,6 +414,23 @@ async def invoke(payload, context):
             })
         except Exception as audit_exc:  # pragma: no cover
             log.warning("invoke: audit write dropped for invocation_id=%s: %s", invocation_id, audit_exc)
+
+        # Record spend for cost-cap tracking (post-invocation).
+        # Only records when tokens were actually consumed. Best-effort —
+        # the tracker swallows exceptions so a DDB hiccup doesn't break
+        # the response that already streamed.
+        # Guard on `config` existing — if load_tenant_config raised, skip.
+        try:
+            if (
+                config is not None
+                and config.cost_cap.enabled
+                and success
+                and (input_tokens or output_tokens)
+            ):
+                cost_cents = compute_cost_cents(model_id, input_tokens, output_tokens)
+                _spend.record_spend(tenant_id, cost_cents)
+        except Exception as spend_exc:  # pragma: no cover
+            log.warning("invoke: spend recording failed for invocation_id=%s: %s", invocation_id, spend_exc)
 
         request_context.clear_context()
 
