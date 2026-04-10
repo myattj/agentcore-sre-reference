@@ -21,10 +21,15 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 from typing import Any
 
 import httpx
+
+from .gateway_jwt import mint_token
+
+log = logging.getLogger(__name__)
 
 
 def _parse_sse_text(text: str) -> str:
@@ -98,7 +103,25 @@ class AgentCoreClient:
         prompt: str,
         ctx: dict[str, Any] | None = None,
     ) -> str:
-        payload = {"tenant_id": tenant_id, "prompt": prompt, "ctx": ctx or {}}
+        ctx = dict(ctx or {})
+        # Mint a fresh per-invocation JWT for the AgentCore Gateway
+        # CUSTOM_JWT authorizer. The agent forwards this on every MCP
+        # call as `Authorization: Bearer <jwt>`. Best-effort: if minting
+        # fails (e.g. missing key in production misconfiguration), we
+        # log and proceed without the JWT — BYO calls will then fail
+        # with a 401 from the Gateway, which is louder than silently
+        # falling back to no auth and producing wrong-tenant data.
+        try:
+            ctx["gateway_jwt"] = mint_token(tenant_id)
+        except Exception as e:  # noqa: BLE001
+            log.warning(
+                "invoke: failed to mint Gateway JWT for tenant=%s: %s "
+                "(BYO tool calls will be unauthenticated)",
+                tenant_id,
+                e,
+            )
+
+        payload = {"tenant_id": tenant_id, "prompt": prompt, "ctx": ctx}
 
         if self.local_agent_url:
             return await self._invoke_local(payload)

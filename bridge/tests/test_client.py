@@ -109,7 +109,13 @@ async def test_invoke_aws_parses_streaming_body_iterator():
     call_kwargs = fake_client.invoke_agent_runtime.call_args.kwargs
     assert call_kwargs["agentRuntimeArn"] == "arn:aws:bedrock-agentcore:us-west-2:0:runtime/test"
     payload = json.loads(call_kwargs["payload"].decode("utf-8"))
-    assert payload == {"tenant_id": "demo", "prompt": "hi", "ctx": {}}
+    # ctx now carries a per-invocation Gateway JWT minted by gateway_jwt
+    # (week 4 chunk A). Asserting on its presence + tenant_id claim is
+    # done in test_invoke_injects_gateway_jwt below; here we just check
+    # that the rest of the payload shape is unchanged.
+    assert payload["tenant_id"] == "demo"
+    assert payload["prompt"] == "hi"
+    assert "gateway_jwt" in payload["ctx"]
 
 
 @pytest.mark.asyncio
@@ -130,5 +136,86 @@ async def test_invoke_aws_parses_streaming_body_read():
     assert result == "single chunk"
     payload = json.loads(fake_client.invoke_agent_runtime.call_args.kwargs["payload"].decode("utf-8"))
     assert payload["ctx"]["user_id"] == "u1"
+    # gateway_jwt is added but the original ctx fields are preserved.
+    assert "gateway_jwt" in payload["ctx"]
     # runtimeUserId should be propagated from ctx.user_id
     assert fake_client.invoke_agent_runtime.call_args.kwargs["runtimeUserId"] == "u1"
+
+
+# ---------------------------------------------------------------------------
+# Gateway JWT injection (week 4 chunk A)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_invoke_injects_gateway_jwt_with_correct_tenant_claim():
+    """Every invoke() call must mint a fresh JWT carrying the call's
+    tenant_id, so the AgentCore Gateway interceptor can route to the
+    right target."""
+    import jwt as pyjwt
+
+    from bridge.gateway_jwt import JWT_AUDIENCE, get_jwks
+
+    fake_client = MagicMock()
+    fake_client.invoke_agent_runtime.return_value = {"response": iter([b'data: "ok"\n\n'])}
+    client = AgentCoreClient(runtime_arn="arn:aws:bedrock-agentcore:us-west-2:0:runtime/test")
+
+    with patch("boto3.client", return_value=fake_client):
+        await client.invoke(tenant_id="slack-acme", prompt="hi", ctx={})
+
+    payload = json.loads(fake_client.invoke_agent_runtime.call_args.kwargs["payload"].decode("utf-8"))
+    token = payload["ctx"]["gateway_jwt"]
+    assert token.count(".") == 2
+
+    # Verify against the published JWKS — the same path the Gateway uses.
+    jwks = get_jwks()
+    public_key = pyjwt.PyJWK(jwks["keys"][0]).key
+    claims = pyjwt.decode(
+        token,
+        public_key,
+        algorithms=["RS256"],
+        audience=JWT_AUDIENCE,
+        issuer="http://localhost:8000",
+    )
+    assert claims["tenant_id"] == "slack-acme"
+    assert claims["sub"] == "slack-acme"
+
+
+@pytest.mark.asyncio
+async def test_invoke_jwt_failure_does_not_block_call(monkeypatch):
+    """If JWT minting blows up (misconfigured prod), invoke() must still
+    deliver the request — BYO calls will fail at the Gateway with 401,
+    which is louder than silently dropping the user's prompt."""
+    from bridge import client as client_module
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("missing key")
+
+    monkeypatch.setattr(client_module, "mint_token", boom)
+
+    fake_client = MagicMock()
+    fake_client.invoke_agent_runtime.return_value = {"response": iter([b'data: "still here"\n\n'])}
+    client = AgentCoreClient(runtime_arn="arn:aws:bedrock-agentcore:us-west-2:0:runtime/test")
+
+    with patch("boto3.client", return_value=fake_client):
+        result = await client.invoke(tenant_id="slack-acme", prompt="hi", ctx={})
+
+    assert result == "still here"
+    payload = json.loads(fake_client.invoke_agent_runtime.call_args.kwargs["payload"].decode("utf-8"))
+    assert "gateway_jwt" not in payload["ctx"]
+
+
+@pytest.mark.asyncio
+async def test_invoke_does_not_mutate_caller_ctx():
+    """The caller's ctx dict must not be modified in place — invoke()
+    builds its own copy so background tasks dispatching multiple calls
+    don't see cross-contamination."""
+    fake_client = MagicMock()
+    fake_client.invoke_agent_runtime.return_value = {"response": iter([b'data: "ok"\n\n'])}
+    client = AgentCoreClient(runtime_arn="arn:aws:bedrock-agentcore:us-west-2:0:runtime/test")
+
+    caller_ctx = {"user_id": "u1"}
+    with patch("boto3.client", return_value=fake_client):
+        await client.invoke(tenant_id="slack-acme", prompt="hi", ctx=caller_ctx)
+
+    assert "gateway_jwt" not in caller_ctx
+    assert caller_ctx == {"user_id": "u1"}

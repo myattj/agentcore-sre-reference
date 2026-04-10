@@ -1,0 +1,26 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "gateway-interceptor"
+version = "0.1.0"
+description = "AgentCore Gateway request interceptor Lambda — verifies the bridge-minted JWT and enforces per-target tenant isolation."
+requires-python = ">=3.13,<3.14"
+dependencies = [
+    # Same crypto stack as the bridge — verifies JWTs minted by
+    # bridge/bridge/gateway_jwt.py against the bridge's published JWKS.
+    "pyjwt[crypto] >= 2.8",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest >= 8.0",
+    "cryptography >= 42.0",  # for generating test keys
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["gateway_interceptor"]

@@ -1,0 +1,38 @@
+{
+  "tenant_id": "slack-smoketest",
+  "model_id": "global.anthropic.claude-sonnet-4-6",
+  "system_prompt": "You are the smoke-test bot. Be brief.",
+  "catalog": {
+    "allowed_tools": [
+      "echo"
+    ],
+    "tool_config": {
+      "echo": {
+        "prefix": "[smoke]"
+      }
+    }
+  },
+  "byo": {
+    "enabled": false,
+    "gateway_endpoint": null,
+    "gateway_auth": null
+  },
+  "memory": {
+    "triggers": {
+      "message_count": 6,
+      "token_count": 1000,
+      "idle_timeout_seconds": 1800
+    },
+    "namespace": "tenants/slack-smoketest",
+    "extraction": {
+      "enabled": true,
+      "rules": [
+        "facts"
+      ]
+    }
+  },
+  "heartbeat": {
+    "busy_threshold": 1,
+    "max_background_seconds": 3600
+  }
+}

@@ -1,5 +1,5 @@
 {
-  "_comment": "Slack app manifest for the Model A shared app. Paste this into api.slack.com → Create New App → From an app manifest. Before pasting, replace REPLACE_ME.ngrok-free.app with your current ngrok hostname. Keep oauth_config.scopes.bot in sync with bridge/bridge/slack_oauth.py::_SCOPES — the bridge rebuilds its authorize URL from that constant, so any drift here silently breaks new installs.",
+  "_comment": "Slack app manifest for the Model A shared app. Paste this into api.slack.com \u2192 Create New App \u2192 From an app manifest. Before pasting, replace REPLACE_ME.ngrok-free.app with your current ngrok hostname. Keep oauth_config.scopes.bot in sync with bridge/bridge/slack_oauth.py::_SCOPES \u2014 the bridge rebuilds its authorize URL from that constant, so any drift here silently breaks new installs.",
   "display_information": {
     "name": "agent-core",
     "description": "Internal-ops AI agent for alert triage, team Q&A, and workflow automation.",
@@ -20,7 +20,9 @@
         "app_mentions:read",
         "chat:write",
         "channels:history",
+        "channels:read",
         "groups:history",
+        "groups:read",
         "im:history",
         "mpim:history",
         "users:read",

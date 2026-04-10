@@ -1,18 +1,13 @@
-"""Memory storage abstraction for the self-managed memory contract.
+"""Memory storage abstraction — local dev fallback.
 
-The product uses AgentCore Memory's **self-managed strategy**: AgentCore is
-just storage and retrieval; we own the extraction pipeline. The same
-`extract_records` function will eventually run inside a Lambda triggered by
-AgentCore Memory's SNS notifications, but for now it runs in-process and
-writes to `InMemoryStore` so the local dev loop has zero infra cost.
+Production path: main.py uses ``AgentCoreMemorySessionManager`` (from the
+``bedrock_agentcore.memory`` SDK) which handles event creation and retrieval
+automatically via Strands hooks. AgentCore's built-in SEMANTIC and
+USER_PREFERENCE strategies handle extraction — no custom Lambda pipeline.
 
-Day-N migration:
-  - Provision AgentCore Memory resource with selfManagedConfiguration
-    pointing at SNS + S3
-  - Move `extract_records` into a Lambda handler that reads SNS notifications,
-    fetches the S3 payload, and calls BatchCreateMemoryRecords
-  - Swap `_memory = InMemoryStore()` to `BatchCreateMemoryRecordsStore` in main.py
-  - main.py stops calling extract_records inline; AgentCore triggers fire it
+Local dev path (AGENT_LOCAL_STORES=1): ``InMemoryStore`` + inline
+``extract_records()`` run in-process so the dev loop has zero AWS cost.
+Records are not persisted across process restarts.
 """
 from __future__ import annotations
 
@@ -41,36 +36,12 @@ class InMemoryStore:
 
     def query(self, namespace: str, query: str, limit: int = 10) -> list[dict[str, Any]]:
         # Naive: return the most recent N records in the namespace, no semantic search.
-        # Real impl in BatchCreateMemoryRecordsStore uses AgentCore's semantic retrieval.
         return list(self._data[namespace][-limit:])
 
 
-class BatchCreateMemoryRecordsStore:
-    """Production implementation backed by AgentCore Memory's BatchCreateMemoryRecords API.
-
-    Stub: raises until the AgentCore Memory resource is provisioned. See
-    Phase 8 in /path/to/project
-    """
-
-    def __init__(self, memory_id: str, region: str = "us-west-2") -> None:
-        self.memory_id = memory_id
-        self.region = region
-
-    def write_records(self, namespace: str, records: list[dict[str, Any]]) -> None:
-        raise NotImplementedError(
-            "Self-managed memory infrastructure not provisioned yet. "
-            "Requires AgentCore Memory resource + SNS topic + S3 bucket + IAM. "
-            "See Phase 8 in the plan."
-        )
-
-    def query(self, namespace: str, query: str, limit: int = 10) -> list[dict[str, Any]]:
-        raise NotImplementedError(
-            "Self-managed memory infrastructure not provisioned yet."
-        )
-
 
 # ----------------------------------------------------------------------------
-# Extraction
+# Extraction (local dev only — production uses built-in strategies)
 # ----------------------------------------------------------------------------
 
 def extract_records(
@@ -112,6 +83,18 @@ def extract_records(
                 "type": "fact_candidate",
                 "content": user_text,
                 "extracted_via": "heuristic_v0",
+            })
+
+    if "faq_in_channel" in rules:
+        # Store every Q+A pair as an FAQ record. The caller (main.py)
+        # handles writing these to a channel-scoped namespace
+        # (tenants/{id}/channels/{channel_id}/faq).
+        if user_text and assistant_text:
+            records.append({
+                "type": "faq",
+                "question": user_text,
+                "answer": assistant_text,
+                "extracted_via": "faq_in_channel_v0",
             })
 
     return records

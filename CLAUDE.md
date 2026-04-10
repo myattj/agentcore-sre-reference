@@ -138,9 +138,11 @@ A single user message, end to end:
    - Constructs a fresh `Agent(model=…, system_prompt=…, tools=[*catalog, mcp_client])` per invocation
    - `agent.stream_async(prompt)` → streams text chunks
    - As chunks stream, accumulates them and **`yield`s** each to the runtime
-6. **Memory extraction** runs after the stream completes:
-   - `extract_records({user, assistant}, rules)` → list of records
-   - `_memory.write_records(namespace, records)` → InMemoryStore for now, real `BatchCreateMemoryRecords` in Phase 8
+6. **Memory** is handled by the `AgentCoreMemorySessionManager` (when `AGENTCORE_MEMORY_ID` is set):
+   - Before agent processing: retrieves relevant long-term memories via semantic search and injects into context
+   - After agent processing: saves the conversation turn as an event via `create_event()`
+   - AgentCore's built-in SEMANTIC + USER_PREFERENCE strategies handle extraction automatically
+   - Local dev fallback (`AGENT_LOCAL_STORES=1`): inline `extract_records()` + `InMemoryStore`
 7. **Bridge** receives the buffered response, calls `adapter.reply(inbound, OutboundMessage(text))`
 8. **Slack adapter** posts the reply via `chat.postMessage` (real impl) or stdout (current stub)
 
@@ -169,19 +171,23 @@ Two layers, both belong to the **agent**, not the bridge:
 **Decision rule:** if it's something every tenant might want (web search, document parsing, math), make it a catalog tool. If it's tenant-specific business logic ("look up a record in Acme's Salesforce"), make it BYO via Gateway.
 
 ### 2. Memory
-**Self-managed strategy.** AgentCore Memory (when provisioned in Phase 8) is just storage and retrieval. **We own the extraction pipeline.** This is critical for the product moat — extraction logic IS the product differentiator.
+**Built-in strategies via AgentCore Memory SDK.** A single shared memory resource (`agentcore_shared_memory`) serves all tenants, provisioned by `infra/data/scripts/provision_memory.py`. Two built-in strategies handle extraction automatically:
 
-Three layers:
+- **SEMANTIC** — extracts factual memories from conversations
+- **USER_PREFERENCE** — extracts user preferences
 
-- **`MemoryStore` protocol** in `memory_store.py` — the storage contract. Two implementations:
-  - `InMemoryStore` (dict-backed) for `agentcore dev` and tests
-  - `BatchCreateMemoryRecordsStore` (stub) for production
-- **`extract_records(turn, rules)`** — applies extraction rules to a single conversation turn, returns records ready for `write_records`. Same shape AgentCore Memory's `BatchCreateMemoryRecords` API expects.
-- **Tenant rules** — `memory.extraction.rules` is a list of rule names (e.g. `["user_preferences", "facts"]`). Each rule maps to a branch in `extract_records`. v0 rules are heuristic; real rules will use a small/fast LLM call.
+The `AgentCoreMemorySessionManager` (from `bedrock_agentcore.memory.integrations.strands`) hooks into the Strands Agent:
+- **Before processing:** retrieves relevant long-term memories via semantic search and injects them into the conversation context
+- **After processing:** saves the conversation turn as an event via `create_event()`; AgentCore's strategies extract records asynchronously
 
-**Day-N migration:** the same `extract_records` function eventually runs inside a Lambda triggered by AgentCore Memory's SNS notifications. Local dev calls it inline; production fires it on configured triggers. The function itself doesn't change.
+**Namespace mapping (workspace-per-channel):**
+- Channels: `actorId = {tenant_id}_{channel_id}` — everyone in a channel shares memory
+- DMs: `actorId = {tenant_id}_{user_id}` — personal memory
+- `sessionId = thread_id` or `invocation_id` — groups a conversation thread
 
-**Per-tenant isolation:** namespace `tenants/{tenant_id}/...` on a single Memory resource. Do NOT create one Memory resource per tenant — quota pain.
+**Per-tenant isolation:** `actorId` prefix ensures `acme_C04INCIDENTS` can't retrieve `widgets_C04ENGINEERING` memories. Do NOT create one Memory resource per tenant — quota pain.
+
+**Local dev fallback (AGENT_LOCAL_STORES=1):** `InMemoryStore` + inline `extract_records()` in `memory_store.py` — zero AWS cost, records lost on restart.
 
 ### 3. Heartbeat
 **`@app.ping` custom handler** in `ping.py` returns `HEALTHY_BUSY` while any background task is in flight, keeping the session alive past the 15-minute idle timeout.
@@ -212,7 +218,7 @@ agentcorePlayground/
 │       ├── tenant.py                # TenantStore Protocol (JSON | DynamoDB); load_tenant_config
 │       ├── tools.py                 # ➕ ADD CATALOG TOOLS HERE (use @audited_tool)
 │       ├── ping.py                  # @app.ping logic + _inflight_tasks set
-│       ├── memory_store.py          # MemoryStore protocol, InMemoryStore, extract_records
+│       ├── memory_store.py          # Local dev: InMemoryStore + extract_records (prod uses SDK session manager)
 │       ├── audit.py                 # AuditStore protocol + Null/InMemory/Dynamo impls
 │       ├── request_context.py       # ContextVar-backed per-invocation context
 │       ├── model/load.py            # Bedrock model loader (tenant-driven model_id)
@@ -221,27 +227,56 @@ agentcorePlayground/
 │   ├── tests/                       # pytest suite (LOCAL_DEV by default, no real AWS)
 │   └── bridge/
 │       ├── main.py                  # ➕ ADD ROUTES HERE for new client transports
+│       ├── api.py                   # /api/tenants/* routes consumed by onboarding UI
+│       ├── api_models.py            # Pydantic TenantConfigOut/Patch + ChannelInfo
+│       ├── tenant_write.py          # GET/UPDATE/upsert helpers + deep_merge for PATCH
+│       ├── slack_channels.py        # users.conversations helper for the channels page
 │       ├── client.py                # boto3 + LOCAL_AGENT_URL fallback + SSE frame parser
 │       ├── tenant_resolver.py       # WorkspaceResolver (JSON | DynamoDB); resolve_tenant_id
 │       ├── async_dispatcher.py      # ack-then-post pattern (Slack 3s rule)
 │       ├── dedup.py                 # Slack retry dedup (InMemoryDedup | DynamoDedup)
 │       ├── slack_token_store.py     # per-tenant bot tokens (env | Secrets Manager)
 │       ├── slack_oauth.py           # /slack/install + /slack/oauth/callback flow
+│       │                            #   + state + session token helpers
 │       └── adapters/
 │           ├── core.py              # Adapter protocol, InboundMessage, OutboundMessage
 │           ├── slack.py             # Slack adapter (HMAC verify + chat.postMessage)
 │           ├── debug.py             # synchronous /debug/message (LOCAL_DEV only)
 │           └── ➕ ADD NEW ADAPTERS HERE (discord.py, teams.py, web.py, …)
+├── onboarding/                      # Next.js 16 onboarding UI (week 3)
+│   ├── package.json                 # standalone JS service; no @aws-sdk deps by design
+│   ├── app/
+│   │   ├── layout.tsx               # root HTML shell
+│   │   ├── page.tsx                 # public landing page with "Add to Slack" button
+│   │   └── onboarding/
+│   │       ├── error/page.tsx       # error landing for `?reason=<slug>`
+│   │       └── [tenantId]/
+│   │           ├── layout.tsx       # 4-step sidebar nav
+│   │           ├── welcome/route.ts # ROUTE HANDLER — sets cookie, redirects
+│   │           ├── config/page.tsx  # ➕ ADD EDITABLE FIELDS HERE
+│   │           ├── config/ConfigForm.tsx  # client form
+│   │           ├── config/actions.ts      # server action → bridge PATCH
+│   │           ├── channels/page.tsx
+│   │           ├── integrations/page.tsx  # ➕ WEEK 4 wires up real connectors
+│   │           └── done/page.tsx
+│   └── lib/
+│       ├── env.ts                   # typed env accessor
+│       ├── session.ts               # HMAC verify (matches bridge _sign_session)
+│       ├── bridge.ts                # server-side fetch wrapper (Authorization: Bearer)
+│       └── types.ts                 # TenantConfig mirror (KEEP IN SYNC — gotcha #21)
 ├── infra/                           # hand-authored infra (NOT CLI-managed)
 │   └── data/                        # CDK app: DynamoDB tables + IAM managed policies
 │       ├── bin/data.ts              # CDK entrypoint, deploys to us-west-2
 │       ├── lib/data-stack.ts        # tenants, workspace_to_tenant, audit_log,
 │       │                            #   processed_events, AgentCoreDataAccess,
-│       │                            #   AgentCoreBridgeDataAccess
+│       │                            #   AgentCoreBridgeDataAccess,
+│       │                            #   AgentCoreOnboardingDataAccess (STUB, unattached)
 │       └── scripts/
 │           ├── seed_tenants.py      # migrate examples/*.json → DDB (uses TenantStore.upsert)
 │           ├── audit_query.py       # ad-hoc CLI: recent / cost / tools subcommands
-│           └── attach_agent_policy.sh  # attach managed policy to agent role post-deploy
+│           ├── attach_agent_policy.sh  # attach managed policy to agent role post-deploy
+│           ├── provision_memory.py  # create shared AgentCore Memory resource + store ID in SSM
+│           └── delete_memory.py     # tear down memory resource + purge SSM params
 └── examples/
     ├── tenants/                     # AGENT_LOCAL_STORES=1 source of truth (one JSON per tenant)
     │   └── demo.json
@@ -263,6 +298,11 @@ agentcorePlayground/
 | Change heartbeat behavior globally | `coreAgent/app/coreAgent/ping.py` |
 | Change DDB table schemas or IAM policy scope | `infra/data/lib/data-stack.ts` — then `npm run deploy` in `infra/data/` |
 | Add a new audit row type or field | `coreAgent/app/coreAgent/audit.py` + the writer call-site in `main.py` or `tools.py` |
+| Add an editable TenantConfig field to the onboarding form | THREE-place edit: (1) `coreAgent/app/coreAgent/tenant.py` (authoritative Pydantic), (2) `bridge/bridge/api_models.py:TenantConfigOut`+`TenantConfigPatch` AND `bridge/bridge/tenant_write.py:build_default_config_dict`, (3) `onboarding/lib/types.ts` + a control in `onboarding/app/onboarding/[tenantId]/config/ConfigForm.tsx`. See gotcha #21. |
+| Change the form labels / styling | `onboarding/app/onboarding/[tenantId]/config/ConfigForm.tsx` |
+| Change the session token TTL | `bridge/bridge/slack_oauth.py:_SESSION_TTL_SECONDS` AND `onboarding/lib/session.ts:SESSION_TTL_SECONDS` (must match — see gotcha #22) |
+| Change what happens after OAuth install | `bridge/bridge/slack_oauth.py:handle_oauth_callback` (the redirect target) |
+| Change the "Coming soon" integration list | `onboarding/app/onboarding/[tenantId]/integrations/page.tsx` |
 
 ---
 
@@ -288,13 +328,19 @@ agentcorePlayground/
 18. **`bridge/bridge/slack_oauth.py:_build_default_config_dict` is a duplicate of `coreAgent.tenant.build_default_config()`.** The bridge and the agent are separate Python packages with separate venvs, so the bridge can't import from coreAgent. **When you change the default tenant config shape in `coreAgent/app/coreAgent/tenant.py`, mirror the change in `slack_oauth.py`** — the file has a "keep in sync" comment block. There's no automated check; it's a discipline thing.
 19. **`/debug/message` is registered ONLY when `LOCAL_DEV=1`.** The production bridge has no `/debug/*` routes at all — zero attack surface. If you need to poke at the deployed bridge, add a header-token-gated route (don't drop the LOCAL_DEV-only conditional).
 20. **Bridge imports are isolated from coreAgent imports.** They're separate packages with separate venvs (`bridge/.venv` vs `coreAgent/app/coreAgent/.venv`). Don't try to `from coreAgent.tenant import ...` from the bridge — duplicate the small amounts of shared shape with cross-reference comments instead. The seed script (`infra/data/scripts/seed_tenants.py`) is the one place that imports from coreAgent, and it does so by injecting `coreAgent/app/coreAgent/` onto `sys.path` at runtime.
+21. **Tenant config shape lives in THREE places now (week 3).** (1) authoritative Pydantic in `coreAgent/app/coreAgent/tenant.py:TenantConfig`, (2) bridge-side Pydantic in `bridge/bridge/api_models.py:TenantConfigOut`/`TenantConfigPatch` PLUS the default-shape dict in `bridge/bridge/tenant_write.py:build_default_config_dict`, (3) TypeScript mirror in `onboarding/lib/types.ts`. The bridge Pydantic is the runtime validation boundary — bad shapes from the onboarding UI surface as 422 from `PATCH /api/tenants/{id}` rather than as silent corruption. Still: when you add a field, update all three in one commit. There's no automated parity check; it's a discipline thing. The week 2 default-prompt bug (`system_prompt=""`) is the kind of thing that happens when only one copy gets updated.
+22. **Onboarding session tokens share `BRIDGE_OAUTH_STATE_SECRET` with OAuth state tokens.** Format `{tenant_id}.{nonce}.{ts}.{hmac}` (4 parts, 60-min TTL) vs state `{nonce}.{ts}.{hmac}` (3 parts, 10-min TTL). Both are HMAC-SHA256 over the same secret. Only the **bridge** mints session tokens (in `slack_oauth.py:make_session_token`); the onboarding UI only verifies (`onboarding/lib/session.ts:verifySessionToken`). The cross-tenant isolation is enforced by `bridge/bridge/api.py:require_session_token`, which asserts the token's embedded tenant matches the URL path's `tenant_id`. Tenant IDs must stay period-free (`make_session_token` asserts this); the OAuth-derived `slack-<team_id.lower()>` format guarantees it today. **Rotating `BRIDGE_OAUTH_STATE_SECRET` invalidates all in-flight installs AND all active onboarding sessions** — users re-run `/slack/install`.
+23. **`AgentCoreOnboardingDataAccess` managed policy in `infra/data/lib/data-stack.ts` is a STUB**, intentionally not attached to any role. The onboarding service runs locally via `npm run dev` and never touches AWS directly. The policy is in CDK so the IAM scaffolding is in place when Phase 8 moves the onboarding UI into a real Fargate task; then attach it to that task role. Narrower than `AgentCoreBridgeDataAccess` — no `processed_events` access, no Secrets Manager writes.
+24. **Onboarding (Next.js) server NEVER talks to AWS directly.** All tenant config reads/writes and Slack channel listings flow through bridge `/api/tenants/*` routes. This is why there's no `@aws-sdk/*` dep in `onboarding/package.json` — if you find yourself adding one, stop and put the logic in the bridge. The benefit: ONE implementation of the DDB merge semantics (in Python, in `bridge/bridge/tenant_write.py:deep_merge`), and ONE place where the validation boundary lives (Pydantic in `bridge/bridge/api_models.py`). The cost: every page render is one network hop bridge-ward, which is fine while everything's local but worth measuring once we deploy.
+25. **Memory provisioning is a one-time operation.** Run `uv run --with boto3 python infra/data/scripts/provision_memory.py` after `npm run deploy` in `infra/data/`. The script creates the shared memory resource and stores the `memory_id` in SSM at `/agentcore/memory/id`. Set `AGENTCORE_MEMORY_ID=<id>` on the agent runtime (via `agentcore.json` envVars or shell). Use `delete_memory.py` to tear down. Memory data (events, extracted records) lives in the AWS resource and survives agent redeploys.
+26. **Next.js 16 server-component tripwires.** (a) `cookies()` is async — `const c = await cookies()`. (b) **You cannot set cookies inside a Server Component.** Cookie modification must happen in a Server Function (server action) or a Route Handler. That's why `onboarding/app/onboarding/[tenantId]/welcome/route.ts` is a `route.ts` not a `page.tsx`. (c) `fetch()` in server components is aggressively cached — `lib/bridge.ts` always passes `cache: "no-store"` or stale config shows up after PATCH. (d) Server actions must call `revalidatePath('/onboarding/${tenantId}/config')` after a successful PATCH or the form re-renders with stale values. (e) `redirect()` works by throwing `NEXT_REDIRECT` — don't wrap `requireSession` in a swallow-all try/catch. (f) `params` and `searchParams` are both `Promise<...>` in pages and route handlers; await them.
 
 ---
 
 ## Local development
 
-Two terminals. Each side has its own local-stores flag — see gotcha #12
-above for why the names are different.
+Three terminals as of week 3. Each side has its own local-stores flag —
+see gotcha #12 above for why the names are different.
 
 ```bash
 # Terminal 1 — agent
@@ -306,7 +352,15 @@ AGENT_LOCAL_STORES=1 agentcore dev --logs         # serves on http://127.0.0.1:8
 # Terminal 2 — bridge
 cd bridge
 LOCAL_DEV=1 LOCAL_AGENT_URL=http://localhost:8080 \
+  BRIDGE_OAUTH_STATE_SECRET=dev-shared-secret-32-chars-long \
+  ONBOARDING_BASE_URL=http://localhost:3000 \
   .venv/bin/uvicorn bridge.main:app --port 8000
+
+# Terminal 3 — onboarding (Next.js, week 3+)
+cd onboarding
+# .env.local: BRIDGE_OAUTH_STATE_SECRET MUST match the bridge's value
+cp .env.example .env.local && $EDITOR .env.local
+npm run dev                                       # serves on http://localhost:3000
 ```
 
 **Smoke test the audit pipeline** by adding `LOCAL_AUDIT=memory` on the agent
@@ -350,6 +404,10 @@ against real AWS instead of `LOCAL_AGENT_URL`:
 cd infra/data && npm install && npm run deploy
 uv run --with boto3 python infra/data/scripts/seed_tenants.py
 
+# Provision the shared memory resource (one-time)
+uv run --with boto3 python infra/data/scripts/provision_memory.py
+# Note the memory_id from the output (also stored in SSM /agentcore/memory/id)
+
 # Deploy the agent
 cd coreAgent && agentcore deploy
 
@@ -384,17 +442,21 @@ Environment variables that control the production path:
 | `SLACK_CLIENT_SECRET` | — | Bridge — shared Slack app's Client Secret |
 | `SLACK_SIGNING_SECRET` | — | Bridge — shared Slack app's Signing Secret (HMAC verification) |
 | `SLACK_REDIRECT_URI` | — | Bridge — public URL of `/slack/oauth/callback` |
-| `BRIDGE_OAUTH_STATE_SECRET` | — | Bridge — HMAC key for OAuth state tokens. Falls back to `SLACK_SIGNING_SECRET` if unset. |
+| `BRIDGE_OAUTH_STATE_SECRET` | — | Bridge **and onboarding** — HMAC key for OAuth state tokens AND week-3 onboarding session tokens. Falls back to `SLACK_SIGNING_SECRET` on the bridge side. The onboarding service requires it explicitly (no fallback). The two services MUST agree or every onboarding session fails with `bad_session`. |
+| `ONBOARDING_BASE_URL` | `http://localhost:3000` | Bridge — public origin of the onboarding Next.js service. The `/slack/oauth/callback` redirects here on success/failure. |
+| `BRIDGE_URL` | — | Onboarding — base URL of the bridge API (`http://localhost:8000` in dev). Server-side only; never exposed to the browser. |
+| `NEXT_PUBLIC_BRIDGE_INSTALL_URL` | — | Onboarding — public URL of `/slack/install` on the bridge, embedded in the landing page "Add to Slack" button. The only `NEXT_PUBLIC_*` var. |
 | `SLACK_BOT_TOKEN` | — | Bridge — LOCAL_DEV-only fallback bot token used by `EnvSlackTokenStore` (production reads per-tenant tokens from Secrets Manager instead) |
+| `AGENTCORE_MEMORY_ID` | — | **Agent** — memory resource ID (e.g. `mem-xxx`). Set after running `provision_memory.py`. When set and `AGENT_LOCAL_STORES` is not `1`, the agent uses `AgentCoreMemorySessionManager` for real persistent memory. When unset, falls back to `InMemoryStore`. |
 
 ---
 
 ## What's NOT done yet (Phase 8+)
 
 In-code work that's still pending:
-- Real **AgentCore Memory resource** + S3 + SNS + IAM + Lambda extraction worker (the self-managed memory infra)
+- ~~Real **AgentCore Memory resource** + extraction pipeline~~ **landed (week 6)**. Uses built-in SEMANTIC + USER_PREFERENCE strategies via `AgentCoreMemorySessionManager` — no custom Lambda/SNS/S3 pipeline needed. Provisioned by `infra/data/scripts/provision_memory.py`. Memory is workspace-per-channel (shared within a channel), per-user for DMs.
 - Real **AgentCore Gateway** provisioning per tenant + worker tooling to register Lambda/OpenAPI targets
-- **Onboarding UI** (week 3) — replaces the placeholder HTML returned by `/slack/oauth/callback`
+- ~~**Onboarding UI** (week 3) — replaces the placeholder HTML returned by `/slack/oauth/callback`~~ **landed (week 3, local-only)**. Production deploy of the `onboarding/` Next.js service (Fargate / Vercel / Amplify) is still pending; the `AgentCoreOnboardingDataAccess` policy is in CDK as a stub waiting to be attached.
 - **Pattern 1 catalog tools** (week 4) — `triage_alert`, Datadog/PagerDuty/GitHub connectors via Gateway
 - **Pattern 2 + 3 catalog tools** (week 5) — Confluence/Notion/Jira/Linear connectors, channel-aware personas, FAQ memory rule
 - **Discord / Teams / web-chat adapters** (post-MVP)

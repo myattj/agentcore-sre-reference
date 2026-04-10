@@ -106,6 +106,8 @@ def audited_tool(name: str):
                 # on a pathological result).
                 try:
                     ctx = get_context()
+                    _ch = ctx.get("channel_id", "")
+                    _th = ctx.get("thread_id", "")
                     row: dict[str, Any] = {
                         "row_type": "tool_call",
                         "tenant_id": ctx.get("tenant_id", "unknown"),
@@ -114,7 +116,7 @@ def audited_tool(name: str):
                         "timestamp": _iso_now(),
                         "created_at": _iso_now(),
                         "user_id": ctx.get("user_id", ""),
-                        "channel_id": ctx.get("channel_id", ""),
+                        "channel_id": _ch,
                         "tool_name": name,
                         "tool_args_summary": _summarize_args(args, kwargs),
                         "tool_result_summary": (
@@ -122,6 +124,10 @@ def audited_tool(name: str):
                         ),
                         "duration_ms": int((time.time() - start) * 1000),
                         "success": success,
+                        "slack_message_link": (
+                            f"https://slack.com/archives/{_ch}/p{_th.replace('.', '')}"
+                            if _ch and _th else ""
+                        ),
                     }
                     _audit.write(row)
                 except Exception as e:  # pragma: no cover
@@ -194,6 +200,73 @@ def start_background_task(duration_seconds: int = 90) -> str:
     return (
         f"Started background task {task_id} for {duration_seconds}s. "
         f"Agent is now HealthyBusy."
+    )
+
+
+@audited_tool("search_team_history")
+def search_team_history(query: str, channel_id: str | None = None, limit: int = 20) -> str:
+    """Search past Slack messages in a channel for messages matching a keyword query.
+
+    Args:
+        query: Keywords to search for in message text.
+        channel_id: Slack channel ID to search. If omitted, uses the current channel.
+        limit: Maximum number of messages to return (default 20, max 100).
+    """
+    from slack_api import fetch_channel_history, get_bot_token
+
+    ctx = get_context()
+    cid = channel_id or ctx.get("channel_id", "")
+    if not cid:
+        return "Error: no channel_id available. Pass channel_id explicitly."
+    tenant_id = ctx.get("tenant_id", "")
+    token = get_bot_token(tenant_id)
+    if not token:
+        return "Error: no Slack bot token configured for this tenant."
+    return fetch_channel_history(token, cid, query, min(limit, 100))
+
+
+@audited_tool("read_thread_context")
+def read_thread_context(channel_id: str | None = None, thread_id: str | None = None) -> str:
+    """Fetch the full conversation thread from Slack.
+
+    Call this whenever the user references "this thread" or "this conversation"
+    to get the full context before responding.
+
+    Args:
+        channel_id: Slack channel ID. If omitted, uses the current channel.
+        thread_id: Slack thread timestamp. If omitted, uses the current thread.
+    """
+    from slack_api import fetch_thread_replies, get_bot_token
+
+    ctx = get_context()
+    cid = channel_id or ctx.get("channel_id", "")
+    tid = thread_id or ctx.get("thread_id", "")
+    if not cid or not tid:
+        return "Error: both channel_id and thread_id are required."
+    tenant_id = ctx.get("tenant_id", "")
+    token = get_bot_token(tenant_id)
+    if not token:
+        return "Error: no Slack bot token configured for this tenant."
+    return fetch_thread_replies(token, cid, tid)
+
+
+@audited_tool("search_docs")
+def search_docs(query: str) -> str:
+    """Search across all configured documentation sources.
+
+    This tool checks which documentation integrations are available (Confluence,
+    Notion, etc.) and lists them so you can call their specific search tools.
+    Use the individual integration tools (e.g. confluence search_content,
+    notion search) to perform the actual searches.
+
+    Args:
+        query: The search query to run across doc sources.
+    """
+    return (
+        f"To search for '{query}', use the available documentation tools from "
+        "your connected integrations. Check your tool list for Confluence "
+        "(search_content), Notion (search), or other doc tools, and call each "
+        "one individually with this query."
     )
 
 

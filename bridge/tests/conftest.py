@@ -16,6 +16,21 @@ import os
 
 import pytest
 
+# Set BEFORE any test module imports `bridge.main`. The bridge instantiates
+# its `AgentCoreClient` at module load and explodes if neither
+# `AGENT_RUNTIME_ARN` nor `LOCAL_AGENT_URL` is set. We use AGENT_RUNTIME_ARN
+# (not LOCAL_AGENT_URL) so test_client.py's local-dev tests don't see a
+# spurious LOCAL_AGENT_URL leaking into their explicitly-constructed clients
+# via `AgentCoreClient.__init__`'s `or os.getenv(...)` fallback. Tests
+# never actually hit this ARN — it just satisfies the constructor's "have
+# at least one transport" check.
+os.environ.setdefault(
+    "AGENT_RUNTIME_ARN",
+    "arn:aws:bedrock-agentcore:us-west-2:000000000000:runtime/test-fixture",
+)
+os.environ.setdefault("LOCAL_DEV", "1")
+os.environ.setdefault("BRIDGE_OAUTH_STATE_SECRET", "test-state-secret")
+
 
 @pytest.fixture(autouse=True)
 def _local_dev_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -23,8 +38,11 @@ def _local_dev_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
     Also clears any AWS-related env vars that could accidentally point
     a test at a real account if a developer has them in their shell.
+    Sets a deterministic `BRIDGE_OAUTH_STATE_SECRET` so state and
+    session token tests don't need per-test setup.
     """
     monkeypatch.setenv("LOCAL_DEV", "1")
+    monkeypatch.setenv("BRIDGE_OAUTH_STATE_SECRET", "test-state-secret")
     for var in ("AWS_PROFILE",):
         monkeypatch.delenv(var, raising=False)
 
@@ -34,12 +52,25 @@ def _reset_singletons() -> None:
     """Reset module-level singletons before AND after each test so
     `LOCAL_DEV` toggles, env-var changes, and stub injection are all
     visible to the next test that imports the same module."""
-    from bridge import dedup, slack_token_store, tenant_resolver
+    from bridge import (
+        dedup,
+        gateway_jwt,
+        gateway_provisioner,
+        slack_token_store,
+        tenant_resolver,
+        tenant_write,
+    )
 
     dedup.reset_dedup_for_tests()
     slack_token_store.reset_token_store_for_tests()
     tenant_resolver.reset_resolver_for_tests()
+    tenant_write.reset_tenant_write_for_tests()
+    gateway_jwt._reset_key_cache()
+    gateway_provisioner.reset_provisioner_for_tests()
     yield
     dedup.reset_dedup_for_tests()
     slack_token_store.reset_token_store_for_tests()
     tenant_resolver.reset_resolver_for_tests()
+    tenant_write.reset_tenant_write_for_tests()
+    gateway_jwt._reset_key_cache()
+    gateway_provisioner.reset_provisioner_for_tests()

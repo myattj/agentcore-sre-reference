@@ -1,4 +1,5 @@
 {
   "T_LOCAL": "demo",
-  "demo-ws": "demo"
+  "demo-ws": "demo",
+  "T_SMOKETEST": "slack-smoketest"
 }

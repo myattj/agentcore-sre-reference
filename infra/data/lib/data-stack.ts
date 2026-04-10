@@ -55,6 +55,7 @@ export class DataStack extends Stack {
   public readonly processedEventsTable: Table;
   public readonly agentDataAccessPolicy: ManagedPolicy;
   public readonly bridgeDataAccessPolicy: ManagedPolicy;
+  public readonly onboardingDataAccessPolicy: ManagedPolicy;
 
   constructor(scope: Construct, id: string, props: StackProps) {
     super(scope, id, props);
@@ -189,6 +190,36 @@ export class DataStack extends Stack {
             `arn:aws:secretsmanager:${this.region}:${this.account}:secret:agentcore/tenants/*`,
           ],
         }),
+        // Memory data plane: create events, retrieve/write memory records.
+        // Resource-level ARNs not supported for AgentCore Memory yet.
+        new PolicyStatement({
+          sid: 'MemoryDataPlane',
+          effect: Effect.ALLOW,
+          actions: [
+            'bedrock-agentcore:CreateEvent',
+            'bedrock-agentcore:GetEvent',
+            'bedrock-agentcore:ListEvents',
+            'bedrock-agentcore:RetrieveMemoryRecords',
+            'bedrock-agentcore:ListMemoryRecords',
+            'bedrock-agentcore:GetMemoryRecord',
+            'bedrock-agentcore:BatchCreateMemoryRecords',
+            'bedrock-agentcore:ListSessions',
+            'bedrock-agentcore:ListActors',
+          ],
+          resources: ['*'],
+        }),
+        // Memory control plane read: agent verifies the memory resource
+        // exists at startup. No write access — provisioning is done by
+        // infra/data/scripts/provision_memory.py with operator credentials.
+        new PolicyStatement({
+          sid: 'MemoryControlPlaneRead',
+          effect: Effect.ALLOW,
+          actions: [
+            'bedrock-agentcore-control:GetMemory',
+            'bedrock-agentcore-control:ListMemories',
+          ],
+          resources: ['*'],
+        }),
       ],
     });
 
@@ -258,6 +289,69 @@ export class DataStack extends Stack {
     });
 
     // ------------------------------------------------------------------
+    // Onboarding IAM managed policy — STUB.
+    //
+    // This policy is intentionally not attached to any role this week.
+    // The onboarding service runs locally via `npm run dev` against the
+    // bridge API and never touches AWS directly (see CLAUDE.md gotcha
+    // #24 — all data access flows through bridge `/api/tenants/*` so we
+    // only have ONE implementation of the DDB merge semantics, in
+    // Python, in the bridge).
+    //
+    // It's defined here so the IAM scaffolding is in place when Phase 8
+    // moves the onboarding service into a real Fargate task with its
+    // own execution role. At that point, attach this policy and the
+    // Next.js server can call DynamoDB directly if SSR performance ever
+    // demands it.
+    //
+    // Narrower than `AgentCoreBridgeDataAccess`:
+    //   - tenants: GetItem + UpdateItem only (no PutItem — only OAuth
+    //     callback creates tenants)
+    //   - workspace_to_tenant: GetItem only (read-only — the bridge
+    //     owns workspace mapping writes during OAuth)
+    //   - secretsmanager agentcore/tenants/*: GetSecretValue only (no
+    //     CreateSecret/PutSecretValue — bot token storage is the
+    //     bridge's job)
+    //   - NO processed_events access (Slack retry dedup is bridge-only)
+    // ------------------------------------------------------------------
+
+    this.onboardingDataAccessPolicy = new ManagedPolicy(this, 'OnboardingDataAccessPolicy', {
+      managedPolicyName: 'AgentCoreOnboardingDataAccess',
+      description:
+        'STUB — unattached until Phase 8 onboarding Fargate service. ' +
+        'Narrower than AgentCoreBridgeDataAccess: read-only on workspace ' +
+        'mapping + secrets, no write access to processed_events.',
+      statements: [
+        new PolicyStatement({
+          sid: 'TenantConfigReadWrite',
+          effect: Effect.ALLOW,
+          actions: [
+            'dynamodb:GetItem',
+            'dynamodb:UpdateItem',
+          ],
+          resources: [this.tenantsTable.tableArn],
+        }),
+        new PolicyStatement({
+          sid: 'WorkspaceMappingRead',
+          effect: Effect.ALLOW,
+          actions: [
+            'dynamodb:GetItem',
+            'dynamodb:Query',
+          ],
+          resources: [this.workspaceToTenantTable.tableArn],
+        }),
+        new PolicyStatement({
+          sid: 'TenantSecretsRead',
+          effect: Effect.ALLOW,
+          actions: ['secretsmanager:GetSecretValue'],
+          resources: [
+            `arn:aws:secretsmanager:${this.region}:${this.account}:secret:agentcore/tenants/*`,
+          ],
+        }),
+      ],
+    });
+
+    // ------------------------------------------------------------------
     // Outputs — consumed by the seed script and the attach helper script.
     // ------------------------------------------------------------------
     new CfnOutput(this, 'TenantsTableName', {
@@ -294,6 +388,14 @@ export class DataStack extends Stack {
       value: this.bridgeDataAccessPolicy.managedPolicyArn,
       description: 'ARN of the managed policy to attach to the bridge service role',
       exportName: `${this.stackName}-BridgeDataAccessPolicyArn`,
+    });
+
+    new CfnOutput(this, 'OnboardingDataAccessPolicyArn', {
+      value: this.onboardingDataAccessPolicy.managedPolicyArn,
+      description:
+        'ARN of the (currently unattached) onboarding service managed policy. ' +
+        'Attach in Phase 8 when the onboarding UI moves to its own Fargate task.',
+      exportName: `${this.stackName}-OnboardingDataAccessPolicyArn`,
     });
   }
 }

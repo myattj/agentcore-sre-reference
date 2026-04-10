@@ -1,0 +1,306 @@
+/**
+ * Per-channel persona editor — tab per channel, each with system prompt
+ * textarea, tool checkboxes, and memory rule toggles.
+ *
+ * The tab panel shows inherited (tenant-level) defaults as placeholder
+ * text/state. When a field is explicitly set, it overrides the tenant
+ * default for that channel only.
+ */
+"use client";
+
+import { useState, useTransition } from "react";
+
+import {
+  KNOWN_CATALOG_TOOLS,
+  type ChannelInfo,
+  type ChannelPersona,
+  type TenantConfig,
+} from "@/lib/types";
+
+import { type SaveChannelResult, saveChannelPersona } from "./actions";
+
+const KNOWN_MEMORY_RULES = [
+  { id: "user_preferences", label: "User preferences", description: "Remember stated preferences (\"I prefer...\", \"I like...\")." },
+  { id: "facts", label: "Facts", description: "Extract factual statements from conversation." },
+  { id: "faq_in_channel", label: "FAQ in channel", description: "Store every Q&A pair as an FAQ for this channel." },
+];
+
+type Status =
+  | { kind: "idle" }
+  | { kind: "pending" }
+  | { kind: "saved" }
+  | { kind: "error"; message: string };
+
+type Props = {
+  tenantId: string;
+  channels: ChannelInfo[];
+  config: TenantConfig;
+};
+
+export default function ChannelTabs({ tenantId, channels, config }: Props) {
+  const [activeTab, setActiveTab] = useState<string>(channels[0]?.id ?? "");
+
+  if (channels.length === 0) return null;
+
+  return (
+    <div className="rounded-lg border border-[color:var(--border)]">
+      {/* Tab bar */}
+      <div className="flex overflow-x-auto border-b border-[color:var(--border)] bg-[color:var(--card)]">
+        {channels.map((ch) => {
+          const active = ch.id === activeTab;
+          return (
+            <button
+              key={ch.id}
+              type="button"
+              onClick={() => setActiveTab(ch.id)}
+              className={`shrink-0 border-b-2 px-4 py-2.5 text-sm font-medium transition ${
+                active
+                  ? "border-[color:var(--accent)] text-[color:var(--accent)]"
+                  : "border-transparent text-[color:var(--muted)] hover:text-[color:var(--foreground)]"
+              }`}
+            >
+              {ch.is_private ? "🔒 " : "# "}
+              {ch.name}
+            </button>
+          );
+        })}
+      </div>
+
+      {/* Tab panels */}
+      {channels.map((ch) =>
+        ch.id === activeTab ? (
+          <ChannelPanel
+            key={ch.id}
+            tenantId={tenantId}
+            channelId={ch.id}
+            channelName={ch.name}
+            persona={config.channels?.[ch.id] ?? {}}
+            baseConfig={config}
+          />
+        ) : null,
+      )}
+    </div>
+  );
+}
+
+function ChannelPanel({
+  tenantId,
+  channelId,
+  channelName,
+  persona,
+  baseConfig,
+}: {
+  tenantId: string;
+  channelId: string;
+  channelName: string;
+  persona: ChannelPersona;
+  baseConfig: TenantConfig;
+}) {
+  const [systemPrompt, setSystemPrompt] = useState(persona.system_prompt ?? "");
+  const [useCustomPrompt, setUseCustomPrompt] = useState(persona.system_prompt != null);
+  const [allowedTools, setAllowedTools] = useState<string[]>(
+    persona.allowed_tools ?? baseConfig.catalog.allowed_tools,
+  );
+  const [useCustomTools, setUseCustomTools] = useState(persona.allowed_tools != null);
+  const [memoryRules, setMemoryRules] = useState<string[]>(
+    persona.memory_rules ?? baseConfig.memory.extraction.rules,
+  );
+  const [useCustomRules, setUseCustomRules] = useState(persona.memory_rules != null);
+  const [status, setStatus] = useState<Status>({ kind: "idle" });
+  const [isPending, startTransition] = useTransition();
+
+  function toggleTool(toolId: string) {
+    setAllowedTools((current) =>
+      current.includes(toolId)
+        ? current.filter((t) => t !== toolId)
+        : [...current, toolId],
+    );
+  }
+
+  function toggleRule(ruleId: string) {
+    setMemoryRules((current) =>
+      current.includes(ruleId)
+        ? current.filter((r) => r !== ruleId)
+        : [...current, ruleId],
+    );
+  }
+
+  function onSave() {
+    if (isPending) return;
+    setStatus({ kind: "pending" });
+
+    const patch: ChannelPersona = {
+      system_prompt: useCustomPrompt ? systemPrompt : null,
+      allowed_tools: useCustomTools ? allowedTools : null,
+      memory_rules: useCustomRules ? memoryRules : null,
+    };
+
+    startTransition(async () => {
+      const result: SaveChannelResult = await saveChannelPersona(
+        tenantId,
+        channelId,
+        patch,
+      );
+      if (result.ok) {
+        setStatus({ kind: "saved" });
+      } else {
+        setStatus({ kind: "error", message: result.error });
+      }
+    });
+  }
+
+  return (
+    <div className="space-y-6 p-5">
+      <p className="text-xs text-[color:var(--muted)]">
+        Overrides for <strong>#{channelName}</strong> ({channelId}). Leave a
+        section unchecked to inherit from the tenant-level defaults.
+      </p>
+
+      {/* System prompt override */}
+      <div className="space-y-2">
+        <label className="flex items-center gap-2 text-sm font-medium">
+          <input
+            type="checkbox"
+            checked={useCustomPrompt}
+            onChange={(e) => {
+              setUseCustomPrompt(e.target.checked);
+              if (!e.target.checked) setSystemPrompt("");
+              setStatus({ kind: "idle" });
+            }}
+            className="h-4 w-4 rounded border-[color:var(--border)] text-[color:var(--accent)]"
+          />
+          Custom system prompt
+        </label>
+        {useCustomPrompt ? (
+          <textarea
+            rows={4}
+            value={systemPrompt}
+            onChange={(e) => {
+              setSystemPrompt(e.target.value);
+              setStatus({ kind: "idle" });
+            }}
+            placeholder={baseConfig.system_prompt}
+            className="w-full rounded-lg border border-[color:var(--border)] bg-white p-3 font-mono text-sm shadow-sm focus:border-[color:var(--accent)] focus:outline-none focus:ring-2 focus:ring-[color:var(--accent)]/20"
+          />
+        ) : (
+          <p className="text-xs italic text-[color:var(--muted)]">
+            Using tenant default: &ldquo;{baseConfig.system_prompt.slice(0, 80)}
+            {baseConfig.system_prompt.length > 80 ? "..." : ""}&rdquo;
+          </p>
+        )}
+      </div>
+
+      {/* Tool override */}
+      <div className="space-y-2">
+        <label className="flex items-center gap-2 text-sm font-medium">
+          <input
+            type="checkbox"
+            checked={useCustomTools}
+            onChange={(e) => {
+              setUseCustomTools(e.target.checked);
+              if (!e.target.checked) {
+                setAllowedTools(baseConfig.catalog.allowed_tools);
+              }
+              setStatus({ kind: "idle" });
+            }}
+            className="h-4 w-4 rounded border-[color:var(--border)] text-[color:var(--accent)]"
+          />
+          Custom tool set
+        </label>
+        {useCustomTools ? (
+          <ul className="space-y-1.5">
+            {KNOWN_CATALOG_TOOLS.map((tool) => (
+              <li key={tool.id}>
+                <label className="flex cursor-pointer items-start gap-2.5 rounded-lg border border-[color:var(--border)] bg-[color:var(--card)] p-2.5 transition hover:border-[color:var(--accent)]/40">
+                  <input
+                    type="checkbox"
+                    checked={allowedTools.includes(tool.id)}
+                    onChange={() => {
+                      toggleTool(tool.id);
+                      setStatus({ kind: "idle" });
+                    }}
+                    className="mt-0.5 h-4 w-4 rounded border-[color:var(--border)] text-[color:var(--accent)]"
+                  />
+                  <div className="min-w-0 flex-1">
+                    <div className="text-sm font-medium">{tool.label}</div>
+                    <div className="text-xs text-[color:var(--muted)]">{tool.description}</div>
+                  </div>
+                </label>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="text-xs italic text-[color:var(--muted)]">
+            Using tenant default: {baseConfig.catalog.allowed_tools.join(", ") || "none"}
+          </p>
+        )}
+      </div>
+
+      {/* Memory rules override */}
+      <div className="space-y-2">
+        <label className="flex items-center gap-2 text-sm font-medium">
+          <input
+            type="checkbox"
+            checked={useCustomRules}
+            onChange={(e) => {
+              setUseCustomRules(e.target.checked);
+              if (!e.target.checked) {
+                setMemoryRules(baseConfig.memory.extraction.rules);
+              }
+              setStatus({ kind: "idle" });
+            }}
+            className="h-4 w-4 rounded border-[color:var(--border)] text-[color:var(--accent)]"
+          />
+          Custom memory rules
+        </label>
+        {useCustomRules ? (
+          <ul className="space-y-1.5">
+            {KNOWN_MEMORY_RULES.map((rule) => (
+              <li key={rule.id}>
+                <label className="flex cursor-pointer items-start gap-2.5 rounded-lg border border-[color:var(--border)] bg-[color:var(--card)] p-2.5 transition hover:border-[color:var(--accent)]/40">
+                  <input
+                    type="checkbox"
+                    checked={memoryRules.includes(rule.id)}
+                    onChange={() => {
+                      toggleRule(rule.id);
+                      setStatus({ kind: "idle" });
+                    }}
+                    className="mt-0.5 h-4 w-4 rounded border-[color:var(--border)] text-[color:var(--accent)]"
+                  />
+                  <div className="min-w-0 flex-1">
+                    <div className="text-sm font-medium">{rule.label}</div>
+                    <div className="text-xs text-[color:var(--muted)]">{rule.description}</div>
+                  </div>
+                </label>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="text-xs italic text-[color:var(--muted)]">
+            Using tenant default: {baseConfig.memory.extraction.rules.join(", ") || "none"}
+          </p>
+        )}
+      </div>
+
+      {/* Save */}
+      <div className="flex items-center gap-4 border-t border-[color:var(--border)] pt-4">
+        <button
+          type="button"
+          onClick={onSave}
+          disabled={isPending}
+          className="rounded-full bg-[color:var(--accent)] px-5 py-2 text-sm font-medium text-white shadow-sm transition hover:bg-[color:var(--accent-hover)] disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {isPending ? "Saving..." : "Save channel config"}
+        </button>
+        {status.kind === "saved" ? (
+          <span className="text-sm text-green-600">Saved.</span>
+        ) : null}
+        {status.kind === "error" ? (
+          <span className="text-sm text-red-600">
+            Couldn&apos;t save: {status.message}
+          </span>
+        ) : null}
+      </div>
+    </div>
+  );
+}

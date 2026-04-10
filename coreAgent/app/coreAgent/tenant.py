@@ -51,6 +51,7 @@ class ByoConfig(BaseModel):
     enabled: bool = False
     gateway_endpoint: str | None = None
     gateway_auth: dict[str, Any] | None = None
+    connected_integrations: list[str] = Field(default_factory=list)
 
 
 class MemoryTriggers(BaseModel):
@@ -83,6 +84,21 @@ class HeartbeatConfig(BaseModel):
     max_background_seconds: int = 3600
 
 
+class ChannelPersona(BaseModel):
+    """Per-channel overrides. When present, these fields REPLACE (not merge)
+    the tenant-level defaults for invocations in this channel. ``None``
+    means "inherit from tenant base."
+
+    Used by the channel-persona merge in ``main.py``: after loading the
+    tenant's base ``TenantConfig``, the entrypoint checks
+    ``config.channels[channel_id]`` and overrides ``system_prompt``,
+    ``allowed_tools``, and ``memory_rules`` if set.
+    """
+    system_prompt: str | None = None
+    allowed_tools: list[str] | None = None
+    memory_rules: list[str] | None = None
+
+
 class TenantConfig(BaseModel):
     tenant_id: str
     model_id: str = "global.anthropic.claude-sonnet-4-6"
@@ -91,6 +107,7 @@ class TenantConfig(BaseModel):
     byo: ByoConfig = Field(default_factory=ByoConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     heartbeat: HeartbeatConfig = Field(default_factory=HeartbeatConfig)
+    channels: dict[str, ChannelPersona] = Field(default_factory=dict)
 
 
 def _iso_now() -> str:

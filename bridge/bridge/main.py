@@ -20,9 +20,11 @@ from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 
 from .adapters.debug import DebugAdapter
 from .adapters.slack import SlackAdapter, SlackSignatureError
+from .api import api_router
 from .async_dispatcher import dispatch_async
 from .client import AgentCoreClient
 from .dedup import is_duplicate
+from .gateway_jwt import get_jwks, get_oidc_configuration
 from .slack_oauth import build_install_redirect, handle_oauth_callback
 from .tenant_resolver import resolve_tenant_id
 
@@ -30,7 +32,13 @@ log = logging.getLogger(__name__)
 
 LOCAL_DEV = os.getenv("LOCAL_DEV") == "1"
 
+# No CORS middleware — all /api/tenants/* callers are server-side Next.js
+# code in the onboarding service. The browser never talks to these routes
+# directly. Add FastAPI CORSMiddleware here if/when a client-side caller
+# (admin dashboard, etc.) needs direct access.
 app = FastAPI(title="coreAgent bridge")
+
+app.include_router(api_router)
 
 slack = SlackAdapter(
     signing_secret=os.getenv("SLACK_SIGNING_SECRET"),
@@ -46,6 +54,22 @@ client = AgentCoreClient(
 @app.get("/healthz")
 async def healthz() -> dict[str, str]:
     return {"status": "ok"}
+
+
+# OIDC discovery + JWKS endpoints for AgentCore Gateway's CUSTOM_JWT
+# authorizer. The Gateway is configured with `discoveryUrl` pointing at
+# `<bridge>/.well-known/openid-configuration`; it then resolves the JWKS
+# URL from there and uses it to verify per-invocation JWTs minted by
+# `bridge/bridge/gateway_jwt.py`. Both routes are unauthenticated by
+# design — discovery + JWKS are public per OIDC spec.
+@app.get("/.well-known/openid-configuration")
+async def oidc_configuration() -> dict[str, object]:
+    return get_oidc_configuration()
+
+
+@app.get("/jwks.json")
+async def jwks() -> dict[str, object]:
+    return get_jwks()
 
 
 @app.post("/slack/events")

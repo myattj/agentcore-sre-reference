@@ -1,15 +1,16 @@
 {
   "tenant_id": "demo",
   "model_id": "global.anthropic.claude-sonnet-4-6",
-  "system_prompt": "You are the demo workspace assistant. Be concise and direct. Use the echo tool to confirm you can call tools, and the start_background_task tool when the user asks you to demonstrate long-running work.",
+  "system_prompt": "You are the demo workspace assistant. Be concise and direct. When a user references 'this thread' or 'this conversation', call read_thread_context to fetch the full thread before responding. When searching for information, check all available documentation tools.",
   "catalog": {
-    "allowed_tools": ["echo", "start_background_task"],
+    "allowed_tools": ["echo", "start_background_task", "search_team_history", "read_thread_context", "search_docs"],
     "tool_config": {}
   },
   "byo": {
     "enabled": false,
     "gateway_endpoint": null,
-    "gateway_auth": null
+    "gateway_auth": null,
+    "connected_integrations": []
   },
   "memory": {
     "triggers": {
@@ -26,5 +27,22 @@
   "heartbeat": {
     "busy_threshold": 1,
     "max_background_seconds": 3600
+  },
+  "channels": {
+    "C_ASK_DATA": {
+      "system_prompt": "You are a data team Q&A bot. Answer questions about data pipelines, schemas, and dashboards. Search docs and team history before answering.",
+      "allowed_tools": ["search_team_history", "search_docs"],
+      "memory_rules": ["faq_in_channel"]
+    },
+    "C_ASK_PLATFORM": {
+      "system_prompt": "You are a platform engineering Q&A bot. Answer questions about infrastructure, deployments, and internal tools. Search docs and read threads for context.",
+      "allowed_tools": ["search_team_history", "search_docs", "read_thread_context"],
+      "memory_rules": ["faq_in_channel"]
+    },
+    "C_WORKFLOWS": {
+      "system_prompt": "You are a workflow automation bot. When asked, read thread context and help create tickets or take actions based on the conversation.",
+      "allowed_tools": ["read_thread_context"],
+      "memory_rules": []
+    }
   }
 }

@@ -14,29 +14,39 @@ Two responsibilities:
    `code` query param for a bot token via Slack's `oauth.v2.access`
    endpoint, then provision the tenant: write a default tenant row,
    store the bot token in Secrets Manager, and add the workspace
-   mapping. Finally, return a tiny placeholder HTML page (the real
-   onboarding UI lands in week 3).
+   mapping. Finally, mint a **session token** and 302-redirect to the
+   onboarding UI (`${ONBOARDING_BASE_URL}/onboarding/<id>/welcome?t=...`).
 
-State token format:
-    "{nonce}.{ts}.{hmac_hex}"
-where nonce is 16 random hex chars, ts is the issue time (epoch seconds),
-and hmac_hex is HMAC-SHA256(state_secret, f"{nonce}.{ts}").
+State vs session tokens (both HMAC-SHA256 over the same secret):
+
+    State token   — `{nonce}.{ts}.{hmac}` (3 parts, 10-min TTL)
+                    Used for the Slack consent redirect only; bound to
+                    a single install click.
+    Session token — `{tenant_id}.{nonce}.{ts}.{hmac}` (4 parts, 60-min TTL)
+                    Bound to a specific tenant. Issued by the OAuth
+                    callback, stored as an HttpOnly cookie on the Next.js
+                    onboarding origin, and forwarded as `Authorization:
+                    Bearer <token>` when Next.js's server calls bridge
+                    `/api/tenants/*` routes. The `/api` router's
+                    `require_session_token` dependency asserts the
+                    embedded tenant_id matches the URL path — this is
+                    our cross-tenant isolation.
 
 The state secret comes from `BRIDGE_OAUTH_STATE_SECRET` if set, otherwise
-falls back to `SLACK_SIGNING_SECRET` (which the bridge already needs for
-inbound HMAC). State tokens expire after 10 minutes.
+falls back to `SLACK_SIGNING_SECRET`. Both token types share the same
+secret — rotating it invalidates all in-flight installs AND all active
+onboarding sessions.
+
+Tenant IDs minted by `_tenant_id_for_workspace` are guaranteed period-free
+(`slack-<team_id.lower()>`), which is what lets the session token use `.`
+as a safe delimiter. `make_session_token` asserts this.
 
 DynamoDB write paths:
-  - `tenants` row: same UpdateExpression as
-    `coreAgent.tenant.DynamoTenantStore.upsert` — kept in sync by
-    convention. **Edit the row shape in coreAgent/tenant.py first**, then
-    mirror here. (The two packages have separate venvs, so we can't import.)
-  - `workspace_to_tenant` row: same UpdateExpression as
-    `infra/data/scripts/seed_tenants.py:put_workspace`.
-
-Secrets Manager:
-  - Path: `agentcore/tenants/<tenant_id>/slack/bot_token`
-  - Try CreateSecret; fall back to PutSecretValue on ResourceExistsException.
+  - Tenant + workspace mapping writes live in `bridge/bridge/tenant_write.py`
+    (shared with the `/api/tenants` PATCH route). We re-import the two
+    helpers here.
+  - Secrets Manager bot-token storage is still inlined here because no
+    other code path writes tokens.
 """
 from __future__ import annotations
 
@@ -46,13 +56,15 @@ import logging
 import os
 import secrets as py_secrets
 import time
-from datetime import datetime, timezone
-from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import RedirectResponse
 
 from .slack_token_store import invalidate_token_cache
+from .tenant_write import (
+    upsert_default_tenant_row,
+    upsert_workspace_mapping,
+)
 
 log = logging.getLogger(__name__)
 
@@ -63,7 +75,9 @@ _SCOPES = ",".join([
     "app_mentions:read",
     "chat:write",
     "channels:history",
+    "channels:read",  # required for users.conversations on public channels
     "groups:history",
+    "groups:read",    # required for users.conversations on private channels
     "im:history",
     "mpim:history",
     "users:read",
@@ -74,13 +88,18 @@ _SCOPES = ",".join([
 # clicking through Slack's consent screen.
 _STATE_TTL_SECONDS = 600
 
+# Session token validity window. 60 minutes is enough for a single
+# onboarding sitting; if the user idles out, they re-run /slack/install.
+# See CLAUDE.md gotcha #22.
+_SESSION_TTL_SECONDS = 3600
+
 
 # ----------------------------------------------------------------------------
-# State token: signed, no DB needed
+# Shared HMAC secret
 # ----------------------------------------------------------------------------
 
 def _state_secret() -> str:
-    """Get the secret used to sign OAuth state tokens.
+    """Get the secret used to sign state + session tokens.
 
     Prefers `BRIDGE_OAUTH_STATE_SECRET`; falls back to
     `SLACK_SIGNING_SECRET` if unset (so first-time deployments don't
@@ -93,6 +112,10 @@ def _state_secret() -> str:
         )
     return secret
 
+
+# ----------------------------------------------------------------------------
+# State token: signed, no DB needed
+# ----------------------------------------------------------------------------
 
 def _sign_state(nonce: str, ts: int) -> str:
     """Compute HMAC-SHA256 over `{nonce}.{ts}` using the state secret."""
@@ -130,6 +153,66 @@ def verify_state_token(token: str) -> bool:
 
 
 # ----------------------------------------------------------------------------
+# Session token: tenant-scoped, used by the onboarding UI
+# ----------------------------------------------------------------------------
+
+def _sign_session(tenant_id: str, nonce: str, ts: int) -> str:
+    """Compute HMAC-SHA256 over `{tenant_id}.{nonce}.{ts}` using the
+    state secret. Same secret as state tokens (see module docstring)."""
+    return hmac.new(
+        _state_secret().encode("utf-8"),
+        f"{tenant_id}.{nonce}.{ts}".encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def make_session_token(tenant_id: str) -> str:
+    """Mint a session token bound to `tenant_id`.
+
+    Format: `{tenant_id}.{nonce}.{ts}.{hmac_hex}` — four dot-separated
+    parts, hex-encoded HMAC. Asserts `tenant_id` is period-free so the
+    verifier's `split(".")` parses unambiguously. Tenant IDs from the
+    OAuth flow are always `slack-<team_id.lower()>` and Slack team IDs
+    are alphanumeric, so this holds today.
+    """
+    if "." in tenant_id:
+        raise ValueError(
+            f"tenant_id must not contain '.' for session tokens; got {tenant_id!r}"
+        )
+    nonce = py_secrets.token_hex(16)
+    ts = int(time.time())
+    sig = _sign_session(tenant_id, nonce, ts)
+    return f"{tenant_id}.{nonce}.{ts}.{sig}"
+
+
+def verify_session_token(token: str) -> str | None:
+    """Validate a session token and return its embedded `tenant_id`, or
+    `None` if the token is invalid / expired / malformed.
+
+    The caller (`bridge.api:require_session_token`) is responsible for
+    asserting that the returned tenant_id matches the URL path.
+    """
+    if not token:
+        return None
+    parts = token.split(".")
+    if len(parts) != 4:
+        return None
+    tenant_id, nonce, ts_str, sig = parts
+    if not tenant_id:
+        return None
+    try:
+        ts = int(ts_str)
+    except ValueError:
+        return None
+    if abs(time.time() - ts) > _SESSION_TTL_SECONDS:
+        return None
+    expected = _sign_session(tenant_id, nonce, ts)
+    if not hmac.compare_digest(expected, sig):
+        return None
+    return tenant_id
+
+
+# ----------------------------------------------------------------------------
 # /slack/install
 # ----------------------------------------------------------------------------
 
@@ -158,11 +241,31 @@ def build_install_redirect() -> RedirectResponse:
 
 
 # ----------------------------------------------------------------------------
-# /slack/oauth/callback — code exchange + tenant provisioning
+# /slack/oauth/callback — code exchange + tenant provisioning + redirect
 # ----------------------------------------------------------------------------
 
-def _iso_now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+def _onboarding_base_url() -> str:
+    """Public base URL of the onboarding Next.js service.
+
+    Default `http://localhost:3000` for LOCAL_DEV. Production deployments
+    must set `ONBOARDING_BASE_URL` to the real onboarding origin (e.g.
+    `https://onboarding.example.com`)."""
+    url = os.getenv("ONBOARDING_BASE_URL", "http://localhost:3000")
+    return url.rstrip("/")
+
+
+def _onboarding_welcome_url(tenant_id: str, token: str) -> str:
+    # `tenant_id` is path-safe (we control the format) but `token` is
+    # hex/dot only — still percent-encode both as a belt-and-suspenders
+    # measure.
+    return (
+        f"{_onboarding_base_url()}/onboarding/{quote(tenant_id, safe='')}"
+        f"/welcome?t={quote(token, safe='')}"
+    )
+
+
+def _onboarding_error_url(reason: str) -> str:
+    return f"{_onboarding_base_url()}/onboarding/error?reason={quote(reason, safe='')}"
 
 
 def _tenant_id_for_workspace(team_id: str) -> str:
@@ -174,98 +277,6 @@ def _tenant_id_for_workspace(team_id: str) -> str:
     and namespaced so a future Discord adapter can use a different prefix.
     """
     return f"slack-{team_id.lower()}"
-
-
-def _build_default_config_dict(tenant_id: str) -> dict[str, Any]:
-    """Build the default tenant config dict.
-
-    **Keep in sync with `coreAgent.tenant.build_default_config()`.**
-    The two packages have separate venvs so we can't import; this is the
-    minimal duplication required to provision a new tenant from the
-    bridge. If you change the agent's default config shape, mirror it
-    here.
-    """
-    return {
-        "tenant_id": tenant_id,
-        "model_id": "global.anthropic.claude-sonnet-4-6",
-        # MUST be non-empty — Bedrock Converse rejects empty system blocks
-        # (`system[0].text min length: 1`). Mirror of the same default in
-        # coreAgent.tenant.build_default_config().
-        "system_prompt": "You are a helpful assistant.",
-        "catalog": {
-            "allowed_tools": ["echo"],
-            "tool_config": {},
-        },
-        "byo": {
-            "enabled": False,
-            "gateway_endpoint": None,
-            "gateway_auth": None,
-        },
-        "memory": {
-            "triggers": {
-                "message_count": 6,
-                "token_count": 1000,
-                "idle_timeout_seconds": 1800,
-            },
-            "namespace": f"tenants/{tenant_id}",
-            "extraction": {
-                "enabled": True,
-                "rules": ["user_preferences", "facts"],
-            },
-        },
-        "heartbeat": {
-            "busy_threshold": 1,
-            "max_background_seconds": 3600,
-        },
-    }
-
-
-def _upsert_tenant_row(tenant_id: str, region: str) -> None:
-    """Write the default tenant row to DynamoDB.
-
-    UpdateExpression matches `coreAgent.tenant.DynamoTenantStore.upsert`
-    and `infra/data/scripts/seed_tenants.py:put_tenant`. Idempotent:
-    re-running for the same tenant_id refreshes `updated_at` but
-    preserves `created_at`."""
-    import boto3
-
-    table_name = os.getenv("TENANTS_TABLE", "tenants")
-    dynamodb = boto3.resource("dynamodb", region_name=region)
-    table = dynamodb.Table(table_name)
-    now = _iso_now()
-    table.update_item(
-        Key={"tenant_id": tenant_id},
-        UpdateExpression=(
-            "SET #config = :config, "
-            "updated_at = :now, "
-            "created_at = if_not_exists(created_at, :now)"
-        ),
-        ExpressionAttributeNames={"#config": "config"},
-        ExpressionAttributeValues={
-            ":config": _build_default_config_dict(tenant_id),
-            ":now": now,
-        },
-    )
-
-
-def _upsert_workspace_mapping(workspace_id: str, tenant_id: str, region: str) -> None:
-    """Write the workspace_id → tenant_id mapping. Same idempotent
-    semantics as `_upsert_tenant_row`."""
-    import boto3
-
-    table_name = os.getenv("WORKSPACE_TO_TENANT_TABLE", "workspace_to_tenant")
-    dynamodb = boto3.resource("dynamodb", region_name=region)
-    table = dynamodb.Table(table_name)
-    now = _iso_now()
-    table.update_item(
-        Key={"workspace_id": workspace_id},
-        UpdateExpression=(
-            "SET tenant_id = :tid, "
-            "updated_at = :now, "
-            "created_at = if_not_exists(created_at, :now)"
-        ),
-        ExpressionAttributeValues={":tid": tenant_id, ":now": now},
-    )
 
 
 def _store_bot_token(tenant_id: str, bot_token: str, region: str) -> None:
@@ -294,20 +305,19 @@ def _store_bot_token(tenant_id: str, bot_token: str, region: str) -> None:
             raise
 
 
-async def handle_oauth_callback(code: str, state: str) -> HTMLResponse:
+async def handle_oauth_callback(code: str, state: str) -> RedirectResponse:
     """Exchange the OAuth `code` for a bot token, provision the tenant,
-    and return a placeholder success page.
+    and 302-redirect to the onboarding UI welcome page.
 
-    Returns an HTMLResponse so the user lands somewhere reasonable in
-    their browser. The real onboarding UI in week 3 will replace this
-    placeholder.
+    Success → `{ONBOARDING_BASE_URL}/onboarding/{tenant_id}/welcome?t=<session_token>`
+    Any error → `{ONBOARDING_BASE_URL}/onboarding/error?reason=<slug>`
 
-    Errors are logged internally and surface as a generic error page —
+    Errors are logged internally and surface as a human-readable slug —
     we deliberately don't echo exception text to the browser.
     """
     if not verify_state_token(state):
         log.warning("oauth_callback: invalid or expired state token")
-        return _error_page("Invalid or expired install link. Please try again.")
+        return RedirectResponse(_onboarding_error_url("invalid_state"), status_code=302)
 
     client_id = os.getenv("SLACK_CLIENT_ID")
     client_secret = os.getenv("SLACK_CLIENT_SECRET")
@@ -316,7 +326,7 @@ async def handle_oauth_callback(code: str, state: str) -> HTMLResponse:
         log.error(
             "oauth_callback: missing SLACK_CLIENT_ID/SLACK_CLIENT_SECRET/SLACK_REDIRECT_URI"
         )
-        return _error_page("Server is not configured for Slack install.")
+        return RedirectResponse(_onboarding_error_url("not_configured"), status_code=302)
 
     # Exchange code → tokens. slack-sdk's AsyncWebClient handles this.
     try:
@@ -331,26 +341,26 @@ async def handle_oauth_callback(code: str, state: str) -> HTMLResponse:
         )
     except Exception as e:  # noqa: BLE001
         log.exception("oauth_callback: code exchange failed: %s", e)
-        return _error_page("Slack install failed. Please try again.")
+        return RedirectResponse(_onboarding_error_url("exchange_failed"), status_code=302)
 
     if not oauth_response.get("ok"):
         log.warning("oauth_callback: oauth.v2.access returned not-ok: %s", oauth_response.data)
-        return _error_page("Slack install failed.")
+        return RedirectResponse(_onboarding_error_url("exchange_failed"), status_code=302)
 
     team = oauth_response.get("team") or {}
     team_id = team.get("id")
     bot_token = oauth_response.get("access_token")
     if not team_id or not bot_token:
         log.warning("oauth_callback: response missing team.id or access_token")
-        return _error_page("Slack install returned an unexpected response.")
+        return RedirectResponse(_onboarding_error_url("missing_fields"), status_code=302)
 
     tenant_id = _tenant_id_for_workspace(team_id)
     region = os.getenv("AWS_REGION", "us-west-2")
 
     try:
-        _upsert_tenant_row(tenant_id, region)
+        upsert_default_tenant_row(tenant_id, region)
         _store_bot_token(tenant_id, bot_token, region)
-        _upsert_workspace_mapping(team_id, tenant_id, region)
+        upsert_workspace_mapping(team_id, tenant_id, region)
         invalidate_token_cache(tenant_id)
     except Exception as e:  # noqa: BLE001
         log.exception(
@@ -358,28 +368,11 @@ async def handle_oauth_callback(code: str, state: str) -> HTMLResponse:
             tenant_id,
             e,
         )
-        return _error_page("Could not finish install. Please contact support.")
+        return RedirectResponse(_onboarding_error_url("provisioning_failed"), status_code=302)
 
     log.info("oauth_callback: provisioned tenant_id=%s for team_id=%s", tenant_id, team_id)
-    return _success_page(team.get("name") or team_id)
-
-
-def _success_page(team_name: str) -> HTMLResponse:
-    body = f"""<!doctype html>
-<html><head><title>Installed</title></head>
-<body style="font-family: system-ui; max-width: 600px; margin: 4em auto; padding: 0 1em;">
-  <h1>Installed in {team_name}</h1>
-  <p>The bot is ready. Mention it in any channel and it will reply.</p>
-  <p><em>This page is a placeholder. The full onboarding UI lands in week 3.</em></p>
-</body></html>"""
-    return HTMLResponse(content=body, status_code=200)
-
-
-def _error_page(message: str) -> HTMLResponse:
-    body = f"""<!doctype html>
-<html><head><title>Install failed</title></head>
-<body style="font-family: system-ui; max-width: 600px; margin: 4em auto; padding: 0 1em;">
-  <h1>Install failed</h1>
-  <p>{message}</p>
-</body></html>"""
-    return HTMLResponse(content=body, status_code=400)
+    session_token = make_session_token(tenant_id)
+    return RedirectResponse(
+        _onboarding_welcome_url(tenant_id, session_token),
+        status_code=302,
+    )
