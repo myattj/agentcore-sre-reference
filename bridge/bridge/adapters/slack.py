@@ -33,11 +33,13 @@ Authentication and replay protection:
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
 import logging
 import time
+from collections.abc import AsyncIterator
 from typing import Any
 
 from ..tenant_resolver import resolve_tenant_id
@@ -170,6 +172,275 @@ class SlackAdapter:
     # ------------------------------------------------------------------
     # Outbound
     # ------------------------------------------------------------------
+
+    async def set_thinking_status(self, original: InboundMessage) -> None:
+        """Show a native thinking indicator via Slack's assistant.threads.setStatus.
+
+        Requires `chat:write` scope. The status auto-clears when we post
+        the reply via `chat.postMessage` in the same thread. If the call
+        fails (missing token, no thread_ts, API error), we log and move
+        on — the thinking indicator is UX polish, not load-bearing.
+        """
+        if not original.channel_id or not original.thread_id:
+            return
+
+        try:
+            tenant_id = resolve_tenant_id(original.workspace_id)
+        except KeyError:
+            return
+
+        try:
+            token = get_bot_token(tenant_id)
+        except KeyError:
+            return
+
+        if not token:
+            return
+
+        from slack_sdk.web.async_client import AsyncWebClient
+
+        client = AsyncWebClient(token=token)
+        try:
+            await client.assistant_threads_setStatus(
+                channel_id=original.channel_id,
+                thread_ts=original.thread_id,
+                status="is thinking…",
+            )
+        except Exception:
+            log.debug("set_thinking_status failed", exc_info=True)
+
+    async def stream_reply(
+        self,
+        original: InboundMessage,
+        chunks: AsyncIterator[str],
+    ) -> str:
+        """Stream agent response chunks to Slack via the streaming API.
+
+        Uses a tick-based drip feed (~25 ticks/sec, ~15 chars/tick) for
+        smooth typing animation.  `chat.startStream` on the first tick,
+        `chat.appendStream` for subsequent ticks, `chat.stopStream` to
+        finalize.  Adaptive: widens the release window when falling behind.
+
+        Returns the full accumulated text (for audit logging).
+        """
+        try:
+            tenant_id = resolve_tenant_id(original.workspace_id)
+        except KeyError:
+            log.warning(
+                "SlackAdapter.stream_reply: no tenant for workspace_id=%s",
+                original.workspace_id,
+            )
+            raise
+
+        try:
+            token = get_bot_token(tenant_id)
+        except KeyError:
+            log.warning(
+                "SlackAdapter.stream_reply: no bot token for tenant=%s",
+                tenant_id,
+            )
+            raise
+
+        # LOCAL_DEV stub path: accumulate and print
+        if not token:
+            accumulated: list[str] = []
+            async for chunk in chunks:
+                accumulated.append(chunk)
+                print(chunk, end="", flush=True)
+            print()
+            full_text = "".join(accumulated)
+            channel = original.channel_id or "<unknown channel>"
+            print(
+                f"[slack-stream-stub] workspace={original.workspace_id} "
+                f"tenant={tenant_id} channel={channel} "
+                f"thread={original.thread_id}: {len(full_text)} chars streamed"
+            )
+            return full_text
+
+        from slack_sdk.web.async_client import AsyncWebClient
+
+        client = AsyncWebClient(token=token)
+        channel = original.channel_id or ""
+
+        # Decoupled producer/consumer: the agent produces chunks into a
+        # queue; a separate flush loop drains the queue to Slack at a
+        # steady pace. This prevents the "flash at the end" where tokens
+        # pile up during slow appendStream calls and get dumped all at once.
+        queue: asyncio.Queue[str | None] = asyncio.Queue()
+        accumulated_chunks: list[str] = []
+        stream_ts: str | None = None
+        producer_error: BaseException | None = None
+
+        async def _produce() -> None:
+            """Read agent chunks into the queue. None = done."""
+            nonlocal producer_error
+            try:
+                async for chunk in chunks:
+                    accumulated_chunks.append(chunk)
+                    await queue.put(chunk)
+            except Exception as exc:
+                producer_error = exc
+            finally:
+                await queue.put(None)
+
+        # ── Streaming pace constants ──
+        # Smooth typing animation via a pipelined design:
+        #   tick loop  → steady 30ms cadence, ~10-char slices → send_queue
+        #   sender task → sequential appendStream calls (API-latency paced)
+        # The tick loop is NEVER blocked by API latency, so chunk sizes
+        # stay consistent even when Slack is slow.
+        TICK = 0.03             # 30ms between releases (~33 ticks/sec)
+        TARGET_CHARS = 10       # chars per release at steady state
+        MAX_CHARS = 60          # per-release cap during catch-up
+        CATCHUP_THRESHOLD = 100 # pending chars before we widen the window
+
+        async def _flush_to_slack(text: str) -> None:
+            """Send text to Slack, starting the stream if needed."""
+            nonlocal stream_ts
+            if stream_ts is None:
+                resp = await client.chat_startStream(
+                    channel=channel,
+                    thread_ts=original.thread_id or "",
+                    recipient_team_id=original.workspace_id,
+                    recipient_user_id=original.user_id,
+                    markdown_text=text,
+                )
+                stream_ts = resp.get("ts")
+            else:
+                await client.chat_appendStream(
+                    channel=channel,
+                    ts=stream_ts,
+                    markdown_text=text,
+                )
+
+        def _pick_release(pending: str) -> int:
+            """How many chars to release this tick (adaptive)."""
+            target = TARGET_CHARS
+            if len(pending) > CATCHUP_THRESHOLD:
+                target = min(
+                    MAX_CHARS,
+                    TARGET_CHARS * len(pending) // CATCHUP_THRESHOLD,
+                )
+            return min(len(pending), target)
+
+        try:
+            producer_task = asyncio.create_task(_produce())
+
+            # Pipelined sender: processes API calls sequentially so
+            # ordering is preserved, but decoupled from the tick loop
+            # so API latency doesn't distort the release cadence.
+            send_queue: asyncio.Queue[str | None] = asyncio.Queue()
+            sender_error: BaseException | None = None
+
+            async def _sender() -> None:
+                nonlocal sender_error
+                try:
+                    while True:
+                        text = await send_queue.get()
+                        if text is None:
+                            break
+                        await _flush_to_slack(text)
+                except Exception as exc:
+                    sender_error = exc
+
+            sender_task = asyncio.create_task(_sender())
+
+            pending = ""
+            done = False
+            last_release = 0.0
+
+            while not done:
+                # Bail early if the sender hit an error.
+                if sender_task.done() and sender_error:
+                    break
+
+                # Wait for a chunk OR the tick interval, whichever first.
+                try:
+                    item = await asyncio.wait_for(queue.get(), timeout=TICK)
+                    if item is None:
+                        done = True
+                    else:
+                        pending += item
+                except asyncio.TimeoutError:
+                    pass
+
+                # Non-blocking drain of anything else already queued.
+                while not queue.empty():
+                    item = queue.get_nowait()
+                    if item is None:
+                        done = True
+                        break
+                    pending += item
+
+                if not pending:
+                    continue
+
+                now = time.monotonic()
+                if (now - last_release) < TICK and not done:
+                    continue  # too soon since last release
+
+                n = _pick_release(pending)
+                release = pending[:n]
+                pending = pending[n:]
+
+                await send_queue.put(release)
+                last_release = time.monotonic()
+
+            # ── End of stream: drain remaining text into the sender. ──
+            while pending:
+                n = _pick_release(pending)
+                release = pending[:n]
+                pending = pending[n:]
+                await send_queue.put(release)
+
+            # Signal sender to finish and wait for all sends to complete.
+            await send_queue.put(None)
+            await sender_task
+
+            if sender_error is not None:
+                raise sender_error
+
+            # Surface producer errors before falling back to postMessage,
+            # so dispatch_async can retry via the buffered path.
+            await producer_task
+            if producer_error is not None:
+                raise producer_error
+
+            if stream_ts is None:
+                # Zero text produced — fall back to postMessage.
+                full_text = "".join(accumulated_chunks)
+                await client.chat_postMessage(
+                    channel=channel,
+                    thread_ts=original.thread_id,
+                    text=full_text or "(empty response)",
+                )
+                return full_text
+
+            await client.chat_stopStream(
+                channel=channel,
+                ts=stream_ts,
+            )
+
+            return "".join(accumulated_chunks)
+
+        except Exception:
+            # Error mid-stream: stop the sender and finalize gracefully
+            # so the Slack UI doesn't show a perpetual loading state.
+            if "sender_task" in locals() and not sender_task.done():
+                sender_task.cancel()
+                try:
+                    await sender_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+            if stream_ts is not None:
+                try:
+                    await client.chat_stopStream(
+                        channel=channel,
+                        ts=stream_ts,
+                    )
+                except Exception:
+                    log.debug("stream_reply: stopStream cleanup failed", exc_info=True)
+            raise
 
     async def reply(self, original: InboundMessage, out: OutboundMessage) -> None:
         """Post a reply via Slack `chat.postMessage`.

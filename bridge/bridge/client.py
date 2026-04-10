@@ -23,6 +23,7 @@ import asyncio
 import json
 import logging
 import os
+from collections.abc import AsyncGenerator
 from typing import Any
 
 import httpx
@@ -30,6 +31,29 @@ import httpx
 from .gateway_jwt import mint_token
 
 log = logging.getLogger(__name__)
+
+
+def _parse_sse_frame(line: str) -> str | None:
+    """Parse a single SSE ``data:`` line and return the text payload, or None.
+
+    Returns a string for assistant text chunks. Returns None for non-data
+    lines, empty payloads, and telemetry dicts. Falls back to the raw
+    payload on JSON decode errors (defensive against format drift).
+    """
+    if not line.startswith("data:"):
+        return None
+    payload = line[len("data:"):].lstrip()
+    if not payload:
+        return None
+    try:
+        decoded = json.loads(payload)
+    except json.JSONDecodeError:
+        return payload
+    if isinstance(decoded, str):
+        return decoded
+    if isinstance(decoded, dict) and "data" in decoded and isinstance(decoded["data"], str):
+        return decoded["data"]
+    return None
 
 
 def _parse_sse_text(text: str) -> str:
@@ -45,7 +69,7 @@ def _parse_sse_text(text: str) -> str:
 
     Each `<payload>` is JSON-encoded by the runtime. For string yields
     (the common case for `agent.stream_async`), we get back a JSON
-    string literal like `\"hello\"`. For dict yields (telemetry events),
+    string literal like ``"hello"``. For dict yields (telemetry events),
     we get back a JSON object — those we drop.
 
     The parser is intentionally lenient:
@@ -57,25 +81,10 @@ def _parse_sse_text(text: str) -> str:
     if not text:
         return ""
     chunks: list[str] = []
-    for raw_event in text.split("\n\n"):
-        for line in raw_event.split("\n"):
-            if not line.startswith("data:"):
-                continue
-            payload = line[len("data:"):].lstrip()
-            if not payload:
-                continue
-            try:
-                decoded = json.loads(payload)
-            except json.JSONDecodeError:
-                # Format drift: append the raw line, minus the "data:" prefix.
-                chunks.append(payload)
-                continue
-            if isinstance(decoded, str):
-                chunks.append(decoded)
-            elif isinstance(decoded, dict) and "data" in decoded and isinstance(decoded["data"], str):
-                # Some runtime versions wrap chunks as {"data": "chunk"}.
-                chunks.append(decoded["data"])
-            # Anything else (telemetry dicts, lists, numbers) is dropped.
+    for line in text.split("\n"):
+        chunk = _parse_sse_frame(line)
+        if chunk is not None:
+            chunks.append(chunk)
     return "".join(chunks)
 
 
@@ -96,21 +105,14 @@ class AgentCoreClient:
                 "or LOCAL_AGENT_URL (local dev) — neither is set."
             )
 
-    async def invoke(
+    def _prepare_payload(
         self,
-        *,
         tenant_id: str,
         prompt: str,
-        ctx: dict[str, Any] | None = None,
-    ) -> str:
+        ctx: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Build the invocation payload, including the per-invocation Gateway JWT."""
         ctx = dict(ctx or {})
-        # Mint a fresh per-invocation JWT for the AgentCore Gateway
-        # CUSTOM_JWT authorizer. The agent forwards this on every MCP
-        # call as `Authorization: Bearer <jwt>`. Best-effort: if minting
-        # fails (e.g. missing key in production misconfiguration), we
-        # log and proceed without the JWT — BYO calls will then fail
-        # with a 401 from the Gateway, which is louder than silently
-        # falling back to no auth and producing wrong-tenant data.
         try:
             ctx["gateway_jwt"] = mint_token(tenant_id)
         except Exception as e:  # noqa: BLE001
@@ -120,9 +122,17 @@ class AgentCoreClient:
                 tenant_id,
                 e,
             )
+        return {"tenant_id": tenant_id, "prompt": prompt, "ctx": ctx}
 
-        payload = {"tenant_id": tenant_id, "prompt": prompt, "ctx": ctx}
-
+    async def invoke(
+        self,
+        *,
+        tenant_id: str,
+        prompt: str,
+        ctx: dict[str, Any] | None = None,
+    ) -> str:
+        """Invoke the agent and return the full buffered response."""
+        payload = self._prepare_payload(tenant_id, prompt, ctx)
         if self.local_agent_url:
             return await self._invoke_local(payload)
         return await self._invoke_aws(payload)
@@ -154,7 +164,13 @@ class AgentCoreClient:
         # Lazy import so local dev doesn't require boto3 to be importable.
         import boto3
 
-        client = boto3.client("bedrock-agentcore", region_name=self.region)
+        from botocore.config import Config
+
+        client = boto3.client(
+            "bedrock-agentcore",
+            region_name=self.region,
+            config=Config(read_timeout=600),
+        )
 
         # Pull a stable user_id and session_id from the payload's ctx if
         # present, so multi-turn / per-user tracing works once we add it.
@@ -190,3 +206,121 @@ class AgentCoreClient:
 
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, _call)
+
+    # ------------------------------------------------------------------
+    # Streaming path — yields chunks as they arrive from the SSE stream
+    # ------------------------------------------------------------------
+
+    async def invoke_stream(
+        self,
+        *,
+        tenant_id: str,
+        prompt: str,
+        ctx: dict[str, Any] | None = None,
+    ) -> AsyncGenerator[str, None]:
+        """Invoke the agent and yield text chunks as they arrive."""
+        payload = self._prepare_payload(tenant_id, prompt, ctx)
+        if self.local_agent_url:
+            gen = self._invoke_stream_local(payload)
+        else:
+            gen = self._invoke_stream_aws(payload)
+        async for chunk in gen:
+            yield chunk
+
+    async def _invoke_stream_local(self, payload: dict[str, Any]) -> AsyncGenerator[str, None]:
+        """Local dev streaming: httpx streaming response, parse SSE lines."""
+        url = f"{self.local_agent_url.rstrip('/')}/invocations"
+        async with httpx.AsyncClient(timeout=600.0) as http:
+            async with http.stream("POST", url, json=payload) as response:
+                response.raise_for_status()
+                async for line in response.aiter_lines():
+                    if not line:
+                        continue
+                    chunk = _parse_sse_frame(line)
+                    if chunk is not None:
+                        yield chunk
+
+    async def _invoke_stream_aws(self, payload: dict[str, Any]) -> AsyncGenerator[str, None]:
+        """Production streaming: boto3 StreamingBody → asyncio.Queue → yield.
+
+        boto3 is synchronous, so we read the stream in an executor thread
+        and push parsed chunks through a queue to the async consumer.
+        """
+        import boto3
+
+        queue: asyncio.Queue[str | Exception | None] = asyncio.Queue()
+        loop = asyncio.get_event_loop()
+
+        ctx = payload.get("ctx") or {}
+        runtime_user_id = ctx.get("user_id") or "default-user"
+
+        def _read_stream() -> None:
+            try:
+                from botocore.config import Config
+
+                # Agent may pause for extended thinking or tool execution;
+                # the default 60s read timeout is not enough.
+                client = boto3.client(
+                    "bedrock-agentcore",
+                    region_name=self.region,
+                    config=Config(read_timeout=600),
+                )
+                kwargs: dict[str, Any] = {
+                    "agentRuntimeArn": self.runtime_arn,
+                    "payload": json.dumps(payload).encode("utf-8"),
+                    "runtimeUserId": runtime_user_id,
+                }
+                response = client.invoke_agent_runtime(**kwargs)
+                body = response.get("response") or response.get("body")
+
+                if hasattr(body, "iter_lines"):
+                    for raw_line in body.iter_lines():
+                        line = raw_line.decode("utf-8") if isinstance(raw_line, (bytes, bytearray)) else str(raw_line)
+                        if not line:
+                            continue
+                        chunk = _parse_sse_frame(line)
+                        if chunk is not None:
+                            loop.call_soon_threadsafe(queue.put_nowait, chunk)
+                elif hasattr(body, "__iter__"):
+                    leftover = ""
+                    for raw_bytes in body:
+                        text = raw_bytes.decode("utf-8") if isinstance(raw_bytes, (bytes, bytearray)) else str(raw_bytes)
+                        text = leftover + text
+                        lines = text.split("\n")
+                        leftover = lines.pop()
+                        for line in lines:
+                            if not line:
+                                continue
+                            chunk = _parse_sse_frame(line)
+                            if chunk is not None:
+                                loop.call_soon_threadsafe(queue.put_nowait, chunk)
+                    if leftover:
+                        chunk = _parse_sse_frame(leftover)
+                        if chunk is not None:
+                            loop.call_soon_threadsafe(queue.put_nowait, chunk)
+                elif hasattr(body, "read"):
+                    raw = body.read()
+                    text = raw.decode("utf-8") if isinstance(raw, (bytes, bytearray)) else str(raw)
+                    for line in text.split("\n"):
+                        if not line:
+                            continue
+                        chunk = _parse_sse_frame(line)
+                        if chunk is not None:
+                            loop.call_soon_threadsafe(queue.put_nowait, chunk)
+            except Exception as exc:
+                loop.call_soon_threadsafe(queue.put_nowait, exc)
+            finally:
+                loop.call_soon_threadsafe(queue.put_nowait, None)
+
+        future = loop.run_in_executor(None, _read_stream)
+
+        try:
+            while True:
+                item = await queue.get()
+                if item is None:
+                    break
+                if isinstance(item, Exception):
+                    raise item
+                yield item
+        finally:
+            await future
