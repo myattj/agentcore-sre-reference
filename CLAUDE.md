@@ -277,6 +277,8 @@ agentcorePlayground/
 │           ├── attach_agent_policy.sh  # attach managed policy to agent role post-deploy
 │           ├── provision_memory.py  # create shared AgentCore Memory resource + store ID in SSM
 │           └── delete_memory.py     # tear down memory resource + purge SSM params
+├── .github/workflows/
+│   └── ci-cd.yml                    # CI gates + deploy on merge (see header for OIDC setup)
 └── examples/
     ├── tenants/                     # AGENT_LOCAL_STORES=1 source of truth (one JSON per tenant)
     │   └── demo.json
@@ -303,6 +305,9 @@ agentcorePlayground/
 | Change the session token TTL | `bridge/bridge/slack_oauth.py:_SESSION_TTL_SECONDS` AND `onboarding/lib/session.ts:SESSION_TTL_SECONDS` (must match — see gotcha #22) |
 | Change what happens after OAuth install | `bridge/bridge/slack_oauth.py:handle_oauth_callback` (the redirect target) |
 | Change the "Coming soon" integration list | `onboarding/app/onboarding/[tenantId]/integrations/page.tsx` |
+| Add/change a CI test gate | `.github/workflows/ci-cd.yml` (add a job under the "Test gates" section) |
+| Change deploy config (ARNs, domain) | GitHub repo variables (Settings > Actions > Variables) — see workflow header |
+| Update agentcore CLI version for CI | `.github/workflows/ci-cd.yml` (`npm install -g @aws/agentcore@<version>`) |
 
 ---
 
@@ -464,8 +469,9 @@ In-code work that's still pending:
 - **Multi-environment AWS accounts** (dev/staging/prod)
 - **Observability beyond CloudWatch defaults** (Langfuse, Phoenix, OTel export)
 - **Eval harness** for prompt regressions
-- **CI/CD, devcontainer, pre-commit hooks**
-- **Bridge service infra** — the bridge is currently run via `uvicorn` locally; production needs a Fargate task or Lambda. The `AgentCoreBridgeDataAccess` managed policy is ready to attach once the role exists.
+- ~~**CI/CD**~~ **landed** — `.github/workflows/ci-cd.yml`: bridge pytest, onboarding build, CDK synth as PR gates; automated agent + services deploy on merge to main via GitHub OIDC. See setup instructions in the workflow file header.
+- **Devcontainer, pre-commit hooks** (low priority until 2nd engineer)
+- ~~**Bridge service infra**~~ **landed (week 7)** — bridge + onboarding on Fargate behind ALB at `app.novari.dev`.
 
 External actions blocking week-2 verification (in-repo work is done):
 - **Register the shared Slack app** at api.slack.com using the manifest in BUILD_PLAN.md

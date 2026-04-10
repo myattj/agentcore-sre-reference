@@ -1,0 +1,175 @@
+# CI/CD pipeline for the AgentCore multi-tenant agent platform.
+#
+# CI gates (every PR + push to main):
+#   - Bridge pytest (Python 3.13)
+#   - Onboarding Next.js build (TypeScript check)
+#   - infra/data CDK synth (CloudFormation validation)
+#
+# Deploy (push to main only, after gates pass):
+#   - Agent runtime via `agentcore deploy`
+#   - Bridge + onboarding Fargate services via CDK
+#
+# ── One-time setup ────────────────────────────────────────────────
+#
+# 1. Create an OIDC identity provider in IAM:
+#      Provider URL: https://token.actions.githubusercontent.com
+#      Audience:     sts.amazonaws.com
+#
+# 2. Create an IAM role (e.g. "github-actions-deploy") with:
+#      Trust policy:
+#        {
+#          "Version": "2012-10-17",
+#          "Statement": [{
+#            "Effect": "Allow",
+#            "Principal": {
+#              "Federated": "arn:aws:iam::<ACCOUNT>:oidc-provider/token.actions.githubusercontent.com"
+#            },
+#            "Action": "sts:AssumeRoleWithWebIdentity",
+#            "Condition": {
+#              "StringEquals": {
+#                "token.actions.githubusercontent.com:aud": "sts.amazonaws.com"
+#              },
+#              "StringLike": {
+#                "token.actions.githubusercontent.com:sub": "repo:myattj/agentcorePlayground:*"
+#              }
+#            }
+#          }]
+#        }
+#      Permissions: AdministratorAccess (tighten later once stable)
+#
+# 3. Add GitHub repository variables (Settings > Secrets and variables > Actions > Variables):
+#      AWS_DEPLOY_ROLE_ARN   = arn:aws:iam::<ACCOUNT>:role/github-actions-deploy
+#      AGENT_RUNTIME_ARN     = arn:aws:bedrock-agentcore:us-west-2:<ACCOUNT>:runtime/coreAgent_coreAgent-dyGFWRDGwJ
+#      CERTIFICATE_ARN       = arn:aws:acm:us-west-2:<ACCOUNT>:certificate/<id>
+#      DOMAIN_NAME           = app.novari.dev
+#      SLACK_SECRETS_ARN     = arn:aws:secretsmanager:us-west-2:<ACCOUNT>:secret:agentcore/services/slack-<suffix>
+#      BRIDGE_SECRETS_ARN    = arn:aws:secretsmanager:us-west-2:<ACCOUNT>:secret:agentcore/services/bridge-<suffix>
+# ──────────────────────────────────────────────────────────────────
+
+name: CI/CD
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: cicd-${{ github.ref }}
+  # Cancel in-progress CI on PRs; queue deploys on main.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  # ─── Test gates ──────────────────────────────────────
+
+  bridge-tests:
+    name: Bridge pytest
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: bridge
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: astral-sh/setup-uv@v4
+      - run: uv sync --extra dev
+      - run: uv run pytest
+
+  onboarding-check:
+    name: Onboarding build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: onboarding
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: onboarding/package-lock.json
+      - run: npm ci
+      # next build runs tsc and validates the full production build.
+      - run: npm run build
+        env:
+          NEXT_PUBLIC_BRIDGE_INSTALL_URL: https://ci.test/slack/install
+
+  cdk-synth:
+    name: CDK synth
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: infra/data
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: infra/data/package-lock.json
+      - run: npm ci
+      - run: npm run build
+      # Dummy account — synth is purely local, no AWS calls.
+      - run: npx cdk synth --quiet
+        env:
+          CDK_DEFAULT_ACCOUNT: "000000000000"
+
+  # ─── Deploy (main only, after gates pass) ────────────
+
+  deploy-agent:
+    name: Deploy agent
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: [bridge-tests, onboarding-check, cdk-synth]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: us-west-2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: coreAgent/agentcore/cdk/package-lock.json
+      - run: npm install -g @aws/agentcore@0.6.0
+      - run: cd coreAgent/agentcore/cdk && npm ci
+      - name: agentcore deploy
+        working-directory: coreAgent
+        run: agentcore deploy
+
+  deploy-services:
+    name: Deploy services
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: [bridge-tests, onboarding-check, cdk-synth]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: us-west-2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: infra/data/package-lock.json
+      - run: cd infra/data && npm ci
+      # Builds Docker images for bridge + onboarding, pushes to ECR,
+      # updates Fargate task definitions, triggers rolling deploy.
+      - name: CDK deploy services
+        working-directory: infra/data
+        run: |
+          npm run build
+          npx cdk deploy AgentCore-coreAgent-services-us-west-2 \
+            --require-approval never \
+            --context agentRuntimeArn=${{ vars.AGENT_RUNTIME_ARN }} \
+            --context certificateArn=${{ vars.CERTIFICATE_ARN }} \
+            --context domainName=${{ vars.DOMAIN_NAME }} \
+            --context slackSecretsArn=${{ vars.SLACK_SECRETS_ARN }} \
+            --context bridgeSecretsArn=${{ vars.BRIDGE_SECRETS_ARN }}
