@@ -226,76 +226,78 @@ def _build_memory_session_manager(
     )
 
 
-def _build_self_awareness_block(
-    config: TenantConfig,
-    effective_tools: list[str],
-) -> str:
-    """Generate a system prompt appendix describing the bot's own configuration.
+def _build_self_awareness_block(config: TenantConfig) -> str:
+    """Generate a system prompt appendix describing the bot's non-default config.
 
-    Appended to the effective system prompt so the bot knows its own skills,
-    bot policy, escalation routes, and tools. Always includes guidance on
-    using ``manage_config`` since it's a system tool (always available).
+    Returns an empty string for zero-config tenants — the base system prompt
+    stands alone and the LLM reasons about the defaults from the tool schemas
+    it already sees. The block only fires when there's something the LLM
+    can't infer from its tools: custom skills, a non-default bot policy
+    (allow_all_bots is True by default), or configured escalation routes.
+
+    When any of those are present, we also append the ``manage_config``
+    guidance so the LLM knows it can modify these settings at user request.
+    Enabled tools and context assembly flags are deliberately omitted — the
+    former is duplicative with the tool schemas the LLM already has, and the
+    latter is bridge-side plumbing the LLM can't act on.
     """
-    parts = ["\n\n## Your Configuration"]
+    sections: list[str] = []
 
-    # Skills
     if config.skills:
-        skill_lines = []
+        skill_lines: list[str] = []
         for s in config.skills:
             kind = "slash command" if s.trigger.startswith("/") else "regex"
             line = f"- `{s.trigger}` ({kind}) -> {s.name}"
             if s.channels:
                 line += f" [only in: {', '.join(s.channels)}]"
             skill_lines.append(line)
-        parts.append(
+        sections.append(
             f"**Skills:** {len(config.skills)} configured\n"
             + "\n".join(skill_lines)
         )
-    else:
-        parts.append("**Skills:** none configured")
 
-    # Bot policy
+    # Bot policy: only surface when it diverges from the zero-config default
+    # (allow_all_bots=True, empty trusted_bot_ids, empty open_channels).
+    # When surfaced, accurately reflects the four-tier evaluation from
+    # ``BotPolicyConfig`` — the old implementation incorrectly said
+    # "humans only" whenever the lists were empty, ignoring ``allow_all_bots``.
     bp = config.bot_policy
-    bp_parts = []
-    if bp.trusted_bot_ids:
-        bp_parts.append(f"Trusted bots: {', '.join(bp.trusted_bot_ids)}")
-    if bp.open_channels:
-        bp_parts.append(f"Open channels: {', '.join(bp.open_channels)}")
-    if bp_parts:
-        parts.append("**Bot Policy:** " + ". ".join(bp_parts))
-    else:
-        parts.append("**Bot Policy:** humans only (no trusted bots or open channels)")
+    is_default_policy = (
+        bp.allow_all_bots is True
+        and not bp.trusted_bot_ids
+        and not bp.open_channels
+    )
+    if not is_default_policy:
+        descriptors: list[str] = []
+        if bp.allow_all_bots:
+            descriptors.append("all bots allowed")
+        if bp.trusted_bot_ids:
+            descriptors.append(f"trusted bots: {', '.join(bp.trusted_bot_ids)}")
+        if bp.open_channels:
+            descriptors.append(f"open channels: {', '.join(bp.open_channels)}")
+        if not descriptors:
+            # allow_all_bots=False and both lists empty: humans only
+            descriptors.append("humans only")
+        sections.append("**Bot Policy:** " + "; ".join(descriptors))
 
-    # Escalation routes
     if config.escalation.routes:
         route_lines = [
             f"- {r.team_name} -> {r.channel_id}"
             for r in config.escalation.routes
         ]
-        parts.append("**Escalation Routes:**\n" + "\n".join(route_lines))
+        sections.append("**Escalation Routes:**\n" + "\n".join(route_lines))
 
-    # Enabled tools
-    parts.append(f"**Enabled Tools:** {', '.join(effective_tools)}")
+    if not sections:
+        return ""
 
-    # Context assembly
-    ca = config.context_assembly
-    flags = []
-    if ca.resolve_permalinks:
-        flags.append("permalink resolution")
-    if ca.inject_thread_history:
-        flags.append(f"thread history ({ca.thread_history_depth} msgs)")
-    if flags:
-        parts.append(f"**Context Assembly:** {', '.join(flags)}")
-
-    # Self-modification guidance (manage_config is always available)
-    parts.append(
-        "\n**Updating Settings:** Users can ask you to add skills, change "
+    sections.append(
+        "**Updating Settings:** Users can ask you to add skills, change "
         "bot policy, update escalation routes, or modify other settings at "
         "any time. Use the `manage_config` tool to view or update your "
         "configuration. Changes persist and take effect on the next message."
     )
 
-    return "\n\n".join(parts)
+    return "\n\n## Your Configuration\n\n" + "\n\n".join(sections)
 
 
 @app.entrypoint
@@ -396,8 +398,10 @@ async def invoke(payload, context):
             log.info("Skill matched: %s for tenant=%s", assembled.matched_skill, tenant_id)
 
         # Self-awareness: the bot knows its own config so it can explain
-        # itself and help users modify settings via manage_config.
-        effective_prompt += _build_self_awareness_block(config, effective_tools)
+        # itself and help users modify settings via manage_config. Returns
+        # an empty string for zero-config tenants — the base prompt stands
+        # alone when there's nothing non-default to announce.
+        effective_prompt += _build_self_awareness_block(config)
 
         catalog_tools = build_catalog_tools(
             effective_tools,
