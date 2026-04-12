@@ -60,6 +60,22 @@ export interface ServicesStackProps extends StackProps {
 
   /** Managed policy ARN from DataStack for the onboarding task role. */
   readonly onboardingDataAccessPolicyArn: string;
+
+  /**
+   * Secrets Manager ARN for `agentcore/services/sandbox` ({ CALLBACK_SECRET }).
+   *
+   * Pre-created out-of-band (NOT CDK-managed) so the same value can be
+   * read by BOTH the bridge task def (this stack) and the sandbox task
+   * def (sandbox-stack.ts) without giving either side access to the
+   * `agentcore/services/bridge` crown jewels (BRIDGE_GATEWAY_JWT_PRIVATE_KEY_PEM).
+   * The sandbox runs Claude-authored bash; tight blast radius is the point.
+   *
+   * Used here to inject `SANDBOX_CALLBACK_SECRET` into the bridge
+   * container, which the bridge's `/internal/sandbox_complete` handler
+   * checks via `hmac.compare_digest` against the Authorization Bearer
+   * header sent by the sandbox container.
+   */
+  readonly sandboxSecretsArn: string;
 }
 
 export class ServicesStack extends Stack {
@@ -106,6 +122,11 @@ export class ServicesStack extends Stack {
     );
     const bridgeSecret = secretsmanager.Secret.fromSecretCompleteArn(
       this, 'BridgeSecret', props.bridgeSecretsArn,
+    );
+    // Phase B: shared bridge↔sandbox callback secret. Same secret read
+    // by sandbox-stack.ts so both sides agree on the Bearer token.
+    const sandboxSecret = secretsmanager.Secret.fromSecretCompleteArn(
+      this, 'SandboxSecret', props.sandboxSecretsArn,
     );
 
     // ------------------------------------------------------------------
@@ -175,7 +196,7 @@ export class ServicesStack extends Stack {
         priority: 10,
         conditions: [
           elbv2.ListenerCondition.pathPatterns([
-            '/slack/*', '/api/*', '/.well-known/*', '/jwks.json', '/healthz',
+            '/slack/*', '/api/*', '/internal/*', '/.well-known/*', '/jwks.json', '/healthz',
           ]),
         ],
         action: elbv2.ListenerAction.forward([bridgeTg]),
@@ -201,7 +222,7 @@ export class ServicesStack extends Stack {
         priority: 10,
         conditions: [
           elbv2.ListenerCondition.pathPatterns([
-            '/slack/*', '/api/*', '/.well-known/*', '/jwks.json', '/healthz',
+            '/slack/*', '/api/*', '/internal/*', '/.well-known/*', '/jwks.json', '/healthz',
           ]),
         ],
         action: elbv2.ListenerAction.forward([bridgeTg]),
@@ -221,6 +242,7 @@ export class ServicesStack extends Stack {
     });
     slackSecret.grantRead(execRole);
     bridgeSecret.grantRead(execRole);
+    sandboxSecret.grantRead(execRole);
 
     // ------------------------------------------------------------------
     // Bridge task role (what the container can do at runtime)
@@ -333,6 +355,12 @@ export class ServicesStack extends Stack {
         // Same value is injected into the onboarding task below so the
         // /ops login page can validate the cookie.
         ADMIN_SECRET: ecs.Secret.fromSecretsManager(bridgeSecret, 'ADMIN_SECRET'),
+        // Phase B: shared with the sandbox container — guards
+        // POST /internal/sandbox_complete. The bridge handler verifies
+        // the Authorization: Bearer header against this value via
+        // hmac.compare_digest. Sandbox reads the SAME secret value at
+        // runtime via its own task def in sandbox-stack.ts.
+        SANDBOX_CALLBACK_SECRET: ecs.Secret.fromSecretsManager(sandboxSecret, 'CALLBACK_SECRET'),
       },
     });
 
@@ -435,6 +463,44 @@ export class ServicesStack extends Stack {
     new CfnOutput(this, 'ClusterName', {
       value: cluster.clusterName,
       description: 'ECS cluster name for CLI operations.',
+      exportName: `${this.stackName}-ClusterName`,
+    });
+
+    // ------------------------------------------------------------------
+    // Phase B exports — consumed by SandboxStack via Fn.importValue.
+    // SandboxStack rehydrates the cluster + VPC via fromXxxAttributes
+    // so it can register a new task def in the same network without
+    // taking a hard cross-stack reference (which would tangle the
+    // cdk destroy semantics).
+    // ------------------------------------------------------------------
+    new CfnOutput(this, 'ClusterArn', {
+      value: cluster.clusterArn,
+      description: 'ECS cluster ARN — SandboxStack reads this for ecs.run_task.',
+      exportName: `${this.stackName}-ClusterArn`,
+    });
+
+    new CfnOutput(this, 'VpcId', {
+      value: vpc.vpcId,
+      description: 'VPC ID — SandboxStack rehydrates the VPC via Vpc.fromVpcAttributes.',
+      exportName: `${this.stackName}-VpcId`,
+    });
+
+    new CfnOutput(this, 'VpcAvailabilityZones', {
+      value: vpc.availabilityZones.join(','),
+      description: 'Comma-joined VPC AZs — needed by Vpc.fromVpcAttributes.',
+      exportName: `${this.stackName}-VpcAvailabilityZones`,
+    });
+
+    new CfnOutput(this, 'VpcPublicSubnetIds', {
+      value: vpc.publicSubnets.map(s => s.subnetId).join(','),
+      description: 'Comma-joined public subnet IDs — sandbox tasks run in these subnets.',
+      exportName: `${this.stackName}-VpcPublicSubnetIds`,
+    });
+
+    new CfnOutput(this, 'VpcPublicSubnetRouteTableIds', {
+      value: vpc.publicSubnets.map(s => s.routeTable.routeTableId).join(','),
+      description: 'Comma-joined route table IDs — needed by Vpc.fromVpcAttributes for subnet selection.',
+      exportName: `${this.stackName}-VpcPublicSubnetRouteTableIds`,
     });
   }
 }

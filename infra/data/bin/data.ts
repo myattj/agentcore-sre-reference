@@ -13,6 +13,7 @@ import { App, Fn } from 'aws-cdk-lib';
 import { DataStack } from '../lib/data-stack';
 import { GatewayStack } from '../lib/gateway-stack';
 import { ObservabilityStack } from '../lib/observability-stack';
+import { SandboxStack } from '../lib/sandbox-stack';
 import { ServicesStack } from '../lib/services-stack';
 
 const app = new App();
@@ -116,6 +117,7 @@ if (bridgePublicUrl) {
 //   --context agentRuntimeArn=arn:aws:bedrock-agentcore:...
 //   --context slackSecretsArn=arn:aws:secretsmanager:...
 //   --context bridgeSecretsArn=arn:aws:secretsmanager:...
+//   --context sandboxSecretsArn=arn:aws:secretsmanager:... (Phase B)
 //
 // Optional context:
 //   --context certificateArn=arn:aws:acm:... (HTTPS; omit for HTTP-only testing)
@@ -123,7 +125,17 @@ if (bridgePublicUrl) {
 //
 // Skipped silently when agentRuntimeArn is not set.
 const agentRuntimeArn = app.node.tryGetContext('agentRuntimeArn') as string | undefined;
+const sandboxSecretsArn = app.node.tryGetContext('sandboxSecretsArn') as string | undefined;
 if (agentRuntimeArn) {
+  if (!sandboxSecretsArn) {
+    throw new Error(
+      'sandboxSecretsArn context is required when agentRuntimeArn is set. ' +
+        'Pre-create the secret out-of-band: ' +
+        '`aws secretsmanager create-secret --name agentcore/services/sandbox ' +
+        '--secret-string \'{"CALLBACK_SECRET":"<random hex>"}\' --region us-west-2`, ' +
+        'then pass `--context sandboxSecretsArn=arn:aws:secretsmanager:...`.',
+    );
+  }
   const dataStackName = `AgentCore-coreAgent-data-${region}`;
 
   new ServicesStack(app, `AgentCore-coreAgent-services-${region}`, {
@@ -139,8 +151,78 @@ if (agentRuntimeArn) {
     domainName: app.node.tryGetContext('domainName') as string | undefined,
     slackSecretsArn: app.node.tryGetContext('slackSecretsArn') as string,
     bridgeSecretsArn: app.node.tryGetContext('bridgeSecretsArn') as string,
+    sandboxSecretsArn,
     bridgeDataAccessPolicyArn: Fn.importValue(`${dataStackName}-BridgeDataAccessPolicyArn`),
     onboardingDataAccessPolicyArn: Fn.importValue(`${dataStackName}-OnboardingDataAccessPolicyArn`),
+  });
+}
+
+// SandboxStack — Phase B. Deploys the Fargate task definition that opens
+// PRs via `propose_pr`, plus the sandbox_jobs DDB table and the
+// AgentCoreSandboxAccess managed policy.
+//
+// Required context (all populated by `infra/data/scripts/deploy_sandbox.sh`
+// from ServicesStack outputs — don't pass these by hand, run the wrapper):
+//   --context sandboxSecretsArn=arn:aws:secretsmanager:...
+//   --context sandboxVpcId=vpc-...
+//   --context sandboxAvailabilityZones=us-west-2a,us-west-2b
+//   --context sandboxPublicSubnetIds=subnet-...,subnet-...
+//   --context sandboxClusterName=agentcore-services
+//   --context sandboxClusterArn=arn:aws:ecs:...
+//   --context sandboxDomainName=agent.example.com  (used to build the
+//     SANDBOX_CALLBACK_URL the sandbox container POSTs back to)
+//
+// Optional:
+//   --context sandboxGithubAppId=123456  (defaults to the prod app)
+//
+// Skipped silently when sandboxSecretsArn is not set, so existing
+// data + services deploys still work standalone.
+const sandboxVpcId = app.node.tryGetContext('sandboxVpcId') as string | undefined;
+if (sandboxSecretsArn && sandboxVpcId) {
+  const sandboxAvailabilityZones = (
+    app.node.tryGetContext('sandboxAvailabilityZones') as string | undefined
+  )?.split(',').map((s) => s.trim()).filter(Boolean);
+  const sandboxPublicSubnetIds = (
+    app.node.tryGetContext('sandboxPublicSubnetIds') as string | undefined
+  )?.split(',').map((s) => s.trim()).filter(Boolean);
+  const sandboxClusterName = app.node.tryGetContext('sandboxClusterName') as string | undefined;
+  const sandboxClusterArn = app.node.tryGetContext('sandboxClusterArn') as string | undefined;
+  const sandboxDomainName = app.node.tryGetContext('sandboxDomainName') as string | undefined;
+  const sandboxGithubAppId =
+    (app.node.tryGetContext('sandboxGithubAppId') as string | undefined) ?? '123456';
+
+  const missing: string[] = [];
+  if (!sandboxAvailabilityZones?.length) missing.push('sandboxAvailabilityZones');
+  if (!sandboxPublicSubnetIds?.length) missing.push('sandboxPublicSubnetIds');
+  if (!sandboxClusterName) missing.push('sandboxClusterName');
+  if (!sandboxClusterArn) missing.push('sandboxClusterArn');
+  if (!sandboxDomainName) missing.push('sandboxDomainName');
+  if (missing.length) {
+    throw new Error(
+      `SandboxStack: missing required context: ${missing.join(', ')}. ` +
+        'Run `bash infra/data/scripts/deploy_sandbox.sh` instead of ' +
+        '`npm run deploy` directly — the wrapper extracts these values ' +
+        'from ServicesStack outputs and threads them in for you.',
+    );
+  }
+
+  new SandboxStack(app, `AgentCore-coreAgent-sandbox-${region}`, {
+    env: { account, region },
+    description:
+      'Phase B: Fargate sandbox task def + sandbox_jobs DDB + ' +
+      'AgentCoreSandboxAccess managed policy for the propose_pr tool.',
+    tags: {
+      'agentcore:project-name': 'coreAgent',
+      'agentcore:stack-type': 'sandbox',
+    },
+    vpcId: sandboxVpcId,
+    availabilityZones: sandboxAvailabilityZones!,
+    publicSubnetIds: sandboxPublicSubnetIds!,
+    clusterName: sandboxClusterName!,
+    clusterArn: sandboxClusterArn!,
+    sandboxSecretsArn: sandboxSecretsArn!,
+    githubAppId: sandboxGithubAppId,
+    callbackUrl: `https://${sandboxDomainName}/internal/sandbox_complete`,
   });
 }
 
