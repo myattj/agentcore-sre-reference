@@ -277,12 +277,33 @@ BUILTIN_SKILLS: list[SkillDef] = [
             "## Your task\n\n"
             "Respond to this incident. Scale your response to the situation:\n"
             "- If it's a quick alert mention, give a fast severity read + immediate next steps.\n"
-            "- If it's a full incident report with context, do a thorough triage.\n"
+            "- If it's a full incident report with context, do a thorough investigation.\n"
             "- If the user is asking for help mid-incident, read the thread and figure out what they need.\n\n"
-            "### Investigation steps\n"
-            "- Call `read_thread_context` to understand what's happening.\n"
+            "### Investigation steps\n\n"
+            "**1. Gather context** (run these in parallel):\n"
+            "- Call `read_thread_context` to understand what's happening — look for metric names, "
+            "service tags, error messages, stack traces, and dashboard links.\n"
             "- Call `search_team_history` for similar past incidents — how were they resolved?\n"
             "- Call `search_docs` for relevant runbooks or known-issue documentation.\n\n"
+            "**2. Pull production metrics** (if monitoring tools are available):\n"
+            "- If your tools include `query_metrics`, query the relevant metrics around the incident "
+            "timeframe. Look for anomalies, spikes, or drops that correlate with the reported symptoms.\n"
+            "- If your tools include `get_recent_alerts`, check for related alerts that fired around "
+            "the same time — this can reveal cascading failures or shared root causes.\n"
+            "- If your tools include `search_logs`, search for error patterns in the affected service's logs.\n"
+            "- If these tools are not available, note that no monitoring integration is connected and "
+            "work with the context you have.\n\n"
+            "**3. Cross-reference with code changes:**\n"
+            "- Call `code_list_commits` for the affected service's repo, filtering to the timeframe "
+            "around the incident start. Recent deploys are the most common cause of production issues.\n"
+            "- If you find a suspicious commit, call `code_read_file` to inspect the changed files.\n"
+            "- Call `code_search` to find related code if you have error messages or function names "
+            "from the thread or logs.\n"
+            "- If you can't identify the right repo, call `ask_codebase_choice` to ask the user.\n\n"
+            "**4. Synthesize findings:**\n"
+            "- Correlate the metrics timeline with code changes. A deploy at 2:13 PM followed by a "
+            "latency spike at 2:15 PM is a strong signal.\n"
+            "- If you find the likely cause, link to the specific commit and file.\n\n"
             "### For a full triage, structure your response as:\n\n"
             "**Incident Triage**\n"
             "| Field | Detail |\n"
@@ -292,8 +313,12 @@ BUILTIN_SKILLS: list[SkillDef] = [
             "| **Severity** | SEV-1 critical / SEV-2 major / SEV-3 minor / SEV-4 low — why |\n"
             "| **Blast radius** | who/what is impacted |\n"
             "| **Started** | when, if known |\n\n"
-            "**Likely causes** (ranked):\n"
-            "1. ...\n\n"
+            "**Metrics** (if monitoring tools are available):\n"
+            "- [metric name] — [what it shows, when the anomaly started]\n\n"
+            "**Likely cause** (ranked):\n"
+            "1. [cause] — [evidence: commit hash, metric correlation, log pattern]\n\n"
+            "**Code changes in window:**\n"
+            "- [commit] by [author] at [time] — [summary of what changed]\n\n"
             "**Similar past incidents:**\n"
             "- [reference] — what happened, how it was fixed\n\n"
             "**Next steps:**\n"
@@ -304,9 +329,20 @@ BUILTIN_SKILLS: list[SkillDef] = [
             "- If this looks SEV-1 or SEV-2, suggest escalation via the `escalate` tool.\n"
             "- Be concise. SREs are busy during incidents.\n"
             "- If there isn't enough info to assess, ask 2-3 targeted questions.\n"
-            "- If the mention is casual (not a real incident report), just respond normally."
+            "- If the mention is casual (not a real incident report), just respond normally.\n"
+            "- Never fabricate metric values, commit hashes, or log entries. Only report what "
+            "the tools actually returned."
         ),
-        required_tools=["search_team_history", "search_docs", "read_thread_context", "escalate"],
+        required_tools=[
+            "search_team_history",
+            "search_docs",
+            "read_thread_context",
+            "escalate",
+            "code_search",
+            "code_read_file",
+            "code_list_commits",
+            "code_find_symbol",
+        ],
         channels=[],
     ),
 ]

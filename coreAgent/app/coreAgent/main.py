@@ -563,6 +563,7 @@ async def invoke(payload, context):
             tenant_id=tenant_id,
             codebases=config.codebases,
             memory_isolated_channels=config.memory.isolated_channels,
+            byo=config.byo,
         )
         effective_prompt = assembled.system_prompt
         user_message = assembled.enriched_message

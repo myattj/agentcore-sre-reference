@@ -44,7 +44,7 @@ from typing import Any
 import slack_api
 from codebase_memory import retrieve_codebase_affinity_hint
 from codebase_resolver import CodebaseContext, resolve_codebase_context
-from tenant import CodebasesConfig, ContextAssemblyConfig, SkillDef
+from tenant import ByoConfig, CodebasesConfig, ContextAssemblyConfig, SkillDef
 
 log = logging.getLogger(__name__)
 
@@ -82,6 +82,7 @@ def assemble_context(
     tenant_id: str,
     codebases: CodebasesConfig | None = None,
     memory_isolated_channels: list[str] | None = None,
+    byo: ByoConfig | None = None,
 ) -> AssembledContext:
     """Run the full context assembly pipeline.
 
@@ -100,6 +101,11 @@ def assemble_context(
     semantic lookup to pick the same actor_id that the session manager
     uses for writes — otherwise the retrieve and write sides query
     different namespaces and the hint never returns anything.
+
+    ``byo`` is optional (defaults to None for backward compatibility).
+    When provided and ``byo.enabled=True``, connected integrations are
+    injected as a prompt block so the model knows which Gateway tools
+    are available (e.g. Datadog metrics, PagerDuty alerts).
     """
     context_blocks: list[str] = []
 
@@ -161,6 +167,15 @@ def assemble_context(
         )
         if not codebase_ctx.disabled and codebase_ctx.prompt_block:
             effective_prompt += "\n\n" + codebase_ctx.prompt_block
+
+    # Step 5: Integration injection — tell the model which monitoring /
+    # observability tools are available via connected BYO integrations.
+    # This fires for ALL skills, not just incident-response, so any
+    # skill prompt that says "if your tools include query_metrics" gets
+    # the right signal.
+    integration_block = _build_integration_block(byo)
+    if integration_block:
+        effective_prompt += "\n\n" + integration_block
 
     # Assemble enriched message
     if context_blocks:
@@ -353,4 +368,58 @@ def _build_skill_match(skill: SkillDef, ctx: dict[str, Any]) -> SkillMatch:
         name=skill.name,
         prompt_addition=resolved,
         required_tools=list(skill.required_tools),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Step 5: Integration injection
+# ---------------------------------------------------------------------------
+
+# Maps integration name (as stored in byo.connected_integrations) to the
+# tools it exposes via the Gateway MCP target. Used to build a prompt hint
+# so the model knows which monitoring/observability tools are available.
+# Only integrations that provide tools relevant to investigation are listed
+# here — doc sources (Confluence, Notion) and issue trackers (Jira, Linear)
+# are already covered by search_docs and don't need explicit hints.
+_INTEGRATION_TOOLS: dict[str, tuple[str, list[str]]] = {
+    "datadog": (
+        "Datadog",
+        ["query_metrics", "get_recent_alerts", "search_logs"],
+    ),
+    "pagerduty": (
+        "PagerDuty",
+        ["list_incidents", "get_incident", "list_oncalls"],
+    ),
+}
+
+
+def _build_integration_block(byo: ByoConfig | None) -> str:
+    """Build a prompt block listing connected monitoring integrations.
+
+    Returns an empty string when BYO is disabled or no monitoring
+    integrations are connected. The block explicitly lists tool names
+    so the model can reference them in investigation prompts like
+    "if your tools include query_metrics, use them."
+    """
+    if byo is None or not byo.enabled or not byo.connected_integrations:
+        return ""
+
+    lines: list[str] = []
+    for integration in byo.connected_integrations:
+        entry = _INTEGRATION_TOOLS.get(integration)
+        if entry:
+            display_name, tools = entry
+            lines.append(
+                f"- **{display_name}**: {', '.join(f'`{t}`' for t in tools)}"
+            )
+
+    if not lines:
+        return ""
+
+    return (
+        "## Connected Monitoring Integrations\n\n"
+        "The following monitoring tools are available via connected integrations. "
+        "Use them when investigating incidents, triaging alerts, or answering "
+        "questions about production health.\n\n"
+        + "\n".join(lines)
     )
