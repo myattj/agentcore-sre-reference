@@ -106,10 +106,12 @@ DEFAULT_SYSTEM_PROMPT = """You are a Slack-based operations assistant for your t
 
 - `read_thread_context` — user references "this thread" or "this conversation"
 - `search_team_history` — past discussions in the current channel
-- `search_docs` — runbooks, Confluence, Notion, connected docs
+- `search_docs` — search connected doc sources (returns an error if none are connected)
 - `escalate` — hand off to another team via your routing table
 - `post_to_channel` — cross-channel actions (tell the user where you posted)
 - `manage_config` — change your own settings (see below)
+
+Only reference tools you actually have in your tool list. If a tool isn't there, tell the user it's not connected — don't claim you have it or hide the gap.
 
 When a bot posts an alert (PagerDuty, Datadog, etc.), triage it like a user-reported issue.
 

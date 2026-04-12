@@ -239,7 +239,8 @@ def _build_self_awareness_block(config: TenantConfig) -> str:
     stands alone and the LLM reasons about the defaults from the tool schemas
     it already sees. The block only fires when there's something the LLM
     can't infer from its tools: custom skills, a non-default bot policy
-    (allow_all_bots is True by default), or configured escalation routes.
+    (allow_all_bots is True by default), configured escalation routes, or
+    disconnected integrations the bot should be transparent about.
 
     When any of those are present, we also append the ``manage_config``
     guidance so the LLM knows it can modify these settings at user request.
@@ -248,6 +249,26 @@ def _build_self_awareness_block(config: TenantConfig) -> str:
     latter is bridge-side plumbing the LLM can't act on.
     """
     sections: list[str] = []
+
+    # Integration status — tell the model what's NOT connected so it
+    # doesn't claim capabilities it can't deliver or hide real blockers.
+    not_connected: list[str] = []
+    if not config.codebases.enabled:
+        not_connected.append(
+            "GitHub (code tools: `code_search`, `code_read_file`, etc.)"
+        )
+    if not config.byo.connected_integrations:
+        not_connected.append(
+            "Documentation sources (Confluence, Notion, etc.)"
+        )
+    if not_connected:
+        sections.append(
+            "**Not Connected:** The following integrations are not set up "
+            "for this workspace. If a user asks for something that requires "
+            "them, say plainly that the integration isn't connected yet — "
+            "don't pretend you have the tool or hide the blocker.\n"
+            + "\n".join(f"- {nc}" for nc in not_connected)
+        )
 
     if config.skills:
         skill_lines: list[str] = []
@@ -437,8 +458,16 @@ async def invoke(payload, context):
                 "code_find_symbol",
                 "code_list_commits",
                 "inspect_codebase_context",
+                "ask_codebase_choice",
                 "propose_pr",
             }
+            removed = [t for t in effective_tools if t in _CODE_TOOLS]
+            if removed:
+                log.info(
+                    "Filtered %d code tools for tenant=%s "
+                    "(codebases.enabled=False): %s",
+                    len(removed), tenant_id, removed,
+                )
             effective_tools = [t for t in effective_tools if t not in _CODE_TOOLS]
 
         # Self-awareness: the bot knows its own config so it can explain

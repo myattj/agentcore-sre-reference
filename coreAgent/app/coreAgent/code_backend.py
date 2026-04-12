@@ -191,6 +191,43 @@ class GithubBackend:
             "User-Agent": "AgentCore Reference-Agent/1.0",
         }
 
+    def _diagnose_404(self, url: str) -> str:
+        """Disambiguate a 404: is the repo inaccessible, or just the path?
+
+        GitHub returns 404 for both "repo not visible to this token" and
+        "file doesn't exist." We probe the repo root to distinguish them
+        so the model doesn't blame access when a file path is wrong.
+        """
+        # Extract repo slug from URL: /repos/{owner}/{name}/...
+        import re
+        m = re.search(r"/repos/([^/]+/[^/]+)/", url)
+        if not m:
+            return f"GitHub returned 404 for {url}."
+
+        repo = m.group(1)
+        repo_url = f"{self._api_base}/repos/{repo}"
+        try:
+            probe = urllib.request.Request(repo_url, headers=self._headers())
+            with urllib.request.urlopen(probe, timeout=self._http_timeout):
+                pass
+            # Repo IS accessible → the 404 is a file/path not found
+            path = url.split(f"/repos/{repo}/", 1)[-1]
+            return (
+                f"File or path not found in {repo}: {path}. "
+                "The repo is accessible but this specific path doesn't "
+                "exist. Check the file path and try again."
+            )
+        except urllib.error.HTTPError:
+            # Repo itself returns non-200 → genuine access problem
+            return (
+                f"Cannot access repo {repo}. Either the AgentCore Reference GitHub "
+                "App isn't installed on it, the repo isn't in the App's "
+                "selected-repositories list, or the repo was "
+                "deleted/renamed."
+            )
+        except urllib.error.URLError:
+            return f"GitHub returned 404 for {url} and the repo probe failed (network error)."
+
     def _get_json(self, url: str) -> dict[str, Any]:
         req = urllib.request.Request(url, headers=self._headers())
         try:
@@ -199,19 +236,8 @@ class GithubBackend:
         except urllib.error.HTTPError as e:
             body = e.read().decode("utf-8", errors="replace")[:500]
             if e.code == 404:
-                # 404 on a repo-scoped endpoint (/repos/owner/name/...)
-                # is indistinguishable from a permissions failure — GitHub
-                # deliberately collapses "no such repo" and "you can't see
-                # this repo" into the same response for privacy. Surface
-                # that ambiguity to the tool layer so it can explain it
-                # instead of letting the model second-guess its repo pick.
                 raise BackendError(
-                    "GitHub returned 404. For a repo-scoped endpoint this "
-                    "means the installation token can't see the repo — "
-                    "either the AgentCore Reference GitHub App isn't installed on it, "
-                    "the repo isn't in the App's selected-repositories "
-                    "list, or the repo was deleted/renamed. This is NOT a "
-                    "signal that you picked the wrong repo slug."
+                    self._diagnose_404(url)
                 ) from e
             if e.code == 403 and "rate limit" in body.lower():
                 raise BackendError(

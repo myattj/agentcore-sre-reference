@@ -542,21 +542,21 @@ def read_thread_context(channel_id: str | None = None, thread_id: str | None = N
 
 @audited_tool("search_docs")
 def search_docs(query: str) -> str:
-    """Search across all configured documentation sources.
+    """Search across all configured documentation sources (Confluence, Notion, etc.).
 
-    This tool checks which documentation integrations are available (Confluence,
-    Notion, etc.) and lists them so you can call their specific search tools.
-    Use the individual integration tools (e.g. confluence search_content,
-    notion search) to perform the actual searches.
+    Returns results from connected doc integrations, or a clear message when
+    no integrations are connected yet.
 
     Args:
         query: The search query to run across doc sources.
     """
+    # TODO: when real doc integrations land, check tenant config for
+    # connected sources and dispatch to each one.
     return (
-        f"To search for '{query}', use the available documentation tools from "
-        "your connected integrations. Check your tool list for Confluence "
-        "(search_content), Notion (search), or other doc tools, and call each "
-        "one individually with this query."
+        f"No documentation integrations are connected for this workspace. "
+        f"Cannot search for '{query}'. "
+        "Ask a workspace admin to connect a doc source (Confluence, Notion, "
+        "etc.) in the AgentCore Reference onboarding dashboard."
     )
 
 
@@ -1525,4 +1525,11 @@ def build_catalog_tools(
     endpoints). v0 catalog tools don't read from it; later tools (e.g. a real
     `jira_lookup` or `query_customer_db`) will.
     """
+    missing = [name for name in allowed if name not in CATALOG]
+    if missing:
+        log.warning(
+            "Tenant config lists tools not registered in CATALOG "
+            "(skipped): %s",
+            missing,
+        )
     return [CATALOG[name] for name in allowed if name in CATALOG]
