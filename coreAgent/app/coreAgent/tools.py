@@ -413,6 +413,22 @@ def _poll_sandbox_completion(
                 final_pr_url = row.get("pr_url", "")
                 final_error = row.get("error", "")
                 log.info("sandbox poll: task_id=%s reached terminal=%s", task_id, status)
+                # Record sandbox API spend against the tenant's monthly
+                # counter. The sandbox writes agent_cost_cents to the row
+                # on completion — we read it here and charge via the same
+                # spend_tracker the main invocation path uses.
+                cost_cents = int(row.get("agent_cost_cents", 0) or 0)
+                tenant_id = ctx_snapshot.get("tenant_id", "")
+                if cost_cents > 0 and tenant_id:
+                    try:
+                        from spend_tracker import build_spend_tracker
+                        build_spend_tracker().record_spend(tenant_id, cost_cents)
+                        log.info(
+                            "sandbox poll: recorded %d cents sandbox spend for tenant=%s",
+                            cost_cents, tenant_id,
+                        )
+                    except Exception:  # noqa: BLE001
+                        log.exception("sandbox poll: failed to record sandbox spend")
                 break
         else:
             # Loop exited via the deadline (no break). Mark orphaned.
@@ -1195,34 +1211,28 @@ def propose_pr(
     well enough to specify, AND you've done enough discovery
     (``code_search``, ``code_read_file``, ``code_find_symbol``,
     ``code_list_commits``) to know what to change. The actual diff is
-    written by a separate sandbox container — this tool just queues
-    the work and returns immediately. The sandbox typically takes
-    1-10 minutes to clone, edit, and open the PR; when it's done the
-    bridge will post the PR link to this Slack thread automatically.
+    written by a Claude agent running in a sandbox container — this
+    tool just queues the work and returns immediately. The sandbox
+    typically takes 1-10 minutes to clone, edit, and open the PR;
+    when it's done the bridge will post the PR link to this Slack
+    thread automatically.
 
     The agent stays HealthyBusy until the sandbox finishes (a daemon
     poller watches the sandbox_jobs DDB table). DO NOT call this tool
     a second time for the same change while the first one is still
     in flight — the user will see two PRs.
 
-    First-slice behavior (Phase B v1): the sandbox runs a DUMMY
-    "add a marker line to README" entrypoint regardless of
-    ``task_description``. v2 will swap in a real Claude Agent SDK
-    inner loop that actually reads ``task_description`` +
-    ``context_hint`` and writes the diff. The plumbing is the same.
-
     Args:
         repo: ``"owner/name"`` slug — REQUIRED. Pick from the
               ``## Connected codebases`` block in the system prompt.
               There is no silent default; an omitted repo is an error.
         task_description: One or two sentences describing the change
-              the user wants. v2 inner loop reads this as its
-              instruction; first slice ignores it.
+              the user wants. The sandbox agent reads this as its
+              primary instruction — be specific about what to change.
         context_hint: Optional research notes you've already gathered
               from ``code_search`` / ``code_read_file`` etc. Saves the
-              inner agent from re-doing discovery work. Think "here
-              are the files I read and what I learned". v2 inner loop
-              uses this; first slice ignores it.
+              sandbox agent from re-doing discovery work. Think "here
+              are the files I read and what I learned."
     """
     ctx = get_context()
     tenant_id = ctx.get("tenant_id", "") or ""

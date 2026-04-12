@@ -111,6 +111,21 @@ export interface SandboxStackProps extends StackProps {
    * `SANDBOX_CALLBACK_URL` env var in the sandbox container.
    */
   readonly callbackUrl: string;
+
+  /**
+   * Secrets Manager ARN for `agentcore/platform/anthropic_api_key`.
+   * The sandbox's inner Claude agent loop calls api.anthropic.com
+   * directly (not Bedrock) for prompt caching support. The secret
+   * value is the bare API key string (not JSON).
+   *
+   * Created out-of-band:
+   * ```
+   * aws secretsmanager create-secret \
+   *   --name agentcore/platform/anthropic_api_key \
+   *   --secret-string 'sk-ant-...'
+   * ```
+   */
+  readonly anthropicSecretsArn?: string;
 }
 
 export class SandboxStack extends Stack {
@@ -194,6 +209,18 @@ export class SandboxStack extends Stack {
     );
 
     // ------------------------------------------------------------------
+    // Anthropic API key secret (pre-created out-of-band).
+    // Optional — sandbox degrades gracefully if not provided (the
+    // entrypoint will fail at agent.run_agent_loop when the SDK
+    // can't find ANTHROPIC_API_KEY, which writes a clean error row).
+    // ------------------------------------------------------------------
+    const anthropicSecret = props.anthropicSecretsArn
+      ? secretsmanager.Secret.fromSecretCompleteArn(
+          this, 'AnthropicSecret', props.anthropicSecretsArn,
+        )
+      : undefined;
+
+    // ------------------------------------------------------------------
     // Task role — what the sandbox container can do AT RUNTIME.
     //
     // Scope is the entire reason the sandbox lives in its own stack.
@@ -208,9 +235,8 @@ export class SandboxStack extends Stack {
     //   - any tenant secrets under agentcore/tenants/*
     //   - bridge secrets under agentcore/services/bridge (which holds
     //     BRIDGE_GATEWAY_JWT_PRIVATE_KEY_PEM — crown jewel)
-    //   - Bedrock anything (the sandbox doesn't run a model — when v2
-    //     adds the Claude Agent SDK loop, it'll hit api.anthropic.com
-    //     directly via its own ANTHROPIC_API_KEY)
+    //   - Bedrock anything (the sandbox calls api.anthropic.com
+    //     directly via its own ANTHROPIC_API_KEY, not Bedrock)
     // ------------------------------------------------------------------
     const taskRole = new iam.Role(this, 'SandboxTaskRole', {
       assumedBy: new iam.ServicePrincipal('ecs-tasks.amazonaws.com'),
@@ -231,6 +257,9 @@ export class SandboxStack extends Stack {
     }));
 
     sandboxSecret.grantRead(taskRole);
+    if (anthropicSecret) {
+      anthropicSecret.grantRead(taskRole);
+    }
 
     // ------------------------------------------------------------------
     // Execution role — Fargate's image-pull / secret-injection role.
@@ -255,6 +284,9 @@ export class SandboxStack extends Stack {
         'shipping + sandbox callback secret read at boot.',
     });
     sandboxSecret.grantRead(executionRole);
+    if (anthropicSecret) {
+      anthropicSecret.grantRead(executionRole);
+    }
 
     // ------------------------------------------------------------------
     // Security group — egress only, no ingress.
@@ -262,6 +294,7 @@ export class SandboxStack extends Stack {
     // Sandbox makes outbound calls to:
     //   - api.github.com (clone, PR creation)
     //   - github.com (git push via HTTPS)
+    //   - api.anthropic.com (Claude agent loop)
     //   - dynamodb.<region>.amazonaws.com (sandbox_jobs read/write)
     //   - secretsmanager.<region>.amazonaws.com (token mint)
     //   - agent.example.com (callback POST)
@@ -276,9 +309,9 @@ export class SandboxStack extends Stack {
     // ------------------------------------------------------------------
     // Task definition
     //
-    // 0.5 vCPU / 1024 MB. Adequate for git clone + Python entrypoint;
-    // v2 with Claude Agent SDK + npm/pip install may need to bump
-    // memory to 2048+ depending on the inner agent's footprint.
+    // 0.5 vCPU / 1024 MB. The Claude agent loop is I/O-bound (API
+    // calls + file reads), not CPU-bound, so 0.5 vCPU is adequate.
+    // Memory headroom is for the cloned repo + subprocess execution.
     // ------------------------------------------------------------------
     const taskDef = new ecs.FargateTaskDefinition(this, 'SandboxTaskDef', {
       family: 'agentcore-sandbox',
@@ -300,9 +333,21 @@ export class SandboxStack extends Stack {
         SANDBOX_JOBS_TABLE: this.sandboxJobsTable.tableName,
         SANDBOX_CALLBACK_URL: props.callbackUrl,
         GITHUB_APP_ID: props.githubAppId,
+        // Agent loop configuration. Model and budget are plain env vars
+        // (not secrets) — they're operational config, not credentials.
+        SANDBOX_MODEL: 'claude-sonnet-4-6-20250514',
+        SANDBOX_PR_BUDGET: '5.0',
       },
       secrets: {
         SANDBOX_CALLBACK_SECRET: ecs.Secret.fromSecretsManager(sandboxSecret, 'CALLBACK_SECRET'),
+        // Anthropic API key — injected from Secrets Manager. The agent
+        // loop calls api.anthropic.com directly (not Bedrock) for prompt
+        // caching support. Optional: if the secret ARN isn't provided,
+        // the entrypoint will fail at the agent.run_agent_loop call and
+        // write a clean error row.
+        ...(anthropicSecret ? {
+          ANTHROPIC_API_KEY: ecs.Secret.fromSecretsManager(anthropicSecret),
+        } : {}),
       },
     });
 

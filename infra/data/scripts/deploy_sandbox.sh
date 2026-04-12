@@ -40,6 +40,10 @@
 #   ATTACH_POLICY         — set to "1" to also run attach_agent_policy.sh
 #                           after sandbox deploy. Default 0 (run it
 #                           manually so you can review).
+#   ANTHROPIC_SECRETS_ARN — Secrets Manager ARN for the Anthropic API
+#                           key (agentcore/platform/anthropic_api_key).
+#                           Without it the sandbox deploys but propose_pr
+#                           fails at runtime with a clean error.
 #
 # Exit codes:
 #   0 — both stacks deployed (or no-op) successfully
@@ -95,6 +99,10 @@ CONTEXT_FLAGS=(
 
 if [[ -n "${CERTIFICATE_ARN:-}" ]]; then
   CONTEXT_FLAGS+=("--context" "certificateArn=$CERTIFICATE_ARN")
+fi
+
+if [[ -n "${ANTHROPIC_SECRETS_ARN:-}" ]]; then
+  CONTEXT_FLAGS+=("--context" "anthropicSecretsArn=$ANTHROPIC_SECRETS_ARN")
 fi
 
 # -----------------------------------------------------------------------

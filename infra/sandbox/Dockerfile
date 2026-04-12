@@ -1,18 +1,15 @@
-# Phase B sandbox container.
+# Phase B sandbox container (v2 — real Claude agent loop).
 #
 # Built by infra/data/lib/sandbox-stack.ts via DockerImageAsset (which
 # auto-creates an ECR repo and pushes on `cdk deploy`). The container
 # is a one-shot Fargate task: ECS spawns it via run_task with a
 # TASK_ID env override, the entrypoint reads the matching row from
-# the sandbox_jobs DDB table, opens a PR, writes the result back, and
-# exits.
+# the sandbox_jobs DDB table, runs a Claude agent loop to make code
+# changes, opens a PR, writes the result back, and exits.
 #
-# First slice ships a DUMMY entrypoint (`add a line to README, open
-# a test PR titled "AgentCore Reference: test PR (<task_id>) — please ignore"`).
-# v2 swaps in a real Claude Agent SDK loop. The Dockerfile here is
-# deliberately minimal — only what the dummy needs — so v2 can layer
-# in `anthropic`, `uv`, `node`, etc. without disturbing the
-# proven plumbing.
+# The Claude agent (agent.py) uses the Anthropic API directly (not
+# Bedrock) for prompt caching support. ANTHROPIC_API_KEY is injected
+# from Secrets Manager at container start.
 #
 # Why python:3.13-slim and not 3.12: matches the agent + bridge venvs
 # (CLAUDE.md gotcha #7). Don't drift the Python minor versions across
@@ -43,6 +40,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # file changes, so the mirror stays in sync as long as the source is
 # updated and a deploy is run.
 COPY scm_github.py .
+COPY agent.py .
 COPY entrypoint.py .
 
 # Run as non-root for general hygiene. The container does git +

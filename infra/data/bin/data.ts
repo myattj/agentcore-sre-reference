@@ -165,6 +165,9 @@ if (agentRuntimeArn) {
 //
 // Optional:
 //   --context sandboxGithubAppId=123456  (defaults to the prod app)
+//   --context anthropicSecretsArn=arn:aws:secretsmanager:...  (Anthropic
+//     API key for the inner Claude agent loop — without it the sandbox
+//     still deploys but propose_pr fails at runtime with a clean error)
 //
 // Skipped silently when sandboxSecretsArn is not set, so existing
 // data + services deploys still work standalone.
@@ -214,6 +217,8 @@ if (sandboxSecretsArn && sandboxVpcId) {
     sandboxSecretsArn: sandboxSecretsArn!,
     githubAppId: sandboxGithubAppId,
     callbackUrl: `https://${sandboxDomainName}/internal/sandbox_complete`,
+    anthropicSecretsArn:
+      (app.node.tryGetContext('anthropicSecretsArn') as string | undefined) || undefined,
   });
 }
 

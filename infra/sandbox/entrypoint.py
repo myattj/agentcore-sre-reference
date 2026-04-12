@@ -1,8 +1,7 @@
-"""Phase B sandbox container entrypoint — DUMMY first-slice version.
+"""Phase B sandbox container entrypoint — real Claude agent loop (v2).
 
-Purpose: prove the end-to-end PR-writing plumbing with a trivial change
-("add a line to README, open a PR titled 'AgentCore Reference: test PR — please
-ignore'") before swapping in a real Claude Agent SDK loop in v2.
+Runs a Claude tool-use agent that reads a task description, explores
+the cloned repository, makes code changes, and opens a pull request.
 
 Lifecycle (driven by `propose_pr` in coreAgent/tools.py):
 
@@ -17,12 +16,15 @@ Lifecycle (driven by `propose_pr` in coreAgent/tools.py):
     4. Mint a GitHub App installation token via `scm_github`.
     5. git clone the repo over HTTPS using the installation token
        as basic-auth password (`x-access-token:<token>` form).
-    6. Create a branch `agentcore/<task_id>`. Append a stable line
-       to README.md (creating it if absent). git commit + push.
-    7. POST `/repos/<owner>/<name>/pulls` to open the PR.
-    8. Mark the row `success` with the PR URL (or `error` with the
-       failure message if anything blew up).
-    9. POST to `SANDBOX_CALLBACK_URL` with `Authorization: Bearer
+    6. Create a branch `agentcore/<task_id>`.
+    7. Phase 1 (agentic): run the Claude agent loop (agent.py) which
+       reads files, plans changes, edits code, and calls submit_changes.
+    8. Phase 2 (single call): generate commit message + PR title + body
+       from the git diff + task description.
+    9. git add + commit + push. Open the PR via GitHub API.
+   10. Mark the row `success` with the PR URL (or `error` with the
+       failure message if anything blew up). Write agent cost data.
+   11. POST to `SANDBOX_CALLBACK_URL` with `Authorization: Bearer
        <SANDBOX_CALLBACK_SECRET>` so the bridge can post the result
        to the originating Slack thread. Even on failure, we POST
        — the bridge needs to surface the error to the user.
@@ -35,18 +37,17 @@ within 5-20 seconds and clears HealthyBusy.
 Idempotency / retry: NONE. If this script crashes mid-flight (e.g.
 SIGKILL from a Fargate stop), the row stays in `running`. The agent's
 poll loop has a hard 10-min ceiling and will mark it `orphaned` and
-clear HealthyBusy without leaking it. v2 will add a Fargate task
-state-check fallback for visibility.
+clear HealthyBusy without leaking it.
 
 Security model: runs as the unprivileged `sandbox` user (set in the
 Dockerfile). Has access to ONLY:
   - sandbox_jobs DDB row R/W
   - GitHub App private key (Secrets Manager: agentcore/platform/github_app/*)
   - the callback shared secret (Secrets Manager: agentcore/services/sandbox)
+  - Anthropic API key (Secrets Manager: agentcore/platform/anthropic_api_key)
   - own log group writes
-No tenant secrets, no audit log, no tenants table. The Claude-authored
-inner loop in v2 will run inside this same sandbox so the blast radius
-holds.
+No tenant secrets, no audit log, no tenants table. The Claude agent
+runs inside this sandbox so the blast radius holds.
 """
 from __future__ import annotations
 
@@ -365,42 +366,91 @@ def main() -> int:
 
         post_progress(TASK_ID, "cloning")
 
-        # Append a stable line to README.md (create if missing). The
-        # whole point is to make a small, harmless, reviewable change
-        # that proves the plumbing works without touching real code.
-        readme_path = os.path.join(CLONE_DIR, "README.md")
-        marker_line = f"\n<!-- agentcore test PR {TASK_ID} -->\n"
-        with open(readme_path, "a", encoding="utf-8") as f:
-            f.write(marker_line)
+        # ---- Phase 1: agentic editing ----
+        # The agent loop reads/edits files in the clone via Claude
+        # tool-use. It returns a structured result with the files
+        # changed and a summary of the work done.
+        from agent import run_agent_loop, generate_pr_metadata
 
-        run_git(["add", "README.md"], cwd=CLONE_DIR)
-        run_git(
-            ["commit", "-m", f"AgentCore Reference: test PR ({TASK_ID})"],
-            cwd=CLONE_DIR,
+        sandbox_model = os.environ.get("SANDBOX_MODEL", "claude-sonnet-4-6-20250514")
+        sandbox_budget = float(os.environ.get("SANDBOX_PR_BUDGET", "5.0"))
+
+        agent_result = run_agent_loop(
+            work_dir=CLONE_DIR,
+            task_description=job.get("task_description", ""),
+            context_hint=job.get("context_hint", ""),
+            model=sandbox_model,
+            budget_dollars=sandbox_budget,
+            progress_callback=lambda step: post_progress(TASK_ID, step),
         )
 
+        # Write cost data to the job row regardless of outcome. The
+        # daemon poller reads this to charge sandbox spend against
+        # the tenant's monthly counter.
+        try:
+            update_status(
+                TASK_ID,
+                agent_model=sandbox_model,
+                agent_input_tokens=agent_result.token_budget.input_tokens,
+                agent_output_tokens=agent_result.token_budget.output_tokens,
+                agent_cost_cents=agent_result.token_budget.cost_cents,
+            )
+        except Exception:  # noqa: BLE001
+            log.exception("failed to write agent cost data (continuing)")
+
+        # Check if the agent actually produced changes.
+        git_status = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=CLONE_DIR,
+            capture_output=True,
+            text=True,
+        )
+        has_changes = bool(git_status.stdout.strip())
+
+        if not has_changes:
+            raise RuntimeError(
+                f"Agent produced no file changes. "
+                f"Summary: {agent_result.summary or '(none)'}. "
+                f"Error: {agent_result.error or '(none)'}"
+            )
+
         post_progress(TASK_ID, "editing")
+
+        # ---- Phase 2: PR metadata generation ----
+        # Single Claude call to generate commit message + PR title +
+        # body from the diff. Cheap and fast.
+        run_git(["add", "-A"], cwd=CLONE_DIR)
+        diff_stat = subprocess.run(
+            ["git", "diff", "--cached", "--stat"],
+            cwd=CLONE_DIR,
+            capture_output=True,
+            text=True,
+        ).stdout
+
+        pr_meta = generate_pr_metadata(
+            task_description=job.get("task_description", ""),
+            agent_summary=agent_result.summary,
+            diff_stat=diff_stat,
+            model=sandbox_model,
+        )
+
+        run_git(
+            ["commit", "-m", pr_meta.commit_message],
+            cwd=CLONE_DIR,
+        )
 
         run_git(["push", "origin", branch], cwd=CLONE_DIR)
 
         post_progress(TASK_ID, "pushing")
 
         # Open the PR.
-        pr_title = f"AgentCore Reference: test PR ({TASK_ID}) — please ignore"
-        pr_body = (
-            "This PR was opened by the AgentCore Reference sandbox as a Phase B "
-            "first-slice plumbing test. It only adds a marker comment "
-            "to README.md. Safe to close — no production change.\n\n"
-            f"task_id: `{TASK_ID}`\n"
-            f"task_description: {job.get('task_description', '')!r}\n"
-        )
         pr_url = open_pull_request(
             repo=repo,
             token=token,
             head=branch,
             base=base_branch,
-            title=pr_title,
-            body=pr_body,
+            title=pr_meta.title,
+            body=pr_meta.body,
         )
         log.info("opened PR: %s", pr_url)
 
