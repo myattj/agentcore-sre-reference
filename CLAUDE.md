@@ -117,6 +117,13 @@ These prevent bugs. Full detail + 14 more situational gotchas in `.claude/docs/g
 
 ---
 
+## Communication style
+
+1. **Separate phases of work into distinct messages.** If you announce a plan ("Let me check X and Y"), then report findings, those are two separate thoughts — separate them with a blank line and a clear transition. Never concatenate "here's what I'll do" and "here's what I found" into one unbroken paragraph.
+2. **One idea per block.** When reporting multiple findings, use headings, bullets, or numbered lists — not run-on prose.
+
+---
+
 ## Reference docs (read on demand)
 
 | Doc | Contents |

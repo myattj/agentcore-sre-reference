@@ -11,17 +11,17 @@ The resolver treats the returned repo as a **candidate** — it's only
 promoted to CONFIRMED when the hint matches a repo that's already in
 ``codebases.bindings``. That bounded-answer-set filter kills the
 silent-wrong failure mode: if the semantic layer returns a repo the
-tenant doesn't actually have, we drop the hint and fall back to
-SHORTLIST (ask the user).
+tenant doesn't actually have, we drop the hint and the resolver
+falls through to its non-hint default precedence.
 
 ## Extraction path
 
 No custom extraction rule. AgentCore's SEMANTIC strategy extracts
-from every assistant/user turn automatically. The SHORTLIST prompt
-block (see ``codebase_resolver._shortlist``) teaches the model to
-acknowledge the user's answer in a scoped, indexable form — e.g.,
-"I'll use acme/platform in this channel going forward" — so there's
-a clear utterance for the strategy to pick up and index.
+from every assistant/user turn automatically. When the model uses
+code tools against a specific repo, that interaction creates an
+extractable signal. The model is NOT coached to emit acknowledgment
+phrases — the semantic query is shaped broadly enough to match
+natural tool-use context.
 
 ## Local dev / production parity
 
@@ -310,10 +310,11 @@ def _first_known_repo_mentioned(
 def _build_query(channel_id: str, user_id: str) -> str:
     """Build the semantic query string.
 
-    Phrased to match the kind of sentence the model is coached to emit
-    after a user confirms a codebase: "I'll use acme/platform in this
-    channel going forward." AgentCore's SEMANTIC extractor indexes the
-    assistant utterance; a similarly-shaped query should retrieve it.
+    Phrased to retrieve conversation turns where the model used a
+    codebase — tool calls, search results, PR creation, etc. The
+    SEMANTIC extractor indexes assistant turns automatically; the
+    query targets natural tool-use language rather than coached
+    acknowledgment phrases.
 
     Including the raw channel_id or user_id in the query is a weak but
     non-zero signal — embeddings don't understand Slack ID formatting
