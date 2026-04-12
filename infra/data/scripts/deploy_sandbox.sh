@@ -54,6 +54,11 @@ DATA_STACK="AgentCore-coreAgent-data-${REGION}"
 SERVICES_STACK="AgentCore-coreAgent-services-${REGION}"
 SANDBOX_STACK="AgentCore-coreAgent-sandbox-${REGION}"
 
+# Capture the script directory BEFORE the cd so later helper-script
+# invocations resolve correctly. After the cd, $0 is still the original
+# path, but resolving it relative to cwd would double-prepend infra/data/.
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
 cd "$(dirname "$0")/.."
 
 # -----------------------------------------------------------------------
@@ -160,7 +165,7 @@ fi
 echo
 if [[ "${ATTACH_POLICY:-0}" == "1" ]]; then
   echo "==> Attaching managed policies to agent role"
-  bash "$(dirname "$0")/attach_agent_policy.sh"
+  bash "$SCRIPT_DIR/attach_agent_policy.sh"
 else
   echo "==> Skipping attach_agent_policy.sh (set ATTACH_POLICY=1 to run)."
   echo "    To attach manually:"
