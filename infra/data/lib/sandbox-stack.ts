@@ -269,7 +269,7 @@ export class SandboxStack extends Stack {
     // ------------------------------------------------------------------
     const sandboxSg = new ec2.SecurityGroup(this, 'SandboxSg', {
       vpc,
-      description: 'Sandbox Fargate task — egress-only, no ingress.',
+      description: 'Sandbox Fargate task - egress-only, no ingress.',
       allowAllOutbound: true,
     });
 
@@ -319,7 +319,7 @@ export class SandboxStack extends Stack {
     new ssm.StringParameter(this, 'SsmTaskDefArn', {
       parameterName: '/agentcore/sandbox/task_def_arn',
       stringValue: taskDef.taskDefinitionArn,
-      description: 'Sandbox Fargate task definition ARN — read by propose_pr in coreAgent/tools.py',
+      description: 'Sandbox Fargate task definition ARN - read by propose_pr in coreAgent/tools.py',
     });
 
     new ssm.StringParameter(this, 'SsmClusterArn', {
@@ -430,13 +430,13 @@ export class SandboxStack extends Stack {
 
     new CfnOutput(this, 'AgentSandboxAccessPolicyArn', {
       value: this.sandboxAccessPolicy.managedPolicyArn,
-      description: 'Managed policy ARN — attach to agent role via attach_agent_policy.sh.',
+      description: 'Managed policy ARN - attach to agent role via attach_agent_policy.sh.',
       exportName: `${this.stackName}-AgentSandboxAccessPolicyArn`,
     });
 
     new CfnOutput(this, 'SandboxSecurityGroupId', {
       value: sandboxSg.securityGroupId,
-      description: 'Sandbox security group ID — egress-only.',
+      description: 'Sandbox security group ID - egress-only.',
     });
   }
 }
