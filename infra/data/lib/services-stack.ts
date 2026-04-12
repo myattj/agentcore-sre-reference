@@ -196,8 +196,20 @@ export class ServicesStack extends Stack {
         priority: 10,
         conditions: [
           elbv2.ListenerCondition.pathPatterns([
-            '/slack/*', '/api/*', '/internal/*', '/.well-known/*', '/jwks.json', '/healthz',
+            '/slack/*', '/api/*', '/.well-known/*', '/jwks.json', '/healthz',
           ]),
+        ],
+        action: elbv2.ListenerAction.forward([bridgeTg]),
+      });
+
+      // Phase B: separate listener rule for /internal/* — kept distinct
+      // from BridgeRoutes because ALB caps a single path-pattern
+      // condition at 5 patterns and BridgeRoutes is already at the
+      // limit.
+      httpsListener.addAction('BridgeInternalRoutes', {
+        priority: 11,
+        conditions: [
+          elbv2.ListenerCondition.pathPatterns(['/internal/*']),
         ],
         action: elbv2.ListenerAction.forward([bridgeTg]),
       });
@@ -222,8 +234,18 @@ export class ServicesStack extends Stack {
         priority: 10,
         conditions: [
           elbv2.ListenerCondition.pathPatterns([
-            '/slack/*', '/api/*', '/internal/*', '/.well-known/*', '/jwks.json', '/healthz',
+            '/slack/*', '/api/*', '/.well-known/*', '/jwks.json', '/healthz',
           ]),
+        ],
+        action: elbv2.ListenerAction.forward([bridgeTg]),
+      });
+
+      // Phase B: separate listener rule for /internal/* — see HTTPS
+      // branch above for the rationale (5-pattern ALB cap).
+      httpListener.addAction('BridgeInternalRoutes', {
+        priority: 11,
+        conditions: [
+          elbv2.ListenerCondition.pathPatterns(['/internal/*']),
         ],
         action: elbv2.ListenerAction.forward([bridgeTg]),
       });
