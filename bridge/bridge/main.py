@@ -34,6 +34,7 @@ from .async_dispatcher import dispatch_async
 from .client import AgentCoreClient
 from .dedup import is_duplicate
 from .gateway_jwt import get_jwks, get_oidc_configuration
+from .sandbox_callback import handle_sandbox_complete, verify_callback_auth
 from .slack_interactions import (
     build_codebase_pick_synthetic_message,
     extract_payload_json,
@@ -122,6 +123,38 @@ def _bot_allowed(policy: dict, bot_id: str, channel_id: str | None) -> bool:
 @app.get("/healthz")
 async def healthz() -> dict[str, str]:
     return {"status": "ok"}
+
+
+# ---------------------------------------------------------------------------
+# Phase B: sandbox container -> bridge callback
+# ---------------------------------------------------------------------------
+#
+# The Fargate sandbox container POSTs here when its propose_pr work
+# finishes (success or error). Auth is a Bearer-token shared secret —
+# SANDBOX_CALLBACK_SECRET is read from env (injected by services-stack.ts
+# from the agentcore/services/sandbox Secrets Manager secret) and the
+# sandbox uses the same value for its outbound POST.
+#
+# The actual orchestration (DDB read + Slack post) lives in
+# bridge/sandbox_callback.py so it can be unit-tested without spinning
+# up FastAPI. This handler is a thin auth + JSON shim.
+#
+# ALB routing: /internal/* is added to the bridge target group's
+# path-pattern listener rule in services-stack.ts (Phase B Step 2).
+@app.post("/internal/sandbox_complete")
+async def sandbox_complete(request: Request) -> dict[str, object]:
+    """Receive a completion notification from a Fargate sandbox task."""
+    auth = request.headers.get("Authorization", "")
+    if not verify_callback_auth(auth):
+        log.warning("sandbox_complete: rejected request with bad auth")
+        raise HTTPException(status_code=401, detail="invalid callback auth")
+    try:
+        payload = await request.json()
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="invalid JSON body")
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="payload must be a JSON object")
+    return await handle_sandbox_complete(payload)
 
 
 # OIDC discovery + JWKS endpoints for AgentCore Gateway's CUSTOM_JWT

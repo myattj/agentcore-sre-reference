@@ -1,10 +1,17 @@
-"""Audit log: per-invocation and per-tool-call rows written to DynamoDB.
+"""Audit log: per-invocation, per-tool-call, and per-propose-PR rows.
 
-Two row types, one table:
-  - row_type="invocation": one per @app.entrypoint call, with model_id,
+Three row types, one table:
+  - row_type="invocation":  one per @app.entrypoint call, with model_id,
     token counts, input/output summaries, total duration.
-  - row_type="tool_call":  one per catalog tool invocation, linked to its
+  - row_type="tool_call":   one per catalog tool invocation, linked to its
     parent invocation by `invocation_id`.
+  - row_type="propose_pr":  TWO per Phase B `propose_pr` tool call. The
+    first ("launched") is written when the agent successfully fires the
+    Fargate sandbox task; the second ("completed") is written when the
+    DDB poller observes a terminal status (success / error / orphaned).
+    These rows track the asynchronous lifecycle of a PR-writing job
+    that the synchronous `tool_call` row can't see (the tool_call row
+    only captures the immediate "I'm working on it" return).
 
 **Audit writes MUST NEVER fail the caller.** The DynamoDB client is wrapped
 in a try/except that swallows everything; if DDB is down, the agent still
@@ -47,6 +54,22 @@ tool_call:
       tool_name
       tool_args_summary, tool_result_summary  (both truncated)
       duration_ms, success
+    }
+
+propose_pr:
+    {
+      tenant_id:       (PK)
+      sk:              "PR#{iso_ts}#{task_id}#{event}"
+      row_type:        "propose_pr"
+      task_id:         the sandbox task id (e.g. "pr-abc12345")
+      event:           "launched" | "completed"
+      invocation_id:   links to the parent invocation row
+      timestamp, created_at
+      user_id, channel_id, thread_id
+      repo:            "owner/name" target repo
+      status:          "launched" | "success" | "error" | "orphaned"
+      pr_url:          present only on status="success"
+      error:           present only on status in {"error","orphaned"}
     }
 """
 from __future__ import annotations

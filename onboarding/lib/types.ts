@@ -286,4 +286,10 @@ export const KNOWN_CATALOG_TOOLS: { id: string; label: string; description: stri
     description:
       "List recent commits on a connected repo, optionally filtered by branch or path. Requires the GitHub App to be installed.",
   },
+  {
+    id: "propose_pr",
+    label: "Propose PR",
+    description:
+      "Open a pull request in a connected repo. Spawns a sandbox container that clones, edits, and pushes a branch, then opens the PR. Requires the GitHub App to be installed with write permissions.",
+  },
 ];

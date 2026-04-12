@@ -32,6 +32,7 @@ from __future__ import annotations
 import functools
 import json
 import logging
+import os
 import threading
 import time
 import uuid
@@ -184,6 +185,273 @@ def _summarize_args(args: tuple, kwargs: dict) -> str:
         return json.dumps({"args": list(args), "kwargs": kwargs}, default=str)
     except Exception:
         return f"<unserializable args: {len(args)} positional, {len(kwargs)} kw>"
+
+
+# ----------------------------------------------------------------------------
+# Sandbox helpers (Phase B — backing store for `propose_pr`)
+# ----------------------------------------------------------------------------
+#
+# `propose_pr` fires a Fargate sandbox task that opens a PR in the tenant's
+# repo. To do that, the tool needs:
+#
+#   - The sandbox task definition ARN, the cluster ARN, the subnet IDs,
+#     and the security group IDs (so it can call ecs.run_task with
+#     awsvpcConfiguration).
+#   - A handle on the sandbox_jobs DDB table to write the job row before
+#     launching the task.
+#   - A handle on the boto3 ECS client to actually call run_task.
+#
+# These are all read lazily and cached at module level, mirroring the
+# audit/metrics/spend pattern. The agent process hits SSM exactly once
+# per cold start (the first propose_pr call), then never again for its
+# lifetime. The DDB and ECS clients are also lazy.
+#
+# Resolution order for the four sandbox coordinates:
+#   1. SSM Parameter Store at /agentcore/sandbox/* (production —
+#      written by infra/data/lib/sandbox-stack.ts on cdk deploy)
+#   2. AGENT_LOCAL_STORES=1 escape hatch via env vars
+#      SANDBOX_TASK_DEF_ARN, SANDBOX_CLUSTER_ARN, SANDBOX_SUBNETS,
+#      SANDBOX_SECURITY_GROUPS (local dev — operator hand-supplies them)
+#
+# In production, the agent's IAM role is granted ssm:GetParameter* on
+# /agentcore/sandbox/* by the AgentCoreSandboxAccess managed policy
+# (attached post-deploy via attach_agent_policy.sh).
+
+_sandbox_coords_cache: dict[str, str] | None = None
+_sandbox_coords_lock = threading.Lock()
+_sandbox_jobs_table_singleton: Any | None = None
+_ecs_client_singleton: Any | None = None
+
+_SANDBOX_SSM_PREFIX = "/agentcore/sandbox/"
+_SANDBOX_JOBS_TABLE_NAME = os.getenv("SANDBOX_JOBS_TABLE", "sandbox_jobs")
+
+
+def _load_sandbox_coords() -> dict[str, str]:
+    """Return the four sandbox coordinates as a dict, cached for the
+    process lifetime.
+
+    Keys: ``task_def_arn``, ``cluster_arn``, ``subnets``,
+    ``security_groups``. Values are plain strings (subnets and
+    security_groups are comma-joined IDs that callers .split(",") on).
+
+    First call hits SSM (one GetParametersByPath round-trip, ~50ms);
+    subsequent calls return the cached dict. The lock guards the
+    initial population — concurrent first-call requests serialize
+    behind it but read-only callers don't acquire it.
+    """
+    global _sandbox_coords_cache
+    if _sandbox_coords_cache is not None:
+        return _sandbox_coords_cache
+
+    with _sandbox_coords_lock:
+        if _sandbox_coords_cache is not None:
+            return _sandbox_coords_cache
+
+        # Local-dev escape hatch
+        if os.getenv("AGENT_LOCAL_STORES") == "1":
+            cache = {
+                "task_def_arn": os.getenv("SANDBOX_TASK_DEF_ARN", ""),
+                "cluster_arn": os.getenv("SANDBOX_CLUSTER_ARN", ""),
+                "subnets": os.getenv("SANDBOX_SUBNETS", ""),
+                "security_groups": os.getenv("SANDBOX_SECURITY_GROUPS", ""),
+            }
+            _sandbox_coords_cache = cache
+            return cache
+
+        import boto3
+        ssm = boto3.client("ssm", region_name=os.getenv("AWS_REGION", "us-west-2"))
+        try:
+            resp = ssm.get_parameters_by_path(Path=_SANDBOX_SSM_PREFIX, Recursive=False)
+        except Exception as e:  # noqa: BLE001
+            log.exception("sandbox: SSM get_parameters_by_path failed")
+            raise RuntimeError(
+                f"could not load sandbox coordinates from SSM "
+                f"({_SANDBOX_SSM_PREFIX}): {e}"
+            ) from e
+
+        cache = {}
+        for param in resp.get("Parameters", []):
+            name = param.get("Name", "")
+            key = name[len(_SANDBOX_SSM_PREFIX):] if name.startswith(_SANDBOX_SSM_PREFIX) else name
+            cache[key] = param.get("Value", "")
+
+        required = {"task_def_arn", "cluster_arn", "subnets", "security_groups"}
+        missing = required - cache.keys()
+        if missing:
+            raise RuntimeError(
+                f"sandbox SSM params incomplete: missing {sorted(missing)}. "
+                f"Did `bash infra/data/scripts/deploy_sandbox.sh` run successfully?"
+            )
+
+        _sandbox_coords_cache = cache
+        return cache
+
+
+def _sandbox_jobs_table() -> Any:
+    """Lazy boto3 DynamoDB Table handle for sandbox_jobs. Cached
+    at module level so we don't pay the resource-construction cost
+    on every propose_pr call."""
+    global _sandbox_jobs_table_singleton
+    if _sandbox_jobs_table_singleton is None:
+        import boto3
+        resource = boto3.resource(
+            "dynamodb", region_name=os.getenv("AWS_REGION", "us-west-2")
+        )
+        _sandbox_jobs_table_singleton = resource.Table(_SANDBOX_JOBS_TABLE_NAME)
+    return _sandbox_jobs_table_singleton
+
+
+def _ecs_client() -> Any:
+    """Lazy boto3 ECS client. First call to propose_pr triggers the
+    boto3 import; subsequent calls reuse it."""
+    global _ecs_client_singleton
+    if _ecs_client_singleton is None:
+        import boto3
+        _ecs_client_singleton = boto3.client(
+            "ecs", region_name=os.getenv("AWS_REGION", "us-west-2")
+        )
+    return _ecs_client_singleton
+
+
+def _propose_pr_sk(task_id: str, event: str) -> str:
+    """Build the audit-table sort key for a propose_pr row.
+    Format: ``PR#{iso_ts}#{task_id}#{event}`` so the launched and
+    completed rows for the same task_id sort together by time."""
+    return f"PR#{_iso_now()}#{task_id}#{event}"
+
+
+def _write_propose_pr_audit(
+    *,
+    task_id: str,
+    event: str,
+    status: str,
+    repo: str,
+    pr_url: str = "",
+    error: str = "",
+    ctx_snapshot: dict[str, Any] | None = None,
+) -> None:
+    """Write a `row_type=propose_pr` audit row. NEVER raises (per gotcha
+    #10 — audit writes must not break the caller).
+
+    `ctx_snapshot` is the request_context dict captured at tool-call
+    time. The poller daemon (which runs after the entrypoint has cleared
+    the ContextVar) MUST pass a snapshot here; the synchronous launch
+    site can read get_context() directly. We accept either via this
+    common helper.
+    """
+    try:
+        ctx = ctx_snapshot if ctx_snapshot is not None else get_context()
+        row: dict[str, Any] = {
+            "row_type": "propose_pr",
+            "tenant_id": ctx.get("tenant_id", "unknown"),
+            "sk": _propose_pr_sk(task_id, event),
+            "task_id": task_id,
+            "event": event,
+            "invocation_id": ctx.get("invocation_id", ""),
+            "timestamp": _iso_now(),
+            "created_at": _iso_now(),
+            "user_id": ctx.get("user_id", ""),
+            "channel_id": ctx.get("channel_id", ""),
+            "thread_id": ctx.get("thread_id", ""),
+            "repo": repo,
+            "status": status,
+        }
+        if pr_url:
+            row["pr_url"] = pr_url
+        if error:
+            row["error"] = error
+        _audit.write(row)
+    except Exception as e:  # pragma: no cover — gotcha #10
+        log.warning("propose_pr audit row dropped (event=%s task=%s): %s", event, task_id, e)
+
+
+def _poll_sandbox_completion(
+    task_id: str,
+    repo: str,
+    ctx_snapshot: dict[str, Any],
+) -> None:
+    """Daemon: poll sandbox_jobs until terminal status, then write the
+    completion audit row and clear HealthyBusy.
+
+    Bridge callback (`/internal/sandbox_complete`) is the path that
+    posts the result to Slack — but it's INFORMATIONAL, not load-bearing
+    for the agent's lifecycle. The agent observes completion via this
+    DDB poll independently, so a callback failure (network blip, ALB
+    503) doesn't leak HealthyBusy.
+
+    Bounded backoff: 5s → 7s → ~10s → ... → cap at 20s, max ~10 minutes
+    of total wall time before we give up. The hard ceiling is critical:
+    if a Fargate task crashes mid-flight without writing a terminal
+    row, we DO NOT want to leak HealthyBusy forever and pin the agent
+    container alive past its natural idle shutdown. The orphan branch
+    marks the row and clears the inflight set so the next ping returns
+    HEALTHY instead of HEALTHY_BUSY.
+
+    `repo` and `ctx_snapshot` are passed in (rather than re-read from
+    request_context) because this daemon runs AFTER the entrypoint has
+    cleared the ContextVar — get_context() returns empty here.
+
+    Cost: ~60 DDB GetItems per active PR (well under $0.001 at
+    on-demand pricing). Not a real cost concern.
+    """
+    backoff = 5.0
+    deadline = time.time() + 10 * 60
+    final_status = "orphaned"
+    final_pr_url = ""
+    final_error = ""
+    try:
+        while time.time() < deadline:
+            time.sleep(backoff)
+            backoff = min(backoff * 1.4, 20.0)
+            try:
+                row = _sandbox_jobs_table().get_item(Key={"task_id": task_id}).get("Item") or {}
+            except Exception:  # noqa: BLE001 — transient DDB error, retry
+                continue
+            status = row.get("status", "")
+            if status in ("success", "error"):
+                final_status = status
+                final_pr_url = row.get("pr_url", "")
+                final_error = row.get("error", "")
+                log.info("sandbox poll: task_id=%s reached terminal=%s", task_id, status)
+                break
+        else:
+            # Loop exited via the deadline (no break). Mark orphaned.
+            log.warning(
+                "sandbox poll: task_id=%s exceeded 10-minute ceiling — marking orphaned",
+                task_id,
+            )
+            final_status = "orphaned"
+            final_error = "exceeded 10-minute poll ceiling"
+            try:
+                _sandbox_jobs_table().update_item(
+                    Key={"task_id": task_id},
+                    UpdateExpression="SET #s = :s, #c = :c, #e = :e",
+                    ExpressionAttributeNames={
+                        "#s": "status",
+                        "#c": "completed_at",
+                        "#e": "error",
+                    },
+                    ExpressionAttributeValues={
+                        ":s": "orphaned",
+                        ":c": _iso_now(),
+                        ":e": final_error,
+                    },
+                )
+            except Exception:  # noqa: BLE001
+                log.exception("sandbox poll: failed to mark task_id=%s orphaned", task_id)
+    finally:
+        # Always: write the terminal audit row + clear HealthyBusy.
+        _write_propose_pr_audit(
+            task_id=task_id,
+            event="completed",
+            status=final_status,
+            repo=repo,
+            pr_url=final_pr_url,
+            error=final_error,
+            ctx_snapshot=ctx_snapshot,
+        )
+        ping._inflight_tasks.discard(task_id)
+        app.complete_async_task(task_id)
 
 
 # ----------------------------------------------------------------------------
@@ -913,6 +1181,213 @@ def code_list_commits(
             f"[{c.author}, {date}]  ({c.html_url})"
         )
     return "\n".join(lines)
+
+
+@audited_tool("propose_pr")
+def propose_pr(
+    repo: str,
+    task_description: str,
+    context_hint: str = "",
+) -> str:
+    """Open a pull request in the named repository.
+
+    Use this when the user has asked for a code change you understand
+    well enough to specify, AND you've done enough discovery
+    (``code_search``, ``code_read_file``, ``code_find_symbol``,
+    ``code_list_commits``) to know what to change. The actual diff is
+    written by a separate sandbox container — this tool just queues
+    the work and returns immediately. The sandbox typically takes
+    1-10 minutes to clone, edit, and open the PR; when it's done the
+    bridge will post the PR link to this Slack thread automatically.
+
+    The agent stays HealthyBusy until the sandbox finishes (a daemon
+    poller watches the sandbox_jobs DDB table). DO NOT call this tool
+    a second time for the same change while the first one is still
+    in flight — the user will see two PRs.
+
+    First-slice behavior (Phase B v1): the sandbox runs a DUMMY
+    "add a marker line to README" entrypoint regardless of
+    ``task_description``. v2 will swap in a real Claude Agent SDK
+    inner loop that actually reads ``task_description`` +
+    ``context_hint`` and writes the diff. The plumbing is the same.
+
+    Args:
+        repo: ``"owner/name"`` slug — REQUIRED. Pick from the
+              ``## Connected codebases`` block in the system prompt.
+              There is no silent default; an omitted repo is an error.
+        task_description: One or two sentences describing the change
+              the user wants. v2 inner loop reads this as its
+              instruction; first slice ignores it.
+        context_hint: Optional research notes you've already gathered
+              from ``code_search`` / ``code_read_file`` etc. Saves the
+              inner agent from re-doing discovery work. Think "here
+              are the files I read and what I learned". v2 inner loop
+              uses this; first slice ignores it.
+    """
+    ctx = get_context()
+    tenant_id = ctx.get("tenant_id", "") or ""
+    installation_id = ctx.get("github_installation_id", "") or ""
+    channel_id = ctx.get("channel_id", "") or ""
+    thread_id = ctx.get("thread_id", "") or ""
+
+    repo = (repo or "").strip()
+    if not repo:
+        return (
+            "Error: repo is required. Pick one from the ## Connected "
+            "codebases list in the system prompt and retry with "
+            "repo='owner/name'."
+        )
+    if not installation_id:
+        return (
+            "Error: this tenant has not installed the AgentCore Reference GitHub App "
+            "yet. Ask the user to install it from the onboarding "
+            "integrations page, then retry."
+        )
+    if not tenant_id or not channel_id:
+        return (
+            "Error: no Slack context available (missing tenant_id or "
+            "channel_id). Cannot route the PR-ready callback to a "
+            "Slack thread."
+        )
+
+    # Resolve sandbox coordinates BEFORE writing the row, so a
+    # configuration error fails fast without leaving an orphan
+    # `pending` row in the table.
+    try:
+        coords = _load_sandbox_coords()
+    except Exception as e:  # noqa: BLE001
+        log.exception("propose_pr: sandbox coordinates unavailable")
+        return (
+            f"Error: sandbox is not configured for this deployment "
+            f"({type(e).__name__}: {e}). Cannot open a PR right now."
+        )
+
+    task_id = f"pr-{uuid.uuid4().hex[:8]}"
+    now = _iso_now()
+    job_row = {
+        "task_id": task_id,
+        "status": "pending",
+        "tenant_id": tenant_id,
+        "installation_id": installation_id,
+        "repo": repo,
+        "task_description": task_description or "",
+        "context_hint": context_hint or "",
+        "slack_channel_id": channel_id,
+        "slack_thread_id": thread_id,
+        "created_at": now,
+        # 30-day TTL for cleanup. Successful PRs are landed long
+        # before this; orphans get auto-purged.
+        "ttl": int(time.time()) + 30 * 24 * 3600,
+    }
+
+    # 1. Write the job row BEFORE adding to inflight or firing the
+    #    task. If DDB write fails, no HealthyBusy leak; just bail.
+    try:
+        _sandbox_jobs_table().put_item(Item=job_row)
+    except Exception as e:  # noqa: BLE001
+        log.exception("propose_pr: failed to write sandbox_jobs row")
+        return (
+            f"Error: could not record the PR job in DynamoDB "
+            f"({type(e).__name__}: {e}). Try again in a moment."
+        )
+
+    # 2. Mark inflight + register async task BEFORE firing the
+    #    Fargate task. Order matters: ping._inflight_tasks must be
+    #    populated before app.add_async_task so the next /ping
+    #    response sees >0 inflight (gotcha noted in
+    #    start_background_task above).
+    ping._inflight_tasks.add(task_id)
+    app.add_async_task(task_id)
+
+    # 3. Fire the Fargate sandbox task. On failure, roll back the
+    #    HealthyBusy state immediately so the agent doesn't get
+    #    stuck pinned alive on a launch error.
+    try:
+        ecs = _ecs_client()
+        ecs.run_task(
+            cluster=coords["cluster_arn"],
+            taskDefinition=coords["task_def_arn"],
+            launchType="FARGATE",
+            count=1,
+            networkConfiguration={
+                "awsvpcConfiguration": {
+                    "subnets": [s for s in coords["subnets"].split(",") if s],
+                    "securityGroups": [s for s in coords["security_groups"].split(",") if s],
+                    "assignPublicIp": "ENABLED",
+                }
+            },
+            overrides={
+                "containerOverrides": [
+                    {
+                        "name": "sandbox",
+                        "environment": [
+                            {"name": "TASK_ID", "value": task_id},
+                        ],
+                    }
+                ]
+            },
+        )
+    except Exception as e:  # noqa: BLE001
+        log.exception("propose_pr: ecs.run_task failed for task_id=%s", task_id)
+        try:
+            _sandbox_jobs_table().update_item(
+                Key={"task_id": task_id},
+                UpdateExpression="SET #s = :s, #e = :e, #c = :c",
+                ExpressionAttributeNames={
+                    "#s": "status",
+                    "#e": "error",
+                    "#c": "completed_at",
+                },
+                ExpressionAttributeValues={
+                    ":s": "error",
+                    ":e": f"ecs.run_task failed: {type(e).__name__}: {e}",
+                    ":c": _iso_now(),
+                },
+            )
+        except Exception:  # noqa: BLE001
+            log.exception("propose_pr: also failed to mark row as error")
+        ping._inflight_tasks.discard(task_id)
+        app.complete_async_task(task_id)
+        return (
+            f"Error: failed to launch the sandbox task "
+            f"({type(e).__name__}: {e}). The PR was not opened."
+        )
+
+    # 4. Snapshot the request context for the daemon poller. The
+    #    poller runs in a background thread AFTER the entrypoint has
+    #    called clear_context(), so get_context() returns empty there.
+    #    Capturing now means the audit row written on completion has
+    #    the same tenant/user/channel/thread as the launch row.
+    ctx_snapshot = dict(ctx)
+
+    # 5. Audit the launched event. _audit.write swallows its own
+    #    exceptions; the helper wraps that in another try for safety
+    #    so a context-read failure here can never break the caller.
+    _write_propose_pr_audit(
+        task_id=task_id,
+        event="launched",
+        status="launched",
+        repo=repo,
+        ctx_snapshot=ctx_snapshot,
+    )
+
+    # 6. Spawn the daemon poller. It will write the completion audit
+    #    row and clear HealthyBusy when the sandbox writes a terminal
+    #    status (or when the 10-min ceiling hits). The bridge callback
+    #    path posts the Slack message in parallel — both signals are
+    #    independent so a callback failure doesn't leak HealthyBusy.
+    threading.Thread(
+        target=_poll_sandbox_completion,
+        args=(task_id, repo, ctx_snapshot),
+        daemon=True,
+    ).start()
+
+    return (
+        f"Opening a PR for {repo} (task_id={task_id}). I'll post the "
+        "PR link in this thread when the sandbox finishes — typically "
+        "1 to 10 minutes. The agent stays busy in the meantime; "
+        "don't call propose_pr again for this same change."
+    )
 
 
 @audited_tool("manage_config")

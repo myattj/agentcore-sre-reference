@@ -437,6 +437,7 @@ async def invoke(payload, context):
                 "code_find_symbol",
                 "code_list_commits",
                 "inspect_codebase_context",
+                "propose_pr",
             }
             effective_tools = [t for t in effective_tools if t not in _CODE_TOOLS]
 

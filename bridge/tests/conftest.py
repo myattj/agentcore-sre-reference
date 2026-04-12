@@ -30,6 +30,9 @@ os.environ.setdefault(
 )
 os.environ.setdefault("LOCAL_DEV", "1")
 os.environ.setdefault("BRIDGE_OAUTH_STATE_SECRET", "test-state-secret")
+# Phase B: sandbox callback shared secret. Tests for the
+# /internal/sandbox_complete route compare against this constant.
+os.environ.setdefault("SANDBOX_CALLBACK_SECRET", "test-sandbox-secret")
 
 
 @pytest.fixture(autouse=True)
@@ -43,6 +46,7 @@ def _local_dev_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """
     monkeypatch.setenv("LOCAL_DEV", "1")
     monkeypatch.setenv("BRIDGE_OAUTH_STATE_SECRET", "test-state-secret")
+    monkeypatch.setenv("SANDBOX_CALLBACK_SECRET", "test-sandbox-secret")
     for var in ("AWS_PROFILE",):
         monkeypatch.delenv(var, raising=False)
 

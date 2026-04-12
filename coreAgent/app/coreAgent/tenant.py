@@ -318,6 +318,7 @@ DEFAULT_CATALOG_TOOLS = [
     "code_read_file",
     "code_find_symbol",
     "code_list_commits",
+    "propose_pr",
 ]
 
 
