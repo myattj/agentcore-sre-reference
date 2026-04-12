@@ -301,6 +301,6 @@ class TestTenantConfigNewFields:
         import json
         data = json.loads(demo_path.read_text())
         config = TenantConfig.model_validate(data)
-        assert len(config.skills) == 3
+        assert len(config.skills) == 2
         assert len(config.escalation.routes) == 3
         assert config.context_assembly.resolve_permalinks is True
