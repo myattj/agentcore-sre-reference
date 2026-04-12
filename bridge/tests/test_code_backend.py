@@ -255,7 +255,7 @@ class TestSearchCode:
         )
         cap = _UrlCapture(err)
         _patch_urlopen(monkeypatch, cap)
-        with pytest.raises(BackendError, match="Not found"):
+        with pytest.raises(BackendError, match="GitHub returned 404"):
             backend.search_code("x", "a/b")
 
     def test_generic_http_error_wrapped(
@@ -576,7 +576,7 @@ class TestListCommits:
         cap = _UrlCapture(err)
         _patch_urlopen(monkeypatch, cap)
 
-        with pytest.raises(BackendError, match="Not found"):
+        with pytest.raises(BackendError, match="GitHub returned 404"):
             backend.list_commits("acme/missing")
 
     def test_missing_committer_date_falls_back_to_author_date(

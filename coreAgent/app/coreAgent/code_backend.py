@@ -199,7 +199,20 @@ class GithubBackend:
         except urllib.error.HTTPError as e:
             body = e.read().decode("utf-8", errors="replace")[:500]
             if e.code == 404:
-                raise BackendError(f"Not found: {url}") from e
+                # 404 on a repo-scoped endpoint (/repos/owner/name/...)
+                # is indistinguishable from a permissions failure — GitHub
+                # deliberately collapses "no such repo" and "you can't see
+                # this repo" into the same response for privacy. Surface
+                # that ambiguity to the tool layer so it can explain it
+                # instead of letting the model second-guess its repo pick.
+                raise BackendError(
+                    "GitHub returned 404. For a repo-scoped endpoint this "
+                    "means the installation token can't see the repo — "
+                    "either the AgentCore Reference GitHub App isn't installed on it, "
+                    "the repo isn't in the App's selected-repositories "
+                    "list, or the repo was deleted/renamed. This is NOT a "
+                    "signal that you picked the wrong repo slug."
+                ) from e
             if e.code == 403 and "rate limit" in body.lower():
                 raise BackendError(
                     "GitHub search rate limit reached (30 requests/minute "
