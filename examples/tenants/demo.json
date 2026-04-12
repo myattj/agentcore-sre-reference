@@ -84,7 +84,42 @@
     "thread_history_depth": 25,
     "max_permalinks": 3
   },
-  "skills": [],
+  "skills": [
+    {
+      "trigger": "/triage",
+      "name": "incident-triage",
+      "prompt_template": "An incident-triage request was made by {user_id} in {channel_id}. Start by calling search_team_history for similar past incidents, then search_docs for matching runbooks. Summarize likely causes and the next 2\u20133 steps. If the severity is unclear, ask the reporter.",
+      "required_tools": [
+        "search_team_history",
+        "search_docs",
+        "read_thread_context"
+      ],
+      "channels": []
+    },
+    {
+      "trigger": "(?i)\\b(schema|dbt|pipeline|warehouse)\\b",
+      "name": "data-qa",
+      "prompt_template": "The user is asking a data-platform question. Before answering, call search_docs (data namespace first) and search_team_history for prior answers. Cite your sources inline and prefer short, direct answers.",
+      "required_tools": [
+        "search_docs",
+        "search_team_history"
+      ],
+      "channels": [
+        "C_ASK_DATA"
+      ]
+    },
+    {
+      "trigger": "/ticket",
+      "name": "draft-ticket",
+      "prompt_template": "The user wants a ticket drafted from the current thread. Call read_thread_context to pull the full conversation, then produce a structured summary with: title, problem statement, reproduction steps (if any), and affected surfaces. Do NOT post anywhere \u2014 just return the draft so the user can copy it.",
+      "required_tools": [
+        "read_thread_context"
+      ],
+      "channels": [
+        "C_WORKFLOWS"
+      ]
+    }
+  ],
   "escalation": {
     "routes": [
       {

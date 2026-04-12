@@ -215,6 +215,63 @@ def patch_tenant_config(
 # Main
 # ----------------------------------------------------------------------------
 
+_ALL_INTEGRATIONS = ("datadog", "pagerduty", "jira", "linear", "sentry")
+
+
+def _run_integration_seeders(
+    tenant_id: str,
+    *,
+    region: str,
+    bridge_url: str,
+    integrations: list[str],
+) -> dict[str, int]:
+    """Run each selected integration seeder in sequence.
+
+    Returns a ``{integration: exit_code}`` map. Doesn't abort the
+    whole bootstrap on integration failures — they're optional and
+    often blocked on free-tier credential issues we can't diagnose
+    from here. The bootstrap prints per-integration status and the
+    user can retry individual ones via
+    ``python -m scripts.testenv.integrations.seed_<name>``.
+    """
+    results: dict[str, int] = {}
+    for name in integrations:
+        step(f"Running integration seeder: {name}")
+        try:
+            if name == "datadog":
+                from .integrations.seed_datadog import run_seed as run_dd
+                results[name] = run_dd(
+                    tenant_id, region=region, bridge_url=bridge_url
+                )
+            elif name == "pagerduty":
+                from .integrations.seed_pagerduty import run_seed as run_pd
+                results[name] = run_pd(
+                    tenant_id, region=region, bridge_url=bridge_url
+                )
+            elif name == "jira":
+                from .integrations.seed_jira import run_seed as run_jira
+                results[name] = run_jira(
+                    tenant_id, region=region, bridge_url=bridge_url
+                )
+            elif name == "linear":
+                from .integrations.seed_linear import run_seed as run_linear
+                results[name] = run_linear(
+                    tenant_id, region=region, bridge_url=bridge_url
+                )
+            elif name == "sentry":
+                from .integrations.seed_sentry import run_seed as run_sentry
+                results[name] = run_sentry(
+                    tenant_id, region=region, bridge_url=bridge_url
+                )
+            else:
+                err(f"unknown integration: {name}")
+                results[name] = 1
+        except Exception as e:  # noqa: BLE001
+            err(f"{name} seeder crashed: {e}")
+            results[name] = 1
+    return results
+
+
 def run_bootstrap(
     tenant_id: str,
     *,
@@ -224,6 +281,7 @@ def run_bootstrap(
     github_installation_id: str | None,
     skip_seed: bool,
     skip_patch: bool,
+    integrations: list[str],
 ) -> int:
     configure_logging(verbose=False)
 
@@ -317,13 +375,29 @@ def run_bootstrap(
         if counts["failed"]:
             warn("some messages failed — check the log and re-run to retry")
 
-    # ----- Step 6: summary -----
+    # ----- Step 6: external integrations (optional) -----
+    integration_results: dict[str, int] = {}
+    if integrations:
+        step(f"Running {len(integrations)} integration seeder(s): {', '.join(integrations)}")
+        integration_results = _run_integration_seeders(
+            tenant_id,
+            region=region,
+            bridge_url=bridge_url,
+            integrations=integrations,
+        )
+
+    # ----- Step 7: summary -----
     step("Test env is ready")
     print()
     print(f"  {C.BOLD}Tenant:{C.RESET}   {tenant_id}")
     print(f"  {C.BOLD}Bridge:{C.RESET}   {bridge_url}")
     print(f"  {C.BOLD}Channels:{C.RESET} {', '.join('#' + n for n in TESTENV_CHANNELS)}")
     print(f"  {C.BOLD}Metrics:{C.RESET}  {bridge_url.replace('/api', '')}/workspace/{tenant_id}/metrics")
+    if integration_results:
+        print(f"  {C.BOLD}Integrations:{C.RESET}")
+        for name, code in integration_results.items():
+            status = f"{C.GREEN}✓{C.RESET}" if code == 0 else f"{C.RED}✗{C.RESET}"
+            print(f"    {status} {name}")
     print()
     print(f"  {C.BOLD}Try this first:{C.RESET}")
     grey("   1. Open your test Slack workspace")
@@ -378,7 +452,36 @@ def _main() -> int:
         action="store_true",
         help="Skip the config PATCH step (seed-only run).",
     )
+    parser.add_argument(
+        "--integrations",
+        default="",
+        help=(
+            "Comma-separated list of external integrations to seed. "
+            "Valid: datadog, pagerduty, jira, linear, sentry. "
+            "Use 'all' to seed every supported integration. "
+            "Requires credentials in Secrets Manager at "
+            "agentcore/testenv/<integration> — see "
+            "scripts/testenv/integrations/README.md for setup."
+        ),
+    )
     args = parser.parse_args()
+
+    # Parse integrations list
+    integrations: list[str] = []
+    if args.integrations:
+        if args.integrations.strip().lower() == "all":
+            integrations = list(_ALL_INTEGRATIONS)
+        else:
+            raw = [i.strip().lower() for i in args.integrations.split(",") if i.strip()]
+            bad = [i for i in raw if i not in _ALL_INTEGRATIONS]
+            if bad:
+                print(
+                    f"error: unknown integration(s): {bad}. "
+                    f"Valid: {list(_ALL_INTEGRATIONS)}",
+                    file=sys.stderr,
+                )
+                return 1
+            integrations = raw
 
     return run_bootstrap(
         tenant_id=args.tenant,
@@ -388,6 +491,7 @@ def _main() -> int:
         github_installation_id=args.github_installation_id,
         skip_seed=args.skip_seed,
         skip_patch=args.skip_patch,
+        integrations=integrations,
     )
 
 
