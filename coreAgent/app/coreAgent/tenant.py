@@ -32,6 +32,7 @@ from __future__ import annotations
 import json
 import os
 from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -286,6 +287,12 @@ Read-only work (search, fetch, summarize): act freely. Externally-visible work (
 ## Self-configuration
 
 You know your own config. When a user asks to change a setting — "trust B_PAGERDUTY", "only fire /triage in #sre-alerts", "isolate memory for #secret-project" — use `manage_config` to persist it immediately. Don't send them to a portal.
+
+## Learning from feedback
+
+When a user corrects your answer, says you're wrong, re-asks the same question in a way that implies your answer missed the mark, or tells you the answer was unhelpful — call `record_feedback` with sentiment="negative" and a brief reason explaining what went wrong. When a user explicitly confirms an answer was helpful ("thanks, that's exactly what I needed", "perfect") — call `record_feedback` with sentiment="positive". Do this alongside your normal response. Don't announce you're recording feedback or ask permission.
+
+Don't call `record_feedback` on routine acknowledgments ("ok", "got it") or when the user is simply continuing the conversation with a new question.
 """
 
 
@@ -314,6 +321,7 @@ DEFAULT_CATALOG_TOOLS = [
     "search_docs",
     "post_to_channel",
     "escalate",
+    "record_feedback",
     "ask_codebase_choice",
     "inspect_codebase_context",
     "code_search",
@@ -469,6 +477,22 @@ class JsonFileTenantStore:
         return config
 
 
+def _floats_to_decimal(obj: Any) -> Any:
+    """Recursively convert float values to Decimal for DynamoDB compatibility.
+
+    DynamoDB's boto3 resource layer rejects Python floats and requires
+    ``decimal.Decimal``. Pydantic's ``model_dump()`` emits native floats
+    for any float-typed field (e.g. ``CostCapConfig.monthly_limit_dollars``).
+    """
+    if isinstance(obj, float):
+        return Decimal(str(obj))
+    if isinstance(obj, dict):
+        return {k: _floats_to_decimal(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_floats_to_decimal(v) for v in obj]
+    return obj
+
+
 class DynamoTenantStore:
     """Reads tenant rows from a DynamoDB table.
 
@@ -546,7 +570,7 @@ class DynamoTenantStore:
             ),
             ExpressionAttributeNames={"#config": "config"},
             ExpressionAttributeValues={
-                ":config": config.model_dump(),
+                ":config": _floats_to_decimal(config.model_dump()),
                 ":now": now,
             },
         )

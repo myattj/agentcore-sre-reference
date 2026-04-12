@@ -643,6 +643,91 @@ def escalate(team_name: str, summary: str, severity: str = "medium") -> str:
     return slack_api.post_message(token, route["channel_id"], msg)
 
 
+@audited_tool("record_feedback")
+def record_feedback(
+    sentiment: str,
+    reason: str,
+    original_question: str = "",
+    original_answer: str = "",
+) -> str:
+    """Record feedback on a previous answer from this conversation.
+
+    Call this when the user's message contains a clear signal about the quality
+    of a prior answer — corrections ("that's wrong", "actually it was X"),
+    re-asks that imply the answer missed the mark, or explicit praise
+    ("perfect", "thanks, exactly what I needed").
+
+    Do NOT call for routine conversation flow ("ok", "got it", "next question").
+
+    Args:
+        sentiment: "positive" or "negative".
+        reason: Brief explanation of what the user indicated — e.g. "user corrected
+                root cause: DNS change, not deployment" or "user confirmed the
+                runbook steps were correct".
+        original_question: The user's original question that led to the answer
+                           being evaluated (abbreviated if long).
+        original_answer: The bot's answer that the user is reacting to
+                         (abbreviated if long).
+    """
+    if sentiment not in ("positive", "negative"):
+        return f"Error: sentiment must be 'positive' or 'negative', got '{sentiment}'."
+
+    ctx = get_context()
+    tenant_id = ctx.get("tenant_id", "unknown")
+    invocation_id = ctx.get("invocation_id", "")
+
+    # Write a feedback audit row (structured, queryable).
+    # The audited_tool wrapper already writes a tool_call row; this
+    # additional row uses row_type="feedback" for the dedicated feedback
+    # schema so it can be queried independently of tool_call rows.
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    try:
+        _audit.write({
+            "row_type": "feedback",
+            "tenant_id": tenant_id,
+            "sk": f"FB#{now}#{invocation_id}",
+            "invocation_id": invocation_id,
+            "timestamp": now,
+            "created_at": now,
+            "user_id": ctx.get("user_id", ""),
+            "channel_id": ctx.get("channel_id", ""),
+            "thread_id": ctx.get("thread_id", ""),
+            "workspace_id": ctx.get("workspace_id", ""),
+            "reaction": "",
+            "sentiment": sentiment,
+            "source": "conversation",
+            "reason": reason[:512],
+            "bot_message_ts": "",
+            "question_summary": original_question[:512],
+            "answer_summary": original_answer[:512],
+        })
+    except Exception as e:
+        log.warning("record_feedback: audit write dropped: %s", e)
+
+    # Write a memory record so the feedback is retrievable in future
+    # conversations. For production, the Strands session manager captures
+    # the full conversation turn (including this tool call) and the
+    # SEMANTIC strategy indexes it. This explicit write supplements that
+    # with a structured record for local dev (InMemoryStore).
+    try:
+        from memory_store import build_memory_store
+        store = build_memory_store()
+        namespace = f"tenants/{tenant_id}"
+        store.write_records(namespace, [{
+            "type": "user_feedback",
+            "sentiment": sentiment,
+            "reason": reason,
+            "question": original_question,
+            "answer": original_answer,
+            "extracted_via": "record_feedback_tool_v0",
+        }])
+    except Exception as e:
+        log.warning("record_feedback: memory write dropped: %s", e)
+
+    return "Feedback recorded."
+
+
 @audited_tool("ask_codebase_choice")
 def ask_codebase_choice(candidates: list[str]) -> str:
     """Offer a pick-one Slack button UI for choosing between codebases.
@@ -1393,10 +1478,13 @@ def propose_pr(
     ).start()
 
     return (
-        f"Opening a PR for {repo} (task_id={task_id}). I'll post the "
-        "PR link in this thread when the sandbox finishes — typically "
-        "1 to 10 minutes. The agent stays busy in the meantime; "
-        "don't call propose_pr again for this same change."
+        f"Opening a PR for {repo} (task_id={task_id}). The sandbox "
+        "typically takes 1-10 minutes; when it finishes the bridge "
+        "will post the PR link in this thread automatically.\n\n"
+        "You can check progress at any time with "
+        f"``check_task_status(task_id='{task_id}')`` — use it if the "
+        "user asks for an update, or if ~10 minutes pass with no link. "
+        "Don't call propose_pr again for this same change."
     )
 
 
@@ -1406,9 +1494,10 @@ def check_task_status(task_id: str = "") -> str:
 
     Call this whenever a user asks about the progress of a previously
     queued task — e.g. "is the PR up yet?", "what happened to that
-    code change?", "did it finish?". Also useful for your own
-    situational awareness when you remember queueing a task earlier
-    in the conversation.
+    code change?", "did it finish?". Also call this proactively after
+    ``propose_pr`` if the PR link hasn't appeared in the thread —
+    this is your observability into the sandbox. If the status is
+    ``error``, relay the error message to the user.
 
     If ``task_id`` is provided, returns the detailed status of that
     specific task. If omitted, lists the most recent tasks for this

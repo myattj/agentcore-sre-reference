@@ -59,6 +59,7 @@ import sys
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Any
 
 import boto3
@@ -124,7 +125,8 @@ def update_status(task_id: str, **fields: Any) -> None:
         value_placeholder = f":v{i}"
         expr_parts.append(f"{placeholder} = {value_placeholder}")
         expr_names[placeholder] = key
-        expr_values[value_placeholder] = value
+        # DynamoDB rejects Python floats — convert to Decimal.
+        expr_values[value_placeholder] = Decimal(str(value)) if isinstance(value, float) else value
     _table().update_item(
         Key={"task_id": task_id},
         UpdateExpression="SET " + ", ".join(expr_parts),
