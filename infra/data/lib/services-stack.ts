@@ -64,18 +64,16 @@ export interface ServicesStackProps extends StackProps {
   /**
    * Secrets Manager ARN for `agentcore/services/sandbox` ({ CALLBACK_SECRET }).
    *
-   * Pre-created out-of-band (NOT CDK-managed) so the same value can be
-   * read by BOTH the bridge task def (this stack) and the sandbox task
-   * def (sandbox-stack.ts) without giving either side access to the
-   * `agentcore/services/bridge` crown jewels (BRIDGE_GATEWAY_JWT_PRIVATE_KEY_PEM).
-   * The sandbox runs Claude-authored bash; tight blast radius is the point.
-   *
-   * Used here to inject `SANDBOX_CALLBACK_SECRET` into the bridge
-   * container, which the bridge's `/internal/sandbox_complete` handler
-   * checks via `hmac.compare_digest` against the Authorization Bearer
-   * header sent by the sandbox container.
+   * Optional — omit for environments that haven't set up Phase B yet.
+   * When provided, injects `SANDBOX_CALLBACK_SECRET` into the bridge
+   * container env, which the bridge's `/internal/sandbox_complete`
+   * handler checks via `hmac.compare_digest`. The sandbox task def in
+   * sandbox-stack.ts reads the SAME secret. When omitted, the bridge
+   * still deploys but the `/internal/sandbox_complete` endpoint will
+   * reject all requests (SANDBOX_CALLBACK_SECRET env var missing →
+   * `_callback_secret()` raises → 401).
    */
-  readonly sandboxSecretsArn: string;
+  readonly sandboxSecretsArn?: string;
 }
 
 export class ServicesStack extends Stack {
@@ -125,9 +123,14 @@ export class ServicesStack extends Stack {
     );
     // Phase B: shared bridge↔sandbox callback secret. Same secret read
     // by sandbox-stack.ts so both sides agree on the Bearer token.
-    const sandboxSecret = secretsmanager.Secret.fromSecretCompleteArn(
-      this, 'SandboxSecret', props.sandboxSecretsArn,
-    );
+    // Omitted in environments that haven't set up Phase B yet — the
+    // bridge deploys without SANDBOX_CALLBACK_SECRET and the
+    // /internal/sandbox_complete endpoint rejects all requests.
+    const sandboxSecret = props.sandboxSecretsArn
+      ? secretsmanager.Secret.fromSecretCompleteArn(
+          this, 'SandboxSecret', props.sandboxSecretsArn,
+        )
+      : undefined;
 
     // ------------------------------------------------------------------
     // Derive the public URL (used in env vars and listener setup)
@@ -264,7 +267,7 @@ export class ServicesStack extends Stack {
     });
     slackSecret.grantRead(execRole);
     bridgeSecret.grantRead(execRole);
-    sandboxSecret.grantRead(execRole);
+    if (sandboxSecret) sandboxSecret.grantRead(execRole);
 
     // ------------------------------------------------------------------
     // Bridge task role (what the container can do at runtime)
@@ -378,11 +381,11 @@ export class ServicesStack extends Stack {
         // /ops login page can validate the cookie.
         ADMIN_SECRET: ecs.Secret.fromSecretsManager(bridgeSecret, 'ADMIN_SECRET'),
         // Phase B: shared with the sandbox container — guards
-        // POST /internal/sandbox_complete. The bridge handler verifies
-        // the Authorization: Bearer header against this value via
-        // hmac.compare_digest. Sandbox reads the SAME secret value at
-        // runtime via its own task def in sandbox-stack.ts.
-        SANDBOX_CALLBACK_SECRET: ecs.Secret.fromSecretsManager(sandboxSecret, 'CALLBACK_SECRET'),
+        // POST /internal/sandbox_complete. Conditional: omitted when
+        // sandboxSecretsArn is not set (pre-Phase-B environments).
+        ...(sandboxSecret ? {
+          SANDBOX_CALLBACK_SECRET: ecs.Secret.fromSecretsManager(sandboxSecret, 'CALLBACK_SECRET'),
+        } : {}),
       },
     });
 

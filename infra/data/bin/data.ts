@@ -127,15 +127,6 @@ if (bridgePublicUrl) {
 const agentRuntimeArn = app.node.tryGetContext('agentRuntimeArn') as string | undefined;
 const sandboxSecretsArn = app.node.tryGetContext('sandboxSecretsArn') as string | undefined;
 if (agentRuntimeArn) {
-  if (!sandboxSecretsArn) {
-    throw new Error(
-      'sandboxSecretsArn context is required when agentRuntimeArn is set. ' +
-        'Pre-create the secret out-of-band: ' +
-        '`aws secretsmanager create-secret --name agentcore/services/sandbox ' +
-        '--secret-string \'{"CALLBACK_SECRET":"<random hex>"}\' --region us-west-2`, ' +
-        'then pass `--context sandboxSecretsArn=arn:aws:secretsmanager:...`.',
-    );
-  }
   const dataStackName = `AgentCore-coreAgent-data-${region}`;
 
   new ServicesStack(app, `AgentCore-coreAgent-services-${region}`, {
