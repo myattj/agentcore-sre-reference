@@ -1390,6 +1390,128 @@ def propose_pr(
     )
 
 
+@audited_tool("check_task_status")
+def check_task_status(task_id: str = "") -> str:
+    """Check the status of a sandbox task (PR, code change, etc.).
+
+    Call this whenever a user asks about the progress of a previously
+    queued task — e.g. "is the PR up yet?", "what happened to that
+    code change?", "did it finish?". Also useful for your own
+    situational awareness when you remember queueing a task earlier
+    in the conversation.
+
+    If ``task_id`` is provided, returns the detailed status of that
+    specific task. If omitted, lists the most recent tasks for this
+    tenant (up to 10, sorted newest first).
+
+    Possible statuses:
+    - **pending**: task row written, ECS task not yet started
+    - **running**: sandbox container is executing
+    - **success**: PR opened successfully (``pr_url`` included)
+    - **error**: sandbox failed (``error`` message included)
+    - **orphaned**: 10-minute poll ceiling exceeded without terminal status
+
+    Args:
+        task_id: The ``pr-XXXXXXXX`` identifier returned by
+                 ``propose_pr``. Omit to list recent tasks.
+    """
+    ctx = get_context()
+    tenant_id = ctx.get("tenant_id", "") or ""
+    if not tenant_id:
+        return (
+            "Error: no tenant context available (missing tenant_id). "
+            "Cannot check task status."
+        )
+
+    table = _sandbox_jobs_table()
+
+    if task_id:
+        task_id = task_id.strip()
+        try:
+            resp = table.get_item(Key={"task_id": task_id})
+        except Exception as e:  # noqa: BLE001
+            log.exception("check_task_status: DDB get_item failed for %s", task_id)
+            return f"Error: could not read task status ({type(e).__name__}: {e})."
+
+        row = resp.get("Item")
+        if not row or row.get("tenant_id") != tenant_id:
+            return f"No task found with id `{task_id}`."
+
+        return _format_task_row(row)
+
+    # No task_id — list recent tasks for this tenant.
+    try:
+        resp = table.scan(
+            FilterExpression="tenant_id = :tid",
+            ExpressionAttributeValues={":tid": tenant_id},
+        )
+    except Exception as e:  # noqa: BLE001
+        log.exception("check_task_status: DDB scan failed for tenant %s", tenant_id)
+        return f"Error: could not list tasks ({type(e).__name__}: {e})."
+
+    items = resp.get("Items", [])
+    if not items:
+        return "No sandbox tasks found for this tenant."
+
+    # Sort by created_at descending, take the 10 most recent.
+    items.sort(key=lambda r: r.get("created_at", ""), reverse=True)
+    items = items[:10]
+
+    lines = [f"Recent tasks (showing {len(items)}):"]
+    for row in items:
+        status = row.get("status", "unknown")
+        tid = row.get("task_id", "?")
+        repo = row.get("repo", "?")
+        created = row.get("created_at", "?")
+        entry = f"- {tid} | {status} | {repo} | {created}"
+        pr_url = row.get("pr_url", "")
+        if pr_url:
+            entry += f" | {pr_url}"
+        lines.append(entry)
+
+    return "\n".join(lines)
+
+
+def _format_task_row(row: dict[str, Any]) -> str:
+    """Format a sandbox_jobs row into a human-readable status report."""
+    status = row.get("status", "unknown")
+    task_id = row.get("task_id", "?")
+    repo = row.get("repo", "?")
+    created = row.get("created_at", "?")
+    completed = row.get("completed_at", "")
+    pr_url = row.get("pr_url", "")
+    error = row.get("error", "")
+
+    lines = [
+        f"Task {task_id}",
+        f"- Status: {status}",
+        f"- Repo: {repo}",
+        f"- Created: {created}",
+    ]
+    if completed:
+        lines.append(f"- Completed: {completed}")
+    if pr_url:
+        lines.append(f"- PR: {pr_url}")
+    if error:
+        lines.append(f"- Error: {error}")
+
+    if status == "pending":
+        lines.append("\nThe sandbox container hasn't started yet.")
+    elif status == "running":
+        lines.append("\nThe sandbox is working on it — cloning, editing, and opening the PR.")
+    elif status == "success":
+        lines.append("\nThe PR is open and ready for review.")
+    elif status == "error":
+        lines.append("\nThe sandbox failed. See the error above.")
+    elif status == "orphaned":
+        lines.append(
+            "\nThe task exceeded the 10-minute deadline without completing. "
+            "The sandbox container may have crashed. Try re-queuing."
+        )
+
+    return "\n".join(lines)
+
+
 @audited_tool("manage_config")
 def manage_config(action: str, section: str, data: str | None = None) -> str:
     """View or update this bot's configuration.

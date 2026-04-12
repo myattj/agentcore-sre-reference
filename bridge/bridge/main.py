@@ -35,6 +35,7 @@ from .client import AgentCoreClient
 from .dedup import is_duplicate
 from .gateway_jwt import get_jwks, get_oidc_configuration
 from .sandbox_callback import handle_sandbox_complete, verify_callback_auth
+from .sandbox_progress import handle_sandbox_progress
 from .slack_interactions import (
     build_codebase_pick_synthetic_message,
     extract_payload_json,
@@ -155,6 +156,22 @@ async def sandbox_complete(request: Request) -> dict[str, object]:
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="payload must be a JSON object")
     return await handle_sandbox_complete(payload)
+
+
+@app.post("/internal/sandbox_progress")
+async def sandbox_progress(request: Request) -> dict[str, object]:
+    """Receive a progress update from a Fargate sandbox task."""
+    auth = request.headers.get("Authorization", "")
+    if not verify_callback_auth(auth):
+        log.warning("sandbox_progress: rejected request with bad auth")
+        raise HTTPException(status_code=401, detail="invalid callback auth")
+    try:
+        payload = await request.json()
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="invalid JSON body")
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="payload must be a JSON object")
+    return await handle_sandbox_progress(payload)
 
 
 # OIDC discovery + JWKS endpoints for AgentCore Gateway's CUSTOM_JWT

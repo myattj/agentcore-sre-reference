@@ -240,6 +240,16 @@ async def handle_sandbox_complete(payload: dict[str, Any]) -> dict[str, Any]:
         )
         return {"ok": True, "posted": False}
 
+    # If the progress tracker posted a Block Kit message earlier,
+    # update it in-place with the final state (success/error).
+    from .sandbox_progress import update_tracker_completion
+
+    tracker_updated = await update_tracker_completion(job, status, pr_url, error)
+    if tracker_updated:
+        return {"ok": True, "posted": True, "tracker_updated": True}
+
+    # No tracker (task was queued before the progress feature, or
+    # progress calls failed). Fall back to the plain-text post.
     text = format_completion_message(job, status, pr_url, error)
     posted = await _post_slack_message(token, channel_id, thread_id, text)
 

@@ -321,6 +321,7 @@ DEFAULT_CATALOG_TOOLS = [
     "code_find_symbol",
     "code_list_commits",
     "propose_pr",
+    "check_task_status",
 ]
 
 

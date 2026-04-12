@@ -233,6 +233,45 @@ def open_pull_request(
 # Callback to bridge
 # ---------------------------------------------------------------------------
 
+def _progress_url() -> str:
+    """Derive the progress endpoint URL from the completion callback URL.
+
+    The callback URL is e.g. ``https://bridge.example.com/internal/sandbox_complete``.
+    The progress URL replaces the last path component:
+    ``https://bridge.example.com/internal/sandbox_progress``.
+    """
+    if not SANDBOX_CALLBACK_URL:
+        return ""
+    return SANDBOX_CALLBACK_URL.rsplit("/", 1)[0] + "/sandbox_progress"
+
+
+def post_progress(task_id: str, step: str) -> None:
+    """Report a progress milestone to the bridge for Slack tracker updates.
+
+    Best-effort — failures are logged but never stop the sandbox flow.
+    The bridge posts/updates a Block Kit progress bar in the Slack thread.
+    """
+    url = _progress_url()
+    if not url or not SANDBOX_CALLBACK_SECRET:
+        return
+    payload = json.dumps({"task_id": task_id, "step": step}).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=payload,
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {SANDBOX_CALLBACK_SECRET}",
+            "Content-Type": "application/json",
+            "User-Agent": "AgentCore Reference-Sandbox/1.0",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            log.info("progress ok (%s): %s", step, resp.status)
+    except Exception as e:  # noqa: BLE001 — best-effort
+        log.warning("progress POST failed (%s): %s", step, e)
+
+
 def post_callback(task_id: str, status: str, pr_url: str = "", error: str = "") -> None:
     """Notify the bridge so it can post the result to the original Slack
     thread. Best-effort — if the callback fails, the agent's DDB poll
@@ -295,7 +334,7 @@ def main() -> int:
         post_callback(TASK_ID, status="error", error=msg)
         return 4
 
-    # Step 2 — mark running
+    # Step 2 — mark running + post first progress update
     try:
         update_status(TASK_ID, status="running", started_at=_now_iso())
     except Exception:  # noqa: BLE001
@@ -303,6 +342,8 @@ def main() -> int:
         # write blipped. The completion write at the end is the one
         # that matters.
         log.exception("failed to mark row running (continuing)")
+
+    post_progress(TASK_ID, "started")
 
     # Step 3+ — the actual PR work, all wrapped so a failure at any
     # step still writes a clean error state and posts the callback.
@@ -322,6 +363,8 @@ def main() -> int:
         branch = f"agentcore/{TASK_ID}"
         run_git(["checkout", "-b", branch], cwd=CLONE_DIR)
 
+        post_progress(TASK_ID, "cloning")
+
         # Append a stable line to README.md (create if missing). The
         # whole point is to make a small, harmless, reviewable change
         # that proves the plumbing works without touching real code.
@@ -335,7 +378,12 @@ def main() -> int:
             ["commit", "-m", f"AgentCore Reference: test PR ({TASK_ID})"],
             cwd=CLONE_DIR,
         )
+
+        post_progress(TASK_ID, "editing")
+
         run_git(["push", "origin", branch], cwd=CLONE_DIR)
+
+        post_progress(TASK_ID, "pushing")
 
         # Open the PR.
         pr_title = f"AgentCore Reference: test PR ({TASK_ID}) — please ignore"
@@ -355,6 +403,8 @@ def main() -> int:
             body=pr_body,
         )
         log.info("opened PR: %s", pr_url)
+
+        post_progress(TASK_ID, "opening_pr")
 
     except Exception as e:  # noqa: BLE001 — single failure path
         log.exception("propose_pr sandbox flow failed")
