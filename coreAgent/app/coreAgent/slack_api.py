@@ -221,11 +221,25 @@ def post_message(
     channel_id: str,
     text: str,
     thread_ts: str | None = None,
+    blocks: list[dict[str, Any]] | None = None,
 ) -> str:
-    """Post a message to a Slack channel. Returns confirmation or error."""
+    """Post a message to a Slack channel. Returns confirmation or error.
+
+    ``text`` is always set (used as the notification / screen-reader
+    fallback). ``blocks``, when provided, carries the rich Block Kit
+    content — Slack renders the blocks and shows the text only in
+    notifications where blocks aren't supported.
+
+    Used by:
+      - ``post_to_channel`` catalog tool (text-only)
+      - ``ask_codebase_choice`` catalog tool (blocks with buttons)
+      - ``escalate`` catalog tool (text-only)
+    """
     payload: dict[str, Any] = {"channel": channel_id, "text": text}
     if thread_ts:
         payload["thread_ts"] = thread_ts
+    if blocks:
+        payload["blocks"] = blocks
     result = _slack_post(token, "chat.postMessage", payload)
     if result.get("ok"):
         return f"Message posted to <#{channel_id}>"

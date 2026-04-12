@@ -8,10 +8,13 @@
 import Link from "next/link";
 
 import { getTenant } from "@/lib/bridge";
+import { getGitHubAppSlug } from "@/lib/env";
 import { requireSession } from "@/lib/session";
+import type { CodebasesConfig } from "@/lib/types";
 
 import { ConfluenceForm } from "./ConfluenceForm";
 import { DatadogForm } from "./DatadogForm";
+import { GitHubAppCard } from "./GitHubAppCard";
 import { GitHubForm } from "./GitHubForm";
 import { JiraForm } from "./JiraForm";
 import { LinearForm } from "./LinearForm";
@@ -20,20 +23,32 @@ import { PagerDutyForm } from "./PagerDutyForm";
 
 export default async function IntegrationsPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ tenantId: string }>;
+  searchParams: Promise<{
+    github?: string;
+    repo?: string;
+    total?: string;
+    reason?: string;
+  }>;
 }) {
   const { tenantId } = await params;
+  const query = await searchParams;
   const { token } = await requireSession(tenantId);
 
   let connected: string[] = [];
+  let codebases: CodebasesConfig | undefined;
   try {
     const config = await getTenant(tenantId, token);
     connected = config.byo?.connected_integrations ?? [];
+    codebases = config.codebases;
   } catch {
     // If the tenant fetch fails, show all forms (worst case: they
     // reconnect, which is idempotent).
   }
+
+  const appSlug = getGitHubAppSlug();
 
   return (
     <div>
@@ -52,6 +67,54 @@ export default async function IntegrationsPage({
         </p>
       </header>
 
+      {/* Post-install banner — rendered from ?github=... query params
+          set by app/github/installed/route.ts after the bridge warm-start
+          returns. Idempotent: refreshing the page just re-shows it. */}
+      {query.github === "connected" && (
+        <div className="mb-6 rounded-lg border border-green-200 bg-green-50 px-4 py-3 text-sm">
+          <strong className="font-semibold text-green-800">
+            GitHub App connected.
+          </strong>{" "}
+          <span className="text-green-700">
+            {query.repo ? (
+              <>
+                Your primary codebase is{" "}
+                <code className="font-mono text-[12px]">{query.repo}</code>
+                {query.total && ` — ${query.total} repos available.`}
+              </>
+            ) : (
+              "Warm-start complete."
+            )}
+          </span>
+        </div>
+      )}
+      {query.github === "error" && (
+        <div className="mb-6 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm">
+          <strong className="font-semibold text-red-800">
+            Couldn&rsquo;t connect the GitHub App.
+          </strong>{" "}
+          <span className="text-red-700">
+            {query.reason ? query.reason : "Unknown error."}
+          </span>
+        </div>
+      )}
+
+      {/* Codebase access — GitHub App install flow. Separate section so
+          it's visually distinct from the BYO PAT connectors below. */}
+      <section className="mb-8">
+        <h2 className="mb-3 text-xs font-semibold uppercase tracking-wider text-[color:var(--muted)]">
+          Codebase access
+        </h2>
+        <GitHubAppCard
+          codebases={codebases}
+          appSlug={appSlug}
+          sessionToken={token}
+        />
+      </section>
+
+      <h2 className="mb-3 text-xs font-semibold uppercase tracking-wider text-[color:var(--muted)]">
+        Docs, alerts &amp; tickets
+      </h2>
       <ul className="grid gap-4 sm:grid-cols-2">
         <li><DatadogForm tenantId={tenantId} initialConnected={connected.includes("datadog")} /></li>
         <li><PagerDutyForm tenantId={tenantId} initialConnected={connected.includes("pagerduty")} /></li>

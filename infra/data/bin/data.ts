@@ -12,6 +12,7 @@
 import { App, Fn } from 'aws-cdk-lib';
 import { DataStack } from '../lib/data-stack';
 import { GatewayStack } from '../lib/gateway-stack';
+import { ObservabilityStack } from '../lib/observability-stack';
 import { ServicesStack } from '../lib/services-stack';
 
 const app = new App();
@@ -43,6 +44,30 @@ new DataStack(app, `AgentCore-coreAgent-data-${region}`, {
     'agentcore:project-name': 'coreAgent',
     'agentcore:stack-type': 'data',
   },
+});
+
+// ObservabilityStack — post-week-7. CloudWatch dashboard + SNS alarms for
+// the platform-wide metrics the agent emits via EMF (see
+// coreAgent/app/coreAgent/metrics.py).
+//
+// Optional context:
+//   --context alarmEmail=ops@example.com
+//     Email address to subscribe to the operator alarms SNS topic.
+//     When omitted, the topic is created with no subscription (operator
+//     can wire one up in the console later).
+//
+// Always deploys — no required context. Empty until the agent is
+// redeployed with the EMF emitter, at which point widgets populate
+// automatically on the next invocation.
+new ObservabilityStack(app, `AgentCore-coreAgent-observability-${region}`, {
+  env: { account, region },
+  description:
+    'CloudWatch dashboard + SNS alarms consuming EMF metrics emitted by the agent.',
+  tags: {
+    'agentcore:project-name': 'coreAgent',
+    'agentcore:stack-type': 'observability',
+  },
+  alarmEmail: app.node.tryGetContext('alarmEmail') as string | undefined,
 });
 
 // GatewayStack — week 4 chunk C. Deploys the request interceptor Lambda

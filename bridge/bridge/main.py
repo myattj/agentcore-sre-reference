@@ -2,6 +2,7 @@
 
 Routes:
   - POST /slack/events         — Slack Events API; ack within 3s, dispatch async
+  - POST /slack/interactions   — Slack Interactivity API (Block Kit button clicks)
   - GET  /slack/install        — start the OAuth install flow
   - GET  /slack/oauth/callback — OAuth code exchange + tenant provisioning
   - POST /debug/message        — synchronous local debug (LOCAL_DEV=1 only)
@@ -33,6 +34,13 @@ from .async_dispatcher import dispatch_async
 from .client import AgentCoreClient
 from .dedup import is_duplicate
 from .gateway_jwt import get_jwks, get_oidc_configuration
+from .slack_interactions import (
+    build_codebase_pick_synthetic_message,
+    extract_payload_json,
+    is_codebase_pick_action,
+    parse_interactivity_payload,
+    post_response_url_update,
+)
 from .slack_oauth import build_install_redirect, handle_oauth_callback
 from .tenant_resolver import resolve_tenant_id
 from .tenant_write import get_tenant_row
@@ -203,6 +211,102 @@ async def slack_events(request: Request, background: BackgroundTasks):
 
     background.add_task(dispatch_async, slack, inbound, client, tenant_id)
     return await slack.ack(request)
+
+
+@app.post("/slack/interactions")
+async def slack_interactions(request: Request, background: BackgroundTasks):
+    """Slack Interactivity API webhook.
+
+    Receives Block Kit action payloads (button clicks, select menus).
+    Today we only handle the ``codebase_pick`` action fired by the
+    agent's ``ask_codebase_choice`` tool.
+
+    Same 3-second ack contract as /slack/events — we verify, parse,
+    dispatch to a background task, then ack immediately.
+
+    Order of operations:
+      1. HMAC verification — same ``v0=`` scheme as Events API
+      2. Extract the JSON ``payload`` field from the form-urlencoded body
+      3. Parse into our ``InteractivityPayload`` shape
+      4. Dispatch by action_id (currently only codebase_pick)
+      5. 200 OK (ack within Slack's 3-second window)
+
+    On any parse/validation failure we still return 200 OK — Slack
+    retries interactivity on non-2xx responses and a malformed
+    payload shouldn't block the user's next click.
+    """
+    # 1. HMAC verification. Slack interactivity uses the exact same
+    # v0=hmac(secret, "v0:ts:body") scheme as /slack/events, so the
+    # adapter's verify_signature works unchanged.
+    try:
+        await slack.verify_signature(request)
+    except SlackSignatureError as e:
+        log.warning("slack_interactions: signature verification failed: %s", e)
+        raise HTTPException(status_code=401, detail="invalid Slack signature")
+
+    # 2. Body is form-urlencoded with a single `payload` field. Read
+    # the raw bytes and parse — don't use request.form() because
+    # signature verification already consumed request.body() (Starlette
+    # caches but we want to be explicit about which bytes we're reading).
+    raw_body = await request.body()
+    payload_dict = extract_payload_json(raw_body)
+    if payload_dict is None:
+        log.warning(
+            "slack_interactions: could not extract payload JSON from body"
+        )
+        return {"ok": True}
+
+    # 3. Parse into our narrow shape.
+    parsed = parse_interactivity_payload(payload_dict)
+    if parsed is None:
+        log.info("slack_interactions: unsupported or malformed payload type")
+        return {"ok": True}
+
+    # 4. Dispatch by action_id. Add an action_id → handler map here when
+    # we support more than one interactivity action.
+    if is_codebase_pick_action(parsed.action_id):
+        # Resolve the tenant from the team_id — 200 OK and drop if the
+        # workspace is unknown (same pattern as /slack/events).
+        try:
+            tenant_id = resolve_tenant_id(parsed.team_id)
+        except KeyError:
+            log.info(
+                "slack_interactions: no tenant mapping for team_id=%s; "
+                "ack and drop",
+                parsed.team_id,
+            )
+            return {"ok": True}
+
+        picked_repo = parsed.action_value
+        log.info(
+            "slack_interactions: codebase_pick tenant=%s channel=%s "
+            "repo=%s user=%s",
+            tenant_id,
+            parsed.channel_id,
+            picked_repo,
+            parsed.user_id,
+        )
+
+        # 4a. Best-effort: replace the original button message with a
+        # confirmation. Runs inline because it's fast and fire-and-forget
+        # (function swallows all errors internally).
+        post_response_url_update(parsed.response_url, picked_repo)
+
+        # 4b. Build a synthetic InboundMessage and dispatch to the agent
+        # via the same path /slack/events uses. The agent sees a normal
+        # user turn and responds per the SHORTLIST prompt block's
+        # acknowledgment coaching.
+        synthetic = build_codebase_pick_synthetic_message(parsed)
+        background.add_task(dispatch_async, slack, synthetic, client, tenant_id)
+        return {"ok": True}
+
+    # Unrecognized action_id — log and ignore. When we add more
+    # interactivity actions, replace this with a dispatch map.
+    log.info(
+        "slack_interactions: unknown action_id=%s, ignoring",
+        parsed.action_id,
+    )
+    return {"ok": True}
 
 
 @app.get("/slack/install")

@@ -108,6 +108,27 @@ class EscalationConfigOut(BaseModel):
     routes: list[EscalationRouteOut] = Field(default_factory=list)
 
 
+class CodebaseBindingOut(BaseModel):
+    """A single repo binding. Mirrors ``coreAgent.tenant.CodebaseBinding``."""
+    repo: str
+    default_branch: str = "main"
+    aliases: list[str] = Field(default_factory=list)
+    channels: list[str] = Field(default_factory=list)
+
+
+class CodebasesConfigOut(BaseModel):
+    """Per-tenant code access layer. Mirrors ``coreAgent.tenant.CodebasesConfig``.
+
+    Drives the GitHub-App-backed code tools and the discovery layer that
+    picks which repo a Slack message refers to.
+    """
+    enabled: bool = False
+    github_installation_id: str | None = None
+    default_repo: str | None = None
+    bindings: list[CodebaseBindingOut] = Field(default_factory=list)
+    allow_learning: bool = True
+
+
 class TenantConfigOut(BaseModel):
     """Full tenant config returned by GET /api/tenants/{tenant_id}.
 
@@ -134,6 +155,10 @@ class TenantConfigOut(BaseModel):
     context_assembly: ContextAssemblyConfigOut = Field(default_factory=ContextAssemblyConfigOut)
     skills: list[SkillDefOut] = Field(default_factory=list)
     escalation: EscalationConfigOut = Field(default_factory=EscalationConfigOut)
+    codebases: CodebasesConfigOut = Field(default_factory=CodebasesConfigOut)
+    # Marks a tenant as an internal test/demo environment. See
+    # ``coreAgent.tenant.TenantConfig.is_internal_testenv`` for semantics.
+    is_internal_testenv: bool = False
 
 
 # ----------------------------------------------------------------------------
@@ -233,6 +258,24 @@ class EscalationConfigPatch(BaseModel):
     routes: list[EscalationRoutePatch] | None = None
 
 
+class CodebaseBindingPatch(BaseModel):
+    """A single codebase binding for PATCH. Bindings list is replaced wholesale."""
+    model_config = ConfigDict(extra="forbid")
+    repo: str
+    default_branch: str = "main"
+    aliases: list[str] = Field(default_factory=list)
+    channels: list[str] = Field(default_factory=list)
+
+
+class CodebasesConfigPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool | None = None
+    github_installation_id: str | None = None
+    default_repo: str | None = None
+    bindings: list[CodebaseBindingPatch] | None = None
+    allow_learning: bool | None = None
+
+
 class TenantConfigPatch(BaseModel):
     """Partial TenantConfig for PATCH /api/tenants/{tenant_id}.
 
@@ -256,6 +299,8 @@ class TenantConfigPatch(BaseModel):
     context_assembly: ContextAssemblyConfigPatch | None = None
     skills: list[SkillDefPatch] | None = None
     escalation: EscalationConfigPatch | None = None
+    codebases: CodebasesConfigPatch | None = None
+    is_internal_testenv: bool | None = None
 
 
 # ----------------------------------------------------------------------------
@@ -312,6 +357,40 @@ class GitHubConnectRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     personal_access_token: str = Field(..., min_length=1, description="GitHub personal access token (fine-grained or classic)")
     org: str = Field(default="", description="GitHub org to scope queries to (optional)")
+
+
+class GitHubAppInstallRequest(BaseModel):
+    """POST /api/tenants/{id}/codebases/github/install body.
+
+    Distinct from ``GitHubConnectRequest`` (the BYO PAT flow that
+    provisions a Gateway target). This is the GitHub App install flow:
+    the onboarding UI redirects the user to install the AgentCore Reference GitHub
+    App on their org, GitHub redirects back with an ``installation_id``,
+    and the UI POSTs that id here to trigger the warm-start (list repos,
+    rank, seed the ``codebases`` block on the tenant row).
+    """
+    model_config = ConfigDict(extra="forbid")
+    installation_id: str = Field(
+        ...,
+        min_length=1,
+        description="Numeric GitHub App installation ID from the install callback",
+    )
+
+
+class CodebaseBindingBrief(BaseModel):
+    """Compact binding shape returned from the install endpoint."""
+    repo: str
+    default_branch: str
+
+
+class GitHubAppInstallResponse(BaseModel):
+    """Response from POST /api/tenants/{id}/codebases/github/install."""
+    ok: bool
+    installation_id: str
+    default_repo: str | None = None
+    bindings: list[CodebaseBindingBrief] = Field(default_factory=list)
+    total_repos_available: int = 0
+    error: str | None = None
 
 
 class IntegrationConnectResponse(BaseModel):

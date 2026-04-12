@@ -1,13 +1,13 @@
 {
-  "_comment": "Slack app manifest for the Model A shared app. Paste this into api.slack.com \u2192 Create New App \u2192 From an app manifest. Before pasting, replace REPLACE_ME.ngrok-free.app with your current ngrok hostname. Keep oauth_config.scopes.bot in sync with bridge/bridge/slack_oauth.py::_SCOPES \u2014 the bridge rebuilds its authorize URL from that constant, so any drift here silently breaks new installs.",
+  "_comment": "Slack app manifest for the AgentCore Reference shared production app. Paste this into api.slack.com \u2192 (existing app) \u2192 App Manifest to apply, or \u2192 Create New App \u2192 From an app manifest to bootstrap a fresh one. For local dev, replace https://agent.example.com with your ngrok hostname before pasting. Keep oauth_config.scopes.bot in sync with bridge/bridge/slack_oauth.py::_SCOPES \u2014 the bridge rebuilds its authorize URL from that constant, so any drift here silently breaks new installs. Keep interactivity.request_url in sync with bridge/bridge/main.py::slack_interactions \u2014 interactivity must be enabled for assistant.threads.setStatus thinking indicators and for the confirm/deny action buttons.",
   "display_information": {
-    "name": "agent-core",
+    "name": "agentcore",
     "description": "Internal-ops AI agent for alert triage, team Q&A, and workflow automation.",
     "background_color": "#0b1021"
   },
   "features": {
     "bot_user": {
-      "display_name": "agent-core",
+      "display_name": "agentcore",
       "always_online": true
     },
     "assistant_view": {
@@ -17,15 +17,17 @@
   },
   "oauth_config": {
     "redirect_urls": [
-      "https://8982-76-170-49-132.ngrok-free.app/slack/oauth/callback"
+      "https://agent.example.com/slack/oauth/callback"
     ],
     "scopes": {
       "bot": [
         "app_mentions:read",
         "assistant:write",
         "chat:write",
+        "chat:write.customize",
         "channels:history",
         "channels:read",
+        "channels:join",
         "groups:history",
         "groups:read",
         "im:history",
@@ -37,13 +39,14 @@
   },
   "settings": {
     "event_subscriptions": {
-      "request_url": "https://8982-76-170-49-132.ngrok-free.app/slack/events",
+      "request_url": "https://agent.example.com/slack/events",
       "bot_events": [
         "app_mention"
       ]
     },
     "interactivity": {
-      "is_enabled": false
+      "is_enabled": true,
+      "request_url": "https://agent.example.com/slack/interactions"
     },
     "org_deploy_enabled": false,
     "socket_mode_enabled": false,

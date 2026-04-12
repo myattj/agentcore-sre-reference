@@ -34,8 +34,11 @@ from slack_sdk.errors import SlackApiError
 
 from .api_models import (
     ChannelsResponse,
+    CodebaseBindingBrief,
     ConfluenceConnectRequest,
     DatadogConnectRequest,
+    GitHubAppInstallRequest,
+    GitHubAppInstallResponse,
     GitHubConnectRequest,
     IntegrationConnectResponse,
     JiraConnectRequest,
@@ -951,3 +954,165 @@ async def connect_github(
 
     _enable_byo_for_integration(tenant_id, "github", result, region)
     return IntegrationConnectResponse(ok=True, integration="github", target_name=result["target_name"], gateway_url=result["gateway_url"])
+
+
+# ----------------------------------------------------------------------------
+# Codebase routes — GitHub App install + warm-start
+# ----------------------------------------------------------------------------
+#
+# The /integrations/github endpoint above is the BYO PAT flow — it
+# provisions a Gateway target so the agent can call the GitHub API as a
+# BYO tool. The /codebases/github/install endpoint below is a completely
+# different flow: the tenant installs the AgentCore Reference GitHub App on their org
+# (OAuth redirect on the onboarding page), and we seed the ``codebases``
+# config block so the first Slack message already has a ranked shortlist.
+#
+# The two flows can coexist — a tenant could use both PAT-backed tooling
+# AND the App-backed codebase access layer at the same time. They touch
+# different parts of the tenant config (``byo`` vs ``codebases``).
+
+@api_router.post(
+    "/tenants/{tenant_id}/codebases/github/install",
+    response_model=GitHubAppInstallResponse,
+)
+async def install_github_app(
+    tenant_id: str,
+    body: GitHubAppInstallRequest,
+    _verified: Annotated[str, Depends(require_session_token)],
+) -> GitHubAppInstallResponse:
+    """Run the install-time warm-start for a GitHub App installation.
+
+    The onboarding UI calls this after the user completes the GitHub
+    App install flow and is redirected back with ``installation_id`` in
+    the URL. We:
+
+      1. Mint an installation token
+      2. List the installation's repos
+      3. Rank by ``pushed_at`` / stars
+      4. Write a ``codebases`` block to the tenant row with
+         ``enabled=True``, the ranked bindings, and the top repo as
+         ``default_repo``
+
+    Never raises on GitHub/network errors — the warm-start orchestrator
+    wraps those into ``WarmStartResult(ok=False, error=...)``, which we
+    pass through as ``ok=False`` in the response body. The UI decides
+    whether to surface that as an error toast or a retry prompt.
+
+    Re-running this endpoint with the same ``installation_id`` is safe
+    and idempotent — it re-fetches the repo list, re-ranks, and
+    re-writes. Useful if the tenant adds repos to the installation
+    after onboarding and wants to refresh their shortlist.
+    """
+    from .github_install import run_install_warm_start
+
+    result = run_install_warm_start(tenant_id, body.installation_id, _region())
+
+    return GitHubAppInstallResponse(
+        ok=result.ok,
+        installation_id=result.installation_id,
+        default_repo=result.default_repo,
+        bindings=[
+            CodebaseBindingBrief(
+                repo=b["repo"],
+                default_branch=b["default_branch"],
+            )
+            for b in result.bindings
+        ],
+        total_repos_available=result.total_repos_available,
+        error=result.error,
+    )
+
+
+# ----------------------------------------------------------------------------
+# Metrics routes — powered by bridge/metrics_reader.py (CloudWatch EMF data)
+# ----------------------------------------------------------------------------
+#
+# Two surfaces:
+#   - GET /api/tenants/{tenant_id}/metrics?window=7d
+#       Session-authenticated, tenant_id forced by the token. Used by
+#       the onboarding workspace metrics page.
+#
+#   - GET /api/ops/metrics/roster?window=7d
+#     GET /api/ops/metrics/tenants/{tenant_id}?window=7d
+#       Admin-secret-authenticated, cross-tenant. Temporary auth shim
+#       until the real identity model lands; secret is set via
+#       ADMIN_SECRET env var on the bridge service.
+#
+# See metrics_reader.py for the CloudWatch query shapes and windowing.
+
+def _ops_guard(x_admin_token: Annotated[str, Header()] = "") -> None:
+    """Require a header matching the ``ADMIN_SECRET`` env var.
+
+    Temporary shared-secret gate for the ``/ops`` pages. Fails closed
+    when ``ADMIN_SECRET`` is unset so a forgotten env var can't silently
+    expose cross-tenant data.
+    """
+    expected = os.getenv("ADMIN_SECRET", "")
+    if not expected:
+        log.warning("_ops_guard: ADMIN_SECRET unset — rejecting all ops traffic")
+        raise HTTPException(status_code=503, detail="ops dashboard disabled")
+    if not x_admin_token or x_admin_token != expected:
+        raise HTTPException(status_code=401, detail="invalid admin token")
+
+
+@api_router.get("/tenants/{tenant_id}/metrics")
+async def get_tenant_metrics_route(
+    tenant_id: str,
+    _verified: Annotated[str, Depends(require_session_token)],
+    window: str = "7d",
+) -> dict[str, Any]:
+    """Return a per-tenant CloudWatch metrics snapshot.
+
+    ``tenant_id`` is validated against the session token by
+    ``require_session_token`` — a caller can't swap it for another
+    tenant by editing the URL. The ``window`` query string accepts
+    ``1h | 24h | 7d | 30d`` (anything else falls back to 7d).
+    """
+    from .metrics_reader import get_tenant_metrics
+
+    snapshot = get_tenant_metrics(tenant_id, window)
+    return snapshot.to_dict()
+
+
+@api_router.get("/ops/metrics/roster")
+async def get_ops_roster_route(
+    _: Annotated[None, Depends(_ops_guard)],
+    window: str = "7d",
+    include_testenv: bool = False,
+) -> dict[str, Any]:
+    """Cross-tenant roster for the operator dashboard.
+
+    Returns every tenant that has invocation metrics in the window,
+    sorted by invocation count descending, with error rate and cost
+    attached. Dead tenants (no metrics) don't appear here.
+
+    ``include_testenv=false`` (default) hides tenants with
+    ``config.is_internal_testenv=true``, which is how the manual-test
+    rig keeps itself out of real-customer ops views.
+    """
+    from .metrics_reader import get_ops_roster
+
+    rows = get_ops_roster(window, include_testenv=include_testenv)
+    return {
+        "window": window,
+        "tenants": [r.to_dict() for r in rows],
+        "include_testenv": include_testenv,
+    }
+
+
+@api_router.get("/ops/metrics/tenants/{tenant_id}")
+async def get_ops_tenant_metrics_route(
+    tenant_id: str,
+    _: Annotated[None, Depends(_ops_guard)],
+    window: str = "7d",
+) -> dict[str, Any]:
+    """Operator drill-down on a single tenant's metrics.
+
+    Same shape as the tenant-scoped ``/metrics`` route above, but gated
+    by the admin secret instead of the tenant session. Lets an operator
+    inspect any tenant without holding a session token for it.
+    """
+    from .metrics_reader import get_tenant_metrics
+
+    snapshot = get_tenant_metrics(tenant_id, window)
+    return snapshot.to_dict()

@@ -21,6 +21,7 @@ const SETTINGS_NAV = [
   { slug: "channels", label: "Channels", description: "Per-channel overrides" },
   { slug: "skills", label: "Skills", description: "Custom runbooks" },
   { slug: "automations", label: "Automations", description: "Bot policy & escalation" },
+  { slug: "metrics", label: "Metrics", description: "Usage, errors, cost" },
 ];
 
 export default async function WorkspaceLayout({

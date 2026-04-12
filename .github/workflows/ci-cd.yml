@@ -41,7 +41,7 @@
 #      AWS_DEPLOY_ROLE_ARN   = arn:aws:iam::<ACCOUNT>:role/github-actions-deploy
 #      AGENT_RUNTIME_ARN     = arn:aws:bedrock-agentcore:us-west-2:<ACCOUNT>:runtime/coreAgent_coreAgent-dyGFWRDGwJ
 #      CERTIFICATE_ARN       = arn:aws:acm:us-west-2:<ACCOUNT>:certificate/<id>
-#      DOMAIN_NAME           = app.novari.dev
+#      DOMAIN_NAME           = agent.example.com
 #      SLACK_SECRETS_ARN     = arn:aws:secretsmanager:us-west-2:<ACCOUNT>:secret:agentcore/services/slack-<suffix>
 #      BRIDGE_SECRETS_ARN    = arn:aws:secretsmanager:us-west-2:<ACCOUNT>:secret:agentcore/services/bridge-<suffix>
 # ──────────────────────────────────────────────────────────────────

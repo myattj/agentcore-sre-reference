@@ -41,6 +41,7 @@ from strands import tool
 
 import ping
 from audit import build_audit_store
+from metrics import build_metrics_emitter
 from request_context import get_context
 from runtime import app
 
@@ -52,6 +53,11 @@ CATALOG: dict[str, Any] = {}
 # Shared with main.py via a module-level import so both invocation-level
 # and tool-level rows land in the same backend.
 _audit = build_audit_store()
+
+# Shared metrics emitter (EMF in production). Same factory singleton main.py
+# uses, so tool-level and invocation-level EMF records land in the same
+# CloudWatch Logs stream and roll up into the same AgentCore Reference/Agent namespace.
+_metrics = build_metrics_emitter()
 
 
 def register(name: str):
@@ -132,6 +138,22 @@ def audited_tool(name: str):
                     _audit.write(row)
                 except Exception as e:  # pragma: no cover
                     log.warning("audited_tool(%s): audit write dropped: %s", name, e)
+
+                # CloudWatch metrics via EMF. Separate try so a metrics
+                # failure can't suppress the audit row above. Read the
+                # same ctx; `row`'s duration_ms is recomputed here rather
+                # than reused because the audit try-block may have thrown
+                # before building `row` at all.
+                try:
+                    _metrics.emit_tool_call(
+                        tenant_id=get_context().get("tenant_id", "unknown"),
+                        tool_name=name,
+                        duration_ms=int((time.time() - start) * 1000),
+                        success=success,
+                        invocation_id=get_context().get("invocation_id", ""),
+                    )
+                except Exception as e:  # pragma: no cover
+                    log.warning("audited_tool(%s): metrics emit dropped: %s", name, e)
 
         # Apply Strands' @tool AFTER the audit wrap so Strands sees the
         # audited callable and uses functools.wraps to pull the original
@@ -335,6 +357,362 @@ def escalate(team_name: str, summary: str, severity: str = "medium") -> str:
     if not token:
         return "Error: no Slack bot token configured for this tenant."
     return slack_api.post_message(token, route["channel_id"], msg)
+
+
+@audited_tool("ask_codebase_choice")
+def ask_codebase_choice(candidates: list[str]) -> str:
+    """Ask the user to pick a codebase by posting Slack Block Kit buttons.
+
+    Use this tool INSTEAD of asking in prose whenever the codebase
+    context block says no codebase is confirmed for this channel. The
+    buttons let the user answer with one click; the bridge's
+    interactivity handler catches the click, posts a synthetic
+    "use <repo>" message back into the thread, and re-invokes you with
+    the pick in context.
+
+    Always tell the user what you're doing in ONE short line before
+    calling this tool (e.g. "Before I dig in — which codebase?") so
+    the thread reads naturally even if the buttons fail to render.
+
+    Args:
+        candidates: List of ``owner/name`` repo slugs to offer as
+                    buttons, ordered by preference (default first).
+                    Slack's action block supports up to 5 buttons;
+                    extras are trimmed.
+    """
+    ctx = get_context()
+    tenant_id = ctx.get("tenant_id", "")
+    channel_id = ctx.get("channel_id", "")
+    thread_ts = ctx.get("thread_id", "")
+
+    if not candidates:
+        return "Error: no candidates provided. Pass at least one repo slug."
+    if not tenant_id or not channel_id:
+        return (
+            "Error: no Slack context available (missing tenant_id or "
+            "channel_id). Ask the user in plain text instead."
+        )
+
+    token = slack_api.get_bot_token(tenant_id)
+    if not token:
+        return "Error: no Slack bot token configured for this tenant."
+
+    # Slack caps actions at 5 per block and requires unique action_ids
+    # within a block. Encode the index in the action_id so the bridge
+    # handler can dispatch on the "codebase_pick:" prefix and pull the
+    # repo out of the button's `value`.
+    trimmed = list(candidates)[:5]
+    buttons = [
+        {
+            "type": "button",
+            "text": {"type": "plain_text", "text": repo, "emoji": True},
+            "value": repo,
+            "action_id": f"codebase_pick:{i}",
+        }
+        for i, repo in enumerate(trimmed)
+    ]
+    blocks = [
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": "*Which codebase should I check?*",
+            },
+        },
+        {
+            "type": "actions",
+            "block_id": "codebase_choice",
+            "elements": buttons,
+        },
+    ]
+
+    fallback_text = "Which codebase should I check? " + ", ".join(trimmed)
+    result = slack_api.post_message(
+        token=token,
+        channel_id=channel_id,
+        text=fallback_text,
+        thread_ts=thread_ts or None,
+        blocks=blocks,
+    )
+    if "Failed" in result:
+        return (
+            f"Could not post codebase-choice buttons: {result}. "
+            "Ask the user in plain text instead."
+        )
+    return (
+        f"Posted codebase-choice buttons to the thread for "
+        f"{len(trimmed)} candidate(s). Wait for the user to click; "
+        "the bridge will re-invoke you with their pick."
+    )
+
+
+@audited_tool("code_search")
+def code_search(query: str, repo: str, max_results: int = 20) -> str:
+    """Search code across a repository for a keyword or phrase.
+
+    Use this when the user asks "where is X", "does the codebase use Y",
+    "show me usages of Z", or any question where finding the relevant
+    files is the first step. Call ``code_read_file`` afterward to read
+    the full contents of a specific result.
+
+    The search runs on the repo's default branch only (no feature
+    branches). Results are keyword-based — NOT semantic — so prefer
+    specific symbol names over paraphrased natural language.
+
+    Args:
+        query: The keyword or phrase to search for. Quoted multi-word
+               phrases work. Prefer specific identifiers over full
+               sentences.
+        repo: "owner/name" repo slug — required. Pick from the
+              ``## Connected codebases`` block in the system prompt.
+        max_results: Max number of hits to return (default 20, capped
+                     at 30 by the GitHub API).
+    """
+    from code_backend import BackendError, build_default_backend
+
+    ctx = get_context()
+    repo = (repo or "").strip()
+    installation_id = ctx.get("github_installation_id") or ""
+
+    if not repo:
+        return (
+            "Error: repo is required. Pick one from the ## Connected "
+            "codebases list in the system prompt and retry with "
+            "repo='owner/name'."
+        )
+    if not installation_id:
+        return (
+            "Error: this tenant has not installed the AgentCore Reference GitHub App "
+            "yet. Ask the user to install it from the onboarding "
+            "integrations page, then retry."
+        )
+
+    try:
+        backend = build_default_backend(installation_id)
+        hits = backend.search_code(query, repo, max_results=max_results)
+    except BackendError as e:
+        return f"Error: {e}"
+    except Exception as e:  # noqa: BLE001 — friendly message to the LLM
+        log.exception(
+            "code_search failed for tenant=%s repo=%s",
+            ctx.get("tenant_id"),
+            repo,
+        )
+        return f"Error: code_search failed unexpectedly: {type(e).__name__}: {e}"
+
+    if not hits:
+        return f"No results for {query!r} in {repo}."
+
+    lines = [f"Found {len(hits)} hits for {query!r} in {repo}:"]
+    for i, hit in enumerate(hits, start=1):
+        lines.append(f"{i}. {hit.path}  ({hit.html_url})")
+        if hit.snippet:
+            lines.append(f"   {hit.snippet}")
+    return "\n".join(lines)
+
+
+@audited_tool("code_read_file")
+def code_read_file(path: str, repo: str, ref: str | None = None) -> str:
+    """Read a file's full contents from a repository.
+
+    Use this after ``code_search`` returns a promising path, or when
+    the user asks about a specific file by name. The returned content
+    is capped at 64 KB — files larger than that are truncated with a
+    marker at the end.
+
+    Args:
+        path: The file path inside the repo (e.g. "src/auth/login.ts").
+              Leading slashes are stripped.
+        repo: "owner/name" slug — required. Pick from the
+              ``## Connected codebases`` block in the system prompt.
+        ref: Optional branch, tag, or commit SHA. Defaults to the
+             repo's default branch (usually "main").
+    """
+    from code_backend import BackendError, build_default_backend
+
+    ctx = get_context()
+    repo = (repo or "").strip()
+    installation_id = ctx.get("github_installation_id") or ""
+
+    if not repo:
+        return (
+            "Error: repo is required. Pick one from the ## Connected "
+            "codebases list in the system prompt and retry with "
+            "repo='owner/name'."
+        )
+    if not installation_id:
+        return (
+            "Error: this tenant has not installed the AgentCore Reference GitHub App "
+            "yet. Ask the user to install it from the onboarding "
+            "integrations page, then retry."
+        )
+    if not path:
+        return "Error: path is required."
+
+    try:
+        backend = build_default_backend(installation_id)
+        file = backend.read_file(repo, path, ref=ref)
+    except BackendError as e:
+        return f"Error: {e}"
+    except Exception as e:  # noqa: BLE001
+        log.exception(
+            "code_read_file failed for tenant=%s repo=%s path=%s",
+            ctx.get("tenant_id"),
+            repo,
+            path,
+        )
+        return f"Error: code_read_file failed unexpectedly: {type(e).__name__}: {e}"
+
+    header = (
+        f"=== {file.repo}/{file.path} @ {file.ref} ({file.size} bytes) ==="
+    )
+    suffix = (
+        "\n\n[truncated — file is larger than the 64 KB cap]"
+        if file.truncated
+        else ""
+    )
+    return f"{header}\n{file.content}{suffix}"
+
+
+@audited_tool("code_find_symbol")
+def code_find_symbol(symbol: str, repo: str, max_results: int = 15) -> str:
+    """Find files where a symbol (function, class, constant) appears.
+
+    Use this when the user asks "where is function foo defined", "who
+    calls X", or "what uses this type". The lookup is LEXICAL — it
+    matches the literal symbol name anywhere in a file's contents,
+    which means false positives on overloaded names are real. The
+    first result is usually the definition but not always; follow up
+    with ``code_read_file`` to confirm.
+
+    Args:
+        symbol: The symbol to find (e.g. "authenticateUser",
+                "RetryConfig").
+        repo: "owner/name" slug — required. Pick from the
+              ``## Connected codebases`` block in the system prompt.
+        max_results: Max hits to return (default 15).
+    """
+    from code_backend import BackendError, build_default_backend
+
+    ctx = get_context()
+    repo = (repo or "").strip()
+    installation_id = ctx.get("github_installation_id") or ""
+
+    if not repo:
+        return (
+            "Error: repo is required. Pick one from the ## Connected "
+            "codebases list in the system prompt and retry with "
+            "repo='owner/name'."
+        )
+    if not installation_id:
+        return (
+            "Error: this tenant has not installed the AgentCore Reference GitHub App "
+            "yet. Ask the user to install it from the onboarding "
+            "integrations page, then retry."
+        )
+
+    try:
+        backend = build_default_backend(installation_id)
+        hits = backend.find_symbol(symbol, repo, max_results=max_results)
+    except BackendError as e:
+        return f"Error: {e}"
+    except Exception as e:  # noqa: BLE001
+        log.exception(
+            "code_find_symbol failed for tenant=%s repo=%s symbol=%s",
+            ctx.get("tenant_id"),
+            repo,
+            symbol,
+        )
+        return f"Error: code_find_symbol failed unexpectedly: {type(e).__name__}: {e}"
+
+    if not hits:
+        return f"No files mention {symbol!r} in {repo}."
+
+    lines = [
+        f"Found {len(hits)} files mentioning {symbol!r} in {repo} "
+        f"(lexical match — confirm with code_read_file):"
+    ]
+    for i, hit in enumerate(hits, start=1):
+        lines.append(f"{i}. {hit.path}  ({hit.html_url})")
+    return "\n".join(lines)
+
+
+@audited_tool("code_list_commits")
+def code_list_commits(
+    repo: str,
+    ref: str | None = None,
+    path: str | None = None,
+    limit: int = 10,
+) -> str:
+    """List recent commits on a repo.
+
+    Use this when the user asks "what's the latest commit", "what
+    shipped recently", "who changed X last", or any question about
+    recent repo activity. Unlike ``code_search`` this isn't subject
+    to the 30-requests-per-minute search limit — it uses the general
+    REST API and is fine for interactive Q&A.
+
+    Args:
+        repo: "owner/name" slug — required. Pick from the
+              ``## Connected codebases`` block in the system prompt.
+        ref: Optional branch, tag, or commit SHA. Defaults to the
+             repo's default branch.
+        path: Optional file path to filter commits that touched it —
+              useful for "what changed in src/auth.ts recently".
+        limit: Max commits to return (default 10, capped at 100).
+    """
+    from code_backend import BackendError, build_default_backend
+
+    ctx = get_context()
+    repo = (repo or "").strip()
+    installation_id = ctx.get("github_installation_id") or ""
+
+    if not repo:
+        return (
+            "Error: repo is required. Pick one from the ## Connected "
+            "codebases list in the system prompt and retry with "
+            "repo='owner/name'."
+        )
+    if not installation_id:
+        return (
+            "Error: this tenant has not installed the AgentCore Reference GitHub App "
+            "yet. Ask the user to install it from the onboarding "
+            "integrations page, then retry."
+        )
+
+    try:
+        backend = build_default_backend(installation_id)
+        commits = backend.list_commits(repo, ref=ref, path=path, limit=limit)
+    except BackendError as e:
+        return f"Error: {e}"
+    except Exception as e:  # noqa: BLE001
+        log.exception(
+            "code_list_commits failed for tenant=%s repo=%s ref=%s path=%s",
+            ctx.get("tenant_id"),
+            repo,
+            ref,
+            path,
+        )
+        return (
+            f"Error: code_list_commits failed unexpectedly: "
+            f"{type(e).__name__}: {e}"
+        )
+
+    if not commits:
+        scope = f" on {ref}" if ref else ""
+        scope += f" touching {path}" if path else ""
+        return f"No commits found in {repo}{scope}."
+
+    header_ref = ref or "default branch"
+    header = f"Recent commits in {repo} ({header_ref}):"
+    lines = [header]
+    for i, c in enumerate(commits, start=1):
+        date = c.date.split("T", 1)[0] if c.date else "?"
+        lines.append(
+            f"{i}. {c.short_sha} — {c.message}  "
+            f"[{c.author}, {date}]  ({c.html_url})"
+        )
+    return "\n".join(lines)
 
 
 @audited_tool("manage_config")

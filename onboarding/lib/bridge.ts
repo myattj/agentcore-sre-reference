@@ -12,6 +12,7 @@
 import { getBridgeUrl } from "./env";
 import type {
   ChannelsResponse,
+  GitHubAppInstallResponse,
   IntegrationConnectResponse,
   TenantConfig,
   TenantConfigPatch,
@@ -161,5 +162,146 @@ export function connectGitHub(
   return bridgeFetch<IntegrationConnectResponse>(
     `/api/tenants/${encodeURIComponent(tenantId)}/integrations/github`,
     { token, method: "POST", body },
+  );
+}
+
+/**
+ * Trigger the install-time warm-start for a GitHub App installation.
+ *
+ * Called from the /github/installed route handler after the user
+ * completes the App install on github.com and is redirected back with
+ * an `installation_id`. The bridge mints an installation token, lists
+ * repos, ranks them, and writes a `codebases` block to the tenant row.
+ *
+ * Returns a full response (never throws on warm-start failures — the
+ * bridge wraps GitHub/network errors into `{ok: false, error: ...}`).
+ * BridgeApiError still fires for 4xx/5xx at the HTTP layer (auth, etc.).
+ */
+export function installGitHubApp(
+  tenantId: string,
+  token: string,
+  installationId: string,
+): Promise<GitHubAppInstallResponse> {
+  return bridgeFetch<GitHubAppInstallResponse>(
+    `/api/tenants/${encodeURIComponent(tenantId)}/codebases/github/install`,
+    { token, method: "POST", body: { installation_id: installationId } },
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Metrics — CloudWatch data surfaced via bridge metrics_reader.py
+// ---------------------------------------------------------------------------
+
+/** One (timestamp, value) sample returned by CloudWatch GetMetricData. */
+export type MetricSample = { t: string; v: number };
+
+/** Top tool entry in a TenantMetricsSnapshot. */
+export type TopTool = {
+  tool_name: string;
+  calls: number;
+  errors: number;
+};
+
+/** Shape returned by GET /api/tenants/{id}/metrics and /api/ops/metrics/tenants/{id}. */
+export type TenantMetricsSnapshot = {
+  tenant_id: string;
+  window: string;
+  invocations_total: number;
+  errors_total: number;
+  error_rate_pct: number;
+  input_tokens_total: number;
+  output_tokens_total: number;
+  estimated_cost_cents_total: number;
+  p50_duration_ms: number;
+  p95_duration_ms: number;
+  top_tools: TopTool[];
+  invocations_timeseries: MetricSample[];
+  errors_timeseries: MetricSample[];
+  cost_timeseries: MetricSample[];
+  error: string | null;
+};
+
+export type OpsRosterRow = {
+  tenant_id: string;
+  invocations: number;
+  errors: number;
+  error_rate_pct: number;
+  cost_cents: number;
+};
+
+export type OpsRosterResponse = {
+  window: string;
+  tenants: OpsRosterRow[];
+  include_testenv: boolean;
+};
+
+/** Accepted values for the `window` query parameter. */
+export type MetricsWindow = "1h" | "24h" | "7d" | "30d";
+
+export function getTenantMetrics(
+  tenantId: string,
+  token: string,
+  window: MetricsWindow = "7d",
+): Promise<TenantMetricsSnapshot> {
+  return bridgeFetch<TenantMetricsSnapshot>(
+    `/api/tenants/${encodeURIComponent(tenantId)}/metrics?window=${window}`,
+    { token, method: "GET" },
+  );
+}
+
+/**
+ * Fetch from the bridge using the admin shared-secret header instead of
+ * a session token. Used for the temporary ``/ops`` operator dashboard
+ * until a real identity model lands.
+ *
+ * The secret is read from ``ADMIN_SECRET`` on the onboarding server (not
+ * NEXT_PUBLIC_* — it must never reach the browser). The route handler
+ * that calls this function is responsible for its own access control
+ * (e.g. cookie set by a prior login page).
+ */
+async function adminFetch<T>(path: string, adminSecret: string): Promise<T> {
+  const url = `${getBridgeUrl()}${path}`;
+  const response = await fetch(url, {
+    method: "GET",
+    headers: {
+      "X-Admin-Token": adminSecret,
+      Accept: "application/json",
+    },
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    let detail = response.statusText;
+    try {
+      const data = (await response.json()) as { detail?: string };
+      if (data?.detail) detail = data.detail;
+    } catch {
+      // Body wasn't JSON; keep the status text.
+    }
+    throw new BridgeApiError(response.status, detail);
+  }
+  return (await response.json()) as T;
+}
+
+export function getOpsRoster(
+  adminSecret: string,
+  window: MetricsWindow = "7d",
+  includeTestenv: boolean = false,
+): Promise<OpsRosterResponse> {
+  const q = new URLSearchParams({ window });
+  if (includeTestenv) q.set("include_testenv", "true");
+  return adminFetch<OpsRosterResponse>(
+    `/api/ops/metrics/roster?${q.toString()}`,
+    adminSecret,
+  );
+}
+
+export function getOpsTenantMetrics(
+  tenantId: string,
+  adminSecret: string,
+  window: MetricsWindow = "7d",
+): Promise<TenantMetricsSnapshot> {
+  return adminFetch<TenantMetricsSnapshot>(
+    `/api/ops/metrics/tenants/${encodeURIComponent(tenantId)}?window=${window}`,
+    adminSecret,
   );
 }

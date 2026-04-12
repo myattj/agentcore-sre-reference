@@ -75,8 +75,10 @@ _SCOPES = ",".join([
     "app_mentions:read",
     "assistant:write",  # required for assistant.threads.setStatus (thinking indicator)
     "chat:write",
+    "chat:write.customize",  # post with per-message username/icon (scripts/testenv seeder)
     "channels:history",
     "channels:read",  # required for users.conversations on public channels
+    "channels:join",  # conversations.join on public channels (scripts/testenv seeder)
     "groups:history",
     "groups:read",    # required for users.conversations on private channels
     "im:history",

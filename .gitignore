@@ -15,6 +15,7 @@ uv.lock.bak
 # AWS / CDK
 .aws/
 cdk.out/
+cdk.out.*/
 cdk.context.json
 
 # Node
@@ -36,3 +37,7 @@ node_modules/
 dist/
 build/
 *.zip
+
+# Test env runtime state (scripts/testenv)
+.smoke-logs/
+scripts/testenv/.testenv-state.json

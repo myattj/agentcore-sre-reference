@@ -1,6 +1,6 @@
 # North star
 
-> Where Novari is going, beyond the "first paying customer onboards in <5 min" KPI in [`BUILD_PLAN.md`](./BUILD_PLAN.md). This is direction, not a delivery schedule — initiatives are grouped by pillar, not sequenced. Dependencies are called out inline.
+> Where AgentCore Reference is going, beyond the "first paying customer onboards in <5 min" KPI in [`BUILD_PLAN.md`](./BUILD_PLAN.md). This is direction, not a delivery schedule — initiatives are grouped by pillar, not sequenced. Dependencies are called out inline.
 
 ## The feeling we're chasing
 
@@ -44,7 +44,7 @@ Three shorthand tests:
 
 ## Pillar 3 — Dynamic dashboards hosted by the bot
 
-**Why this pillar matters:** this is one of the biggest "magic" levers. Instead of posting a table in Slack, the bot can say *"here's a live dashboard: novari.dev/d/abc123"* and the user gets an interactive visualization of whatever they asked about. This is the single feature most likely to produce "wait, it can do that?" moments.
+**Why this pillar matters:** this is one of the biggest "magic" levers. Instead of posting a table in Slack, the bot can say *"here's a live dashboard: example.com/d/abc123"* and the user gets an interactive visualization of whatever they asked about. This is the single feature most likely to produce "wait, it can do that?" moments.
 
 ### Initiatives
 - **Ephemeral dashboard hosting.** The bot can generate a small web page (chart, table, timeline, map) from a tool result and host it at a short-lived per-tenant URL. Think "render this query result as a chart I can share."
@@ -72,10 +72,10 @@ Three shorthand tests:
 
 ## Pillar 5 — Brand, marketing, and UX polish
 
-**Why this pillar matters:** the product currently looks like an internal tool. For a company called Novari at `novari.dev`, the surface needs to match the ambition. First impressions determine whether anyone even reaches the onboarding flow.
+**Why this pillar matters:** the product currently looks like an internal tool. For a company called AgentCore Reference at `example.com`, the surface needs to match the ambition. First impressions determine whether anyone even reaches the onboarding flow.
 
 ### Initiatives
-- **Landing page at novari.dev.** Marketing surface: what it does, the three core patterns (alert triage / team Q&A / workflow automation), pricing, social proof, install CTA. Currently `novari.dev` serves the app.
+- **Landing page at example.com.** Marketing surface: what it does, the three core patterns (alert triage / team Q&A / workflow automation), pricing, social proof, install CTA. Currently `example.com` serves the app.
 - **New brand system.** Logo, color palette, typography, voice. Applied across marketing site, onboarding, admin portal, Slack messages. This is a precondition for the UX cleanup — don't redesign onboarding twice.
 - **UX cleanup pass.** Across onboarding (`onboarding/`) and the eventual admin portal. Focus: fewer steps, clearer defaults, less "configure everything before you can try it" and more "try it, then configure what's wrong." The zero-config onboarding work (commit `df13d3a`) is the right direction; extend it.
 - **In-product moments of delight.** Small magic: the bot introduces itself contextually, first-run surfaces the most-likely-useful skill, empty states teach instead of blocking.
@@ -170,8 +170,8 @@ A checklist form of the original brain-dump, grouped by pillar. Use this as a wo
 - [ ] New color palette
 - [ ] Typography + voice guidelines
 - [ ] Brand system applied across marketing, onboarding, admin portal, Slack messages
-- [ ] Landing page at `novari.dev` — what it does, three patterns, pricing, install CTA
-- [ ] Move app off `novari.dev` root (currently serves the app, not marketing)
+- [ ] Landing page at `example.com` — what it does, three patterns, pricing, install CTA
+- [ ] Move app off `example.com` root (currently serves the app, not marketing)
 - [ ] UX cleanup pass on onboarding
 - [ ] UX cleanup pass on admin portal (once it exists)
 - [ ] First-run "magic moment" — surface most-likely-useful skill immediately

@@ -20,7 +20,8 @@
         { "name": "AWS_REGION", "value": "us-west-2" },
         { "name": "AGENTCORE_MEMORY_ID", "value": "agentcore_shared_memory-3J3VgkC7RW" },
         { "name": "AGENTCORE_SEMANTIC_STRATEGY_ID", "value": "semantic-eYYTeLAWoI" },
-        { "name": "AGENTCORE_USER_PREF_STRATEGY_ID", "value": "user_preferences-v1j2izFhVD" }
+        { "name": "AGENTCORE_USER_PREF_STRATEGY_ID", "value": "user_preferences-v1j2izFhVD" },
+        { "name": "GITHUB_APP_ID", "value": "123456" }
       ]
     }
   ],

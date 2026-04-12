@@ -35,6 +35,7 @@ import request_context
 from audit import build_audit_store
 from mcp_client.client import build_byo_mcp_client
 from memory_store import InMemoryStore, extract_records
+from metrics import build_metrics_emitter
 from model.load import load_model
 from pricing import compute_cost_cents
 from runtime import app
@@ -68,6 +69,11 @@ _audit = build_audit_store()
 
 # Spend tracker for per-tenant cost caps. Same env-var wiring as audit.
 _spend = build_spend_tracker()
+
+# CloudWatch metrics emitter (EMF via stdout in production). Same env-var
+# wiring as audit/spend, and shared with tools.py via the factory singleton
+# so invocation and tool_call records land in the same backend.
+_metrics = build_metrics_emitter()
 
 
 def _iso_now() -> str:
@@ -381,7 +387,10 @@ async def invoke(payload, context):
         # Context assembly: resolve permalinks, inject thread history,
         # match skills. Runs AFTER channel-persona merge so effective_prompt
         # and effective_tools reflect per-channel overrides.
-        from .context_assembler import assemble_context
+        # Absolute import (not `from .context_assembler`) because main.py
+        # is loaded as a top-level script by the AgentCore Runtime, not
+        # as a package module — relative imports raise ImportError.
+        from context_assembler import assemble_context
 
         assembled = assemble_context(
             user_message=user_message,
@@ -390,12 +399,45 @@ async def invoke(payload, context):
             skills=config.skills,
             effective_prompt=effective_prompt,
             tenant_id=tenant_id,
+            codebases=config.codebases,
+            memory_isolated_channels=config.memory.isolated_channels,
         )
         effective_prompt = assembled.system_prompt
         user_message = assembled.enriched_message
         effective_tools = list(set(effective_tools) | set(assembled.extra_tools))
         if assembled.matched_skill:
             log.info("Skill matched: %s for tenant=%s", assembled.matched_skill, tenant_id)
+        if assembled.codebase is not None:
+            log.info(
+                "Codebase resolution for tenant=%s channel=%s: "
+                "disabled=%s bindings=%d",
+                tenant_id,
+                ctx.get("channel_id", ""),
+                assembled.codebase.disabled,
+                len(assembled.codebase.bindings),
+            )
+            # The resolver no longer provides a silent ``primary_repo``
+            # fallback — the model must pass ``repo='owner/name'``
+            # explicitly on every code_* call, picking from the list
+            # of connected repos in the prompt block. We still stash
+            # ``github_installation_id`` so the tools can mint tokens.
+            request_context.merge_context(
+                github_installation_id=config.codebases.github_installation_id or "",
+            )
+
+        # Drop code_* tools from the effective list when codebases are
+        # disabled for this tenant. The resolver already emits a DISABLED
+        # state (no prompt injection), but we also need to hide the tools
+        # from the model so it doesn't attempt to call them and get a
+        # "not configured" error back.
+        if not config.codebases.enabled:
+            _CODE_TOOLS = {
+                "code_search",
+                "code_read_file",
+                "code_find_symbol",
+                "code_list_commits",
+            }
+            effective_tools = [t for t in effective_tools if t not in _CODE_TOOLS]
 
         # Self-awareness: the bot knows its own config so it can explain
         # itself and help users modify settings via manage_config. Returns
@@ -503,11 +545,15 @@ async def invoke(payload, context):
         log.exception("invoke failed for tenant=%s invocation_id=%s", tenant_id, invocation_id)
         raise
     finally:
+        # Compute shared values once so both the audit write and the
+        # metrics emit can use them — and so that the metrics path stays
+        # alive even if the audit PutItem body raises inside its try block.
+        full_response = "".join(response_chunks)
+        duration_ms = int((time.time() - start) * 1000)
+
         # Write the invocation-level audit row. Best-effort — the audit
         # store swallows exceptions, but wrap in try anyway.
         try:
-            full_response = "".join(response_chunks)
-            duration_ms = int((time.time() - start) * 1000)
             _audit.write({
                 "row_type": "invocation",
                 "tenant_id": tenant_id,
@@ -529,6 +575,25 @@ async def invoke(payload, context):
             })
         except Exception as audit_exc:  # pragma: no cover
             log.warning("invoke: audit write dropped for invocation_id=%s: %s", invocation_id, audit_exc)
+
+        # CloudWatch metrics via EMF. Separate try/except so a metrics
+        # failure doesn't suppress the audit row above or the spend record
+        # below. The EMFMetricsEmitter also swallows its own exceptions —
+        # this is belt-and-braces.
+        try:
+            _metrics.emit_invocation(
+                tenant_id=tenant_id,
+                model_id=model_id,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                duration_ms=duration_ms,
+                success=success,
+                invocation_id=invocation_id,
+                channel_id=ctx.get("channel_id", ""),
+                workspace_id=ctx.get("workspace_id", ""),
+            )
+        except Exception as metrics_exc:  # pragma: no cover
+            log.warning("invoke: metrics emit dropped for invocation_id=%s: %s", invocation_id, metrics_exc)
 
         # Record spend for cost-cap tracking (post-invocation).
         # Only records when tokens were actually consumed. Best-effort —

@@ -384,6 +384,7 @@ dependencies = [
     { name = "botocore", extra = ["crt"] },
     { name = "mcp" },
     { name = "pydantic" },
+    { name = "pyjwt", extra = ["crypto"] },
     { name = "strands-agents" },
 ]
 
@@ -394,6 +395,7 @@ requires-dist = [
     { name = "botocore", extras = ["crt"], specifier = ">=1.35.0" },
     { name = "mcp", specifier = ">=1.19.0" },
     { name = "pydantic", specifier = ">=2.0" },
+    { name = "pyjwt", extras = ["crypto"], specifier = ">=2.8.0" },
     { name = "strands-agents", specifier = ">=1.13.0" },
 ]
 

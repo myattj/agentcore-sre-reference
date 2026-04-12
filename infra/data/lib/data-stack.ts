@@ -146,6 +146,10 @@ export class DataStack extends Stack {
     //   - read/write audit_log (write path plus audit-log tooling)
     //   - read Secrets Manager under agentcore/tenants/* (per-tenant creds
     //     for BYO integrations — week 4+ populates these)
+    //   - read Secrets Manager under agentcore/platform/* (platform-level
+    //     secrets shared across all tenants — currently just the GitHub App
+    //     private key used by coreAgent/scm_github.py to mint installation
+    //     tokens, but other platform secrets will land in the same prefix)
     //
     // Not granted:
     //   - ListTables / DescribeTable (agent doesn't need fleet visibility)
@@ -189,6 +193,17 @@ export class DataStack extends Stack {
           actions: ['secretsmanager:GetSecretValue'],
           resources: [
             `arn:aws:secretsmanager:${this.region}:${this.account}:secret:agentcore/tenants/*`,
+          ],
+        }),
+        // Platform-level secrets shared across tenants (GitHub App private
+        // key, future: observability API keys, etc.). Separate statement
+        // from TenantSecretsRead so the ARN scope stays readable.
+        new PolicyStatement({
+          sid: 'PlatformSecretsRead',
+          effect: Effect.ALLOW,
+          actions: ['secretsmanager:GetSecretValue'],
+          resources: [
+            `arn:aws:secretsmanager:${this.region}:${this.account}:secret:agentcore/platform/*`,
           ],
         }),
         // Memory data plane: create events, retrieve/write memory records.
@@ -244,6 +259,11 @@ export class DataStack extends Stack {
     //   - secretsmanager agentcore/tenants/*: GetSecretValue (fetch per-
     //     tenant Slack bot tokens for chat.postMessage) AND
     //     CreateSecret/PutSecretValue (OAuth callback stores new tokens).
+    //   - secretsmanager agentcore/platform/*: GetSecretValue only
+    //     (read the GitHub App private key for install-time warm-start —
+    //     the bridge mints its own installation token after the GitHub
+    //     App OAuth handshake to fetch the tenant's repo list for
+    //     ranking and default-repo seeding).
 
     this.bridgeDataAccessPolicy = new ManagedPolicy(this, 'BridgeDataAccessPolicy', {
       managedPolicyName: 'AgentCoreBridgeDataAccess',
@@ -284,6 +304,96 @@ export class DataStack extends Stack {
           ],
           resources: [
             `arn:aws:secretsmanager:${this.region}:${this.account}:secret:agentcore/tenants/*`,
+          ],
+        }),
+        // Platform-level secrets: read-only. The bridge reads the GitHub
+        // App private key during install-time warm-start (step 3 of the
+        // codebase-access work) to mint an installation token and fetch
+        // the tenant's repo list for ranking. No write access — platform
+        // secrets are provisioned out-of-band by operators.
+        new PolicyStatement({
+          sid: 'PlatformSecretsRead',
+          effect: Effect.ALLOW,
+          actions: ['secretsmanager:GetSecretValue'],
+          resources: [
+            `arn:aws:secretsmanager:${this.region}:${this.account}:secret:agentcore/platform/*`,
+          ],
+        }),
+        // CloudWatch metrics read — powers the tenant-scoped metrics page
+        // in the onboarding/admin UI and the /ops operator dashboard.
+        // Both surfaces read the AgentCore Reference/Agent namespace via the bridge
+        // (filtering is enforced in the bridge handler, not by IAM — the
+        // GetMetricData API has no resource-level ARN for a namespace).
+        // cloudwatch:ListMetrics is included so the /ops roster can
+        // discover tenants without hardcoding the list.
+        new PolicyStatement({
+          sid: 'CloudWatchMetricsRead',
+          effect: Effect.ALLOW,
+          actions: [
+            'cloudwatch:GetMetricData',
+            'cloudwatch:GetMetricStatistics',
+            'cloudwatch:ListMetrics',
+          ],
+          resources: ['*'],
+        }),
+        // Bedrock AgentCore Gateway control plane — BYO integration
+        // provisioning. When a tenant connects a new integration
+        // (Datadog, PagerDuty, Jira, etc.) via
+        // `POST /api/tenants/{id}/integrations/{integration}`, the bridge
+        // calls `gateway_provisioner.ensure_credential_provider()` +
+        // `ensure_gateway_target()` which fan out to these APIs.
+        //
+        // Without this statement, the first provisioning attempt dies with
+        // `AccessDeniedException on bedrock-agentcore:ListApiKeyCredentialProviders`
+        // — one of the undocumented Gateway gotchas tracked in
+        // `reference_agentcore_gateway_gotchas.md`.
+        //
+        // Resources are scoped to our account + region. AgentCore's ARN
+        // shapes for credential providers and gateway targets are
+        // undocumented; `token-vault/default/apikeycredentialprovider/*`
+        // matches the resource AWS reports in access-denied errors, and
+        // `gateway/*` covers the shared Gateway + any tenant targets
+        // regardless of whether AgentCore names them as sub-resources or
+        // siblings. The `*` on token-vault/default is for the container
+        // itself (needed by list/create).
+        new PolicyStatement({
+          sid: 'GatewayControlPlaneProvisioning',
+          effect: Effect.ALLOW,
+          actions: [
+            // API key credential providers (AgentCore token vault)
+            'bedrock-agentcore:ListApiKeyCredentialProviders',
+            'bedrock-agentcore:CreateApiKeyCredentialProvider',
+            'bedrock-agentcore:GetApiKeyCredentialProvider',
+            'bedrock-agentcore:UpdateApiKeyCredentialProvider',
+            'bedrock-agentcore:DeleteApiKeyCredentialProvider',
+            // Gateway targets
+            'bedrock-agentcore:ListGatewayTargets',
+            'bedrock-agentcore:CreateGatewayTarget',
+            'bedrock-agentcore:GetGatewayTarget',
+            'bedrock-agentcore:UpdateGatewayTarget',
+            'bedrock-agentcore:DeleteGatewayTarget',
+          ],
+          resources: [
+            `arn:aws:bedrock-agentcore:${this.region}:${this.account}:token-vault/default`,
+            `arn:aws:bedrock-agentcore:${this.region}:${this.account}:token-vault/default/apikeycredentialprovider/*`,
+            `arn:aws:bedrock-agentcore:${this.region}:${this.account}:gateway/*`,
+          ],
+        }),
+        // SSM parameters for the shared Gateway coordinates written by
+        // `infra/data/scripts/provision_gateway.py`. The bridge reads
+        // `/agentcore/gateway/id` and `/agentcore/gateway/url` once per
+        // process via `gateway_provisioner._gateway_coordinates()` and
+        // lru_caches the result. Scoped to the `/agentcore/gateway/`
+        // prefix so the bridge can't enumerate other SSM params.
+        new PolicyStatement({
+          sid: 'GatewaySsmParametersRead',
+          effect: Effect.ALLOW,
+          actions: [
+            'ssm:GetParameter',
+            'ssm:GetParameters',
+          ],
+          resources: [
+            `arn:aws:ssm:${this.region}:${this.account}:parameter/agentcore/gateway/*`,
           ],
         }),
       ],

@@ -71,6 +71,27 @@ def get_context() -> dict[str, Any]:
     return _ctx.get() or {}
 
 
+def merge_context(**extras: Any) -> None:
+    """Merge additional fields into the current context dict.
+
+    Used by ``main.py`` to layer post-``set_context`` state onto the
+    invocation context without rebuilding the whole thing — for example,
+    ``github_installation_id`` is resolved from the tenant config and
+    merged in AFTER ``set_context`` has already been called, so the
+    ``code_*`` catalog tools can read it via ``get_context()`` to mint
+    installation tokens.
+
+    No-op if the context hasn't been initialized — extras are dropped
+    rather than implicitly creating a context, which would hide ordering
+    bugs.
+    """
+    current = _ctx.get()
+    if current is None:
+        return
+    current.update(extras)
+    _ctx.set(current)
+
+
 def clear_context() -> None:
     """Reset the context to None. Called in the entrypoint's `finally` block
     so the ContextVar doesn't leak across invocations in the same process."""

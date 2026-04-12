@@ -179,11 +179,67 @@ class EscalationConfig(BaseModel):
     routes: list[EscalationRoute] = Field(default_factory=list)
 
 
+class CodebaseBinding(BaseModel):
+    """A single repo binding the tenant's agent knows about.
+
+    The agent's discovery layer picks which binding to use for a given
+    Slack message based on (channel, user, thread, message text). See
+    ``context_assembler.resolve_codebase_context()`` for the rules.
+
+    repo: GitHub ``owner/name`` slug (e.g. "acme/platform").
+    default_branch: branch to read from when no ref is specified.
+    aliases: informal names users might call this repo
+        ("platform", "the gateway code"). Matched case-insensitively
+        against message text as a discovery signal.
+    channels: Slack channel IDs where this binding is the confirmed
+        default. Populated from onboarding (explicit choice) or from
+        learned ``codebase_affinity`` memory records being promoted
+        to config.
+    """
+    repo: str
+    default_branch: str = "main"
+    aliases: list[str] = Field(default_factory=list)
+    channels: list[str] = Field(default_factory=list)
+
+
+class CodebasesConfig(BaseModel):
+    """Per-tenant code access layer config.
+
+    Drives the GitHub-App-backed code tools (``code_search``,
+    ``code_read_file``, ``code_find_symbol``, ``code_list_commits``)
+    and the context-injection layer that lists connected repos in the
+    system prompt so the model can pick one for each tool call.
+
+    enabled: master switch. When False the code tools are hidden from
+        the agent even if they're in ``catalog.allowed_tools``.
+    github_installation_id: numeric GitHub App installation ID for
+        this tenant (stored as string for JSON compatibility).
+        Populated during the GitHub App install handshake. Used by
+        ``scm_github.get_installation_token()`` to mint access tokens.
+    default_repo: fallback repo when discovery can't find a
+        scope-specific binding. Typically the tenant's most-active
+        repo, picked at install time.
+    bindings: list of repos the agent knows about. Seeded from the
+        GitHub App installation's repo list at install time and
+        editable from the onboarding UI.
+    allow_learning: whether the agent may use AgentCore Memory's
+        SEMANTIC strategy to learn scope→repo mappings over time.
+        True is the magical default; setting False disables the
+        semantic-retrieval hint path in the resolver (the agent still
+        reads explicit ``bindings.channels``).
+    """
+    enabled: bool = False
+    github_installation_id: str | None = None
+    default_repo: str | None = None
+    bindings: list[CodebaseBinding] = Field(default_factory=list)
+    allow_learning: bool = True
+
+
 # ----------------------------------------------------------------------------
 # Default system prompt for new tenants
 # ----------------------------------------------------------------------------
 #
-# This prompt is the "magical default" for Novari: a new tenant gets a bot
+# This prompt is the "magical default" for AgentCore Reference: a new tenant gets a bot
 # that's useful from minute one without any skill definitions, channel
 # personas, or tool configuration. It bakes in the three core workflows
 # (triage, Q&A, handoffs) as natural-language instructions so the agent
@@ -279,6 +335,12 @@ You know your own config. When a user asks to change something — "add B_PAGERD
 # the onboarding UI or via ``manage_config``.
 #
 # **KEEP IN SYNC** with ``bridge/bridge/tenant_write.py:DEFAULT_CATALOG_TOOLS``.
+#
+# The ``code_*`` tools are in the default whitelist so tenants that
+# install the GitHub App get them automatically. ``main.py`` filters
+# them out of the runtime effective_tools list when
+# ``codebases.enabled=False`` so tenants without the App don't see
+# tools they can't use.
 DEFAULT_CATALOG_TOOLS = [
     "echo",
     "start_background_task",
@@ -287,6 +349,11 @@ DEFAULT_CATALOG_TOOLS = [
     "search_docs",
     "post_to_channel",
     "escalate",
+    "ask_codebase_choice",
+    "code_search",
+    "code_read_file",
+    "code_find_symbol",
+    "code_list_commits",
 ]
 
 
@@ -304,6 +371,13 @@ class TenantConfig(BaseModel):
     context_assembly: ContextAssemblyConfig = Field(default_factory=ContextAssemblyConfig)
     skills: list[SkillDef] = Field(default_factory=list)
     escalation: EscalationConfig = Field(default_factory=EscalationConfig)
+    codebases: CodebasesConfig = Field(default_factory=CodebasesConfig)
+    # Marks a tenant as an internal test/demo environment (e.g. the
+    # agentcore-testenv manual-testing rig). The ops dashboard filters
+    # these out of cross-tenant leaderboards by default so they don't
+    # pollute real-customer metrics. Purely a presentation flag — the
+    # agent itself ignores it.
+    is_internal_testenv: bool = False
 
 
 def _iso_now() -> str:

@@ -164,6 +164,10 @@ You know your own config. When a user asks to change something — "add B_PAGERD
 # Every new tenant gets the full set enabled — the old "echo only"
 # default forced users to manually enable each tool before the bot was
 # useful, which contradicted the zero-config magic goal.
+#
+# The ``code_*`` tools ship in the whitelist but are filtered out of
+# the runtime effective_tools list in ``coreAgent/main.py`` when the
+# tenant hasn't installed the GitHub App (``codebases.enabled=False``).
 DEFAULT_CATALOG_TOOLS = [
     "echo",
     "start_background_task",
@@ -172,6 +176,11 @@ DEFAULT_CATALOG_TOOLS = [
     "search_docs",
     "post_to_channel",
     "escalate",
+    "ask_codebase_choice",
+    "code_search",
+    "code_read_file",
+    "code_find_symbol",
+    "code_list_commits",
 ]
 
 
@@ -240,6 +249,14 @@ def build_default_config_dict(tenant_id: str) -> dict[str, Any]:
         "escalation": {
             "routes": [],
         },
+        "codebases": {
+            "enabled": False,
+            "github_installation_id": None,
+            "default_repo": None,
+            "bindings": [],
+            "allow_learning": True,
+        },
+        "is_internal_testenv": False,
     }
 
 
@@ -253,7 +270,7 @@ def build_default_config_dict(tenant_id: str) -> dict[str, Any]:
 # is SHALLOW and would drop the sibling field.
 _DEEP_MERGE_FIELDS = frozenset({
     "catalog", "byo", "memory", "heartbeat", "cost_cap", "channels",
-    "bot_policy", "context_assembly", "escalation",
+    "bot_policy", "context_assembly", "escalation", "codebases",
 })
 
 
@@ -504,6 +521,80 @@ def update_tenant_row(
         if code == "ConditionalCheckFailedException":
             raise KeyError(f"No tenant row for tenant_id={tenant_id!r}") from e
         raise
+
+
+def list_internal_testenv_tenants(
+    tenant_ids: list[str],
+    region: str,
+) -> set[str]:
+    """Return the subset of ``tenant_ids`` whose ``config.is_internal_testenv``
+    is True.
+
+    Used by the ops roster to hide internal test/demo tenants from
+    cross-tenant metrics by default. Reads only the ``config`` attribute
+    via a ``ProjectionExpression`` so the data transferred is minimal.
+
+    Fails open: if DDB errors for any reason, returns an empty set (the
+    caller treats unknown tenants as real customers). We'd rather show
+    a testenv tenant in the roster once than hide a real customer by
+    accident.
+
+    In LOCAL_DEV, reads the JSON files directly — same semantics.
+    """
+    if not tenant_ids:
+        return set()
+
+    if _is_local_dev():
+        result: set[str] = set()
+        for tid in tenant_ids:
+            try:
+                config = _local_get(tid)
+            except KeyError:
+                continue
+            if config.get("is_internal_testenv") is True:
+                result.add(tid)
+        return result
+
+    try:
+        import boto3
+    except ImportError:
+        return set()
+
+    try:
+        client = boto3.client("dynamodb", region_name=region)
+        table_name = _tenants_table_name()
+        testenv: set[str] = set()
+        # BatchGetItem is limited to 100 items per call; chunk if needed.
+        # For a healthy platform with <100 active tenants, this is one
+        # call. Adjust chunk size if we ever push past that.
+        for start in range(0, len(tenant_ids), 100):
+            chunk = tenant_ids[start:start + 100]
+            response = client.batch_get_item(
+                RequestItems={
+                    table_name: {
+                        "Keys": [{"tenant_id": {"S": tid}} for tid in chunk],
+                        "ProjectionExpression": "tenant_id, #cfg.is_internal_testenv",
+                        "ExpressionAttributeNames": {"#cfg": "config"},
+                    }
+                }
+            )
+            items = response.get("Responses", {}).get(table_name, [])
+            for item in items:
+                tid = item.get("tenant_id", {}).get("S")
+                if not tid:
+                    continue
+                flag = (
+                    item.get("config", {})
+                    .get("M", {})
+                    .get("is_internal_testenv", {})
+                    .get("BOOL", False)
+                )
+                if flag:
+                    testenv.add(tid)
+        return testenv
+    except Exception as e:  # noqa: BLE001
+        log.warning("list_internal_testenv_tenants failed: %s", e)
+        return set()
 
 
 def reset_tenant_write_for_tests() -> None:

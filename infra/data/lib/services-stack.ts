@@ -315,6 +315,12 @@ export class ServicesStack extends Stack {
         BRIDGE_PUBLIC_URL: publicUrl,
         SLACK_REDIRECT_URI: `${publicUrl}/slack/oauth/callback`,
         ONBOARDING_BASE_URL: publicUrl,
+        // GitHub App — identity only; the private key lives in Secrets
+        // Manager at agentcore/platform/github_app/private_key and is
+        // fetched at token-mint time by bridge/bridge/github_app.py.
+        // Task role already has secretsmanager:GetSecretValue on
+        // agentcore/platform/* via PlatformSecretsRead (data-stack.ts).
+        GITHUB_APP_ID: '123456',
       },
       secrets: {
         SLACK_CLIENT_ID: ecs.Secret.fromSecretsManager(slackSecret, 'SLACK_CLIENT_ID'),
@@ -322,6 +328,11 @@ export class ServicesStack extends Stack {
         SLACK_SIGNING_SECRET: ecs.Secret.fromSecretsManager(slackSecret, 'SLACK_SIGNING_SECRET'),
         BRIDGE_OAUTH_STATE_SECRET: ecs.Secret.fromSecretsManager(bridgeSecret, 'BRIDGE_OAUTH_STATE_SECRET'),
         BRIDGE_GATEWAY_JWT_PRIVATE_KEY_PEM: ecs.Secret.fromSecretsManager(bridgeSecret, 'BRIDGE_GATEWAY_JWT_PRIVATE_KEY_PEM'),
+        // Shared secret for /ops operator dashboard routes. Guards the
+        // bridge's /api/ops/metrics/* endpoints via a header check.
+        // Same value is injected into the onboarding task below so the
+        // /ops login page can validate the cookie.
+        ADMIN_SECRET: ecs.Secret.fromSecretsManager(bridgeSecret, 'ADMIN_SECRET'),
       },
     });
 
@@ -367,9 +378,19 @@ export class ServicesStack extends Stack {
         NEXT_PUBLIC_BRIDGE_INSTALL_URL: hasHttps
           ? `https://${props.domainName}/slack/install`
           : `http://localhost:8000/slack/install`,
+        // GitHub App slug — used by the onboarding UI to build the
+        // install link (github.com/apps/<slug>/installations/new). Must
+        // match the actual slug of the app on github.com or users hit
+        // a 404. The bridge + agent read GITHUB_APP_ID instead (set on
+        // their own task defs) — the slug is UI-only.
+        GITHUB_APP_SLUG: 'agent-example',
       },
       secrets: {
         BRIDGE_OAUTH_STATE_SECRET: ecs.Secret.fromSecretsManager(bridgeSecret, 'BRIDGE_OAUTH_STATE_SECRET'),
+        // Shared secret for the /ops operator dashboard. MUST match the
+        // value the bridge reads (same Secrets Manager key), or the
+        // onboarding login page will set a cookie the bridge rejects.
+        ADMIN_SECRET: ecs.Secret.fromSecretsManager(bridgeSecret, 'ADMIN_SECRET'),
       },
     });
 

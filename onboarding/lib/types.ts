@@ -90,6 +90,31 @@ export type EscalationConfig = {
   routes: EscalationRoute[];
 };
 
+/**
+ * A single repo binding. Mirrors `coreAgent.tenant.CodebaseBinding`.
+ * `aliases` are informal names users might call this repo; `channels`
+ * are Slack channel IDs where this binding is the confirmed default.
+ */
+export type CodebaseBinding = {
+  repo: string;
+  default_branch: string;
+  aliases: string[];
+  channels: string[];
+};
+
+/**
+ * Per-tenant code access layer. Mirrors `coreAgent.tenant.CodebasesConfig`.
+ * Drives the GitHub-App-backed code tools and the discovery layer that
+ * picks which repo a Slack message refers to.
+ */
+export type CodebasesConfig = {
+  enabled: boolean;
+  github_installation_id: string | null;
+  default_repo: string | null;
+  bindings: CodebaseBinding[];
+  allow_learning: boolean;
+};
+
 export type TenantConfig = {
   tenant_id: string;
   model_id: string;
@@ -104,6 +129,14 @@ export type TenantConfig = {
   context_assembly: ContextAssemblyConfig;
   skills: SkillDef[];
   escalation: EscalationConfig;
+  codebases: CodebasesConfig;
+  /**
+   * Marks a tenant as an internal test/demo environment. The ops
+   * dashboard filters these out of cross-tenant leaderboards by
+   * default so they don't pollute real-customer metrics. Purely a
+   * presentation flag — the agent itself ignores it.
+   */
+  is_internal_testenv: boolean;
 };
 
 /** Sparse partial used as the body of `PATCH /api/tenants/{id}`. */
@@ -120,6 +153,8 @@ export type TenantConfigPatch = Partial<{
   context_assembly: Partial<ContextAssemblyConfig>;
   skills: SkillDef[];
   escalation: Partial<EscalationConfig>;
+  codebases: Partial<CodebasesConfig>;
+  is_internal_testenv: boolean;
 }>;
 
 export type ChannelInfo = {
@@ -145,6 +180,28 @@ export type IntegrationConnectResponse = {
   integration: string;
   target_name?: string | null;
   gateway_url?: string | null;
+  error?: string | null;
+};
+
+/**
+ * Compact binding shape returned from the GitHub App install endpoint.
+ * Mirrors `bridge/bridge/api_models.py:CodebaseBindingBrief`.
+ */
+export type CodebaseBindingBrief = {
+  repo: string;
+  default_branch: string;
+};
+
+/**
+ * Response from POST /api/tenants/{id}/codebases/github/install.
+ * Mirrors `bridge/bridge/api_models.py:GitHubAppInstallResponse`.
+ */
+export type GitHubAppInstallResponse = {
+  ok: boolean;
+  installation_id: string;
+  default_repo?: string | null;
+  bindings: CodebaseBindingBrief[];
+  total_repos_available: number;
   error?: string | null;
 };
 
@@ -192,5 +249,35 @@ export const KNOWN_CATALOG_TOOLS: { id: string; label: string; description: stri
     label: "Escalate",
     description:
       "Escalate an issue to a specific team using the configured routing table.",
+  },
+  {
+    id: "ask_codebase_choice",
+    label: "Ask codebase choice",
+    description:
+      "Post Slack Block Kit buttons asking the user to pick a repo. Used by the codebase discovery flow when no binding is confirmed for the current channel.",
+  },
+  {
+    id: "code_search",
+    label: "Code search",
+    description:
+      "Search code across the tenant's connected GitHub repos. Requires the GitHub App to be installed.",
+  },
+  {
+    id: "code_read_file",
+    label: "Code read file",
+    description:
+      "Read a specific file from a connected repo. Requires the GitHub App to be installed.",
+  },
+  {
+    id: "code_find_symbol",
+    label: "Code find symbol",
+    description:
+      "Find files mentioning a specific symbol (function, class, constant). Requires the GitHub App to be installed.",
+  },
+  {
+    id: "code_list_commits",
+    label: "Code list commits",
+    description:
+      "List recent commits on a connected repo, optionally filtered by branch or path. Requires the GitHub App to be installed.",
   },
 ];

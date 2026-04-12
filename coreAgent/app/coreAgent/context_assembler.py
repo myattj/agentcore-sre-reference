@@ -16,6 +16,15 @@ Assembles additional context that the LLM needs to produce a good response:
      the skill's prompt template is appended to the system prompt and its
      required tools are merged into the effective tool list.
 
+  4. **Codebase context** — reads ``TenantConfig.codebases`` + queries
+     AgentCore Memory's SEMANTIC namespace for a "preferred codebase
+     for this channel" hint, then calls ``resolve_codebase_context``
+     to pick the primary repo. Appends a prompt block telling the
+     agent either to use the confirmed repo, or to ask from a ranked
+     shortlist before using any code tools. See
+     ``codebase_resolver.py`` for the resolution rules and
+     ``codebase_memory.py`` for the retrieval wrapper.
+
 Each step is independently toggleable via ``TenantConfig.context_assembly``.
 All Slack API calls are best-effort: failures are logged and skipped so the
 agent still processes the message (just with less context).
@@ -29,8 +38,13 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Any
 
-from . import slack_api
-from .tenant import ContextAssemblyConfig, SkillDef
+# Absolute imports — main.py and every other module here are loaded as
+# top-level scripts by the AgentCore Runtime, not as a package. Relative
+# imports (`from .slack_api ...`) raise ImportError at invocation time.
+import slack_api
+from codebase_memory import retrieve_codebase_affinity_hint
+from codebase_resolver import CodebaseContext, resolve_codebase_context
+from tenant import CodebasesConfig, ContextAssemblyConfig, SkillDef
 
 log = logging.getLogger(__name__)
 
@@ -56,6 +70,7 @@ class AssembledContext:
     system_prompt: str
     extra_tools: list[str] = field(default_factory=list)
     matched_skill: str | None = None
+    codebase: CodebaseContext | None = None
 
 
 def assemble_context(
@@ -65,6 +80,8 @@ def assemble_context(
     skills: list[SkillDef],
     effective_prompt: str,
     tenant_id: str,
+    codebases: CodebasesConfig | None = None,
+    memory_isolated_channels: list[str] | None = None,
 ) -> AssembledContext:
     """Run the full context assembly pipeline.
 
@@ -72,6 +89,17 @@ def assemble_context(
     ``Agent()`` constructor. Returns an ``AssembledContext`` with the
     enriched message, possibly-modified system prompt, and any extra
     tools required by a matched skill.
+
+    ``codebases`` is optional (defaults to None for backward
+    compatibility with callers that haven't migrated to the new
+    signature yet). When provided and ``codebases.enabled=True``, the
+    resolver appends a codebase-context block to the system prompt.
+
+    ``memory_isolated_channels`` mirrors the tenant's
+    ``memory.isolated_channels`` list. Needed by the codebase-affinity
+    semantic lookup to pick the same actor_id that the session manager
+    uses for writes — otherwise the retrieve and write sides query
+    different namespaces and the hint never returns anything.
     """
     context_blocks: list[str] = []
 
@@ -95,6 +123,45 @@ def assemble_context(
             f"{skill_match.prompt_addition}"
         )
 
+    # Step 4: Codebase context. Two sub-steps:
+    #   4a. Query AgentCore Memory's SEMANTIC namespace for a
+    #       "most recently used repo in this scope" hint. This is a
+    #       synchronous ~200-500ms API call that only fires when
+    #       codebases.enabled AND allow_learning are both True. The
+    #       hint is informative — the resolver surfaces it as a soft
+    #       default in the prompt block, but the model still reads
+    #       the user message and picks on its own.
+    #   4b. Call the pure resolver with the hint. Returns a single
+    #       CodebaseContext with a ``disabled`` flag and a prompt
+    #       block listing every connected repo.
+    #
+    # The hint layer is IO; the resolver is pure. This split keeps
+    # resolver unit tests fast and lets the bridge test harness
+    # exercise the resolver without mocking boto3.
+    codebase_ctx: CodebaseContext | None = None
+    if codebases is not None:
+        semantic_hint: str | None = None
+        if codebases.enabled and codebases.allow_learning:
+            known_repos = [b.repo for b in codebases.bindings]
+            channel_id = ctx.get("channel_id", "") or ""
+            isolated_list = memory_isolated_channels or []
+            is_isolated = bool(channel_id and channel_id in isolated_list)
+            # retrieve_codebase_affinity_hint never raises — it logs
+            # and returns None on any error — so we don't need a
+            # try/except here.
+            semantic_hint = retrieve_codebase_affinity_hint(
+                tenant_id=tenant_id,
+                channel_id=channel_id,
+                known_repos=known_repos,
+                isolated=is_isolated,
+                user_id=ctx.get("user_id", "") or "",
+            )
+        codebase_ctx = resolve_codebase_context(
+            ctx, codebases, semantic_hint=semantic_hint
+        )
+        if not codebase_ctx.disabled and codebase_ctx.prompt_block:
+            effective_prompt += "\n\n" + codebase_ctx.prompt_block
+
     # Assemble enriched message
     if context_blocks:
         enriched = "\n\n".join(context_blocks) + "\n\n---\n\n" + user_message
@@ -106,6 +173,7 @@ def assemble_context(
         system_prompt=effective_prompt,
         extra_tools=skill_match.required_tools if skill_match else [],
         matched_skill=skill_match.name if skill_match else None,
+        codebase=codebase_ctx,
     )
 
 
