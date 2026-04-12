@@ -216,6 +216,49 @@ def fetch_thread_replies_raw(
     return data.get("messages", [])
 
 
+def get_channel_info(
+    token: str,
+    channel_id: str,
+) -> dict[str, Any] | None:
+    """Fetch a channel's metadata (name, topic, purpose) via ``conversations.info``.
+
+    Requires ``channels:read`` / ``groups:read`` scopes (already in the
+    manifest). Returns None on any failure so the caller can degrade
+    gracefully. The raw Slack response shape is preserved — callers
+    pick out the fields they want.
+    """
+    try:
+        data = _slack_get(token, "conversations.info", {"channel": channel_id})
+    except Exception:
+        log.warning("get_channel_info failed for %s", channel_id, exc_info=True)
+        return None
+    if not data.get("ok"):
+        return None
+    channel = data.get("channel")
+    return channel if isinstance(channel, dict) else None
+
+
+def get_user_info(
+    token: str,
+    user_id: str,
+) -> dict[str, Any] | None:
+    """Fetch a user's profile (real_name, display_name, title) via ``users.info``.
+
+    Requires ``users:read`` scope. Returns None on any failure so
+    callers can degrade gracefully. Used by context-inspection tools
+    that want to show "who's asking" without blocking on missing info.
+    """
+    try:
+        data = _slack_get(token, "users.info", {"user": user_id})
+    except Exception:
+        log.warning("get_user_info failed for %s", user_id, exc_info=True)
+        return None
+    if not data.get("ok"):
+        return None
+    user = data.get("user")
+    return user if isinstance(user, dict) else None
+
+
 def post_message(
     token: str,
     channel_id: str,

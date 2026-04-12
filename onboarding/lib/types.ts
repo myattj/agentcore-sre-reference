@@ -254,7 +254,13 @@ export const KNOWN_CATALOG_TOOLS: { id: string; label: string; description: stri
     id: "ask_codebase_choice",
     label: "Ask codebase choice",
     description:
-      "Post Slack Block Kit buttons asking the user to pick a repo. Used by the codebase discovery flow when no binding is confirmed for the current channel.",
+      "Post Slack Block Kit buttons asking the user to pick a repo. A UX affordance the agent uses when it genuinely can't tell which connected repo is meant.",
+  },
+  {
+    id: "inspect_codebase_context",
+    label: "Inspect codebase context",
+    description:
+      "Gather extra signals (channel name/topic, user profile, channel-pinned bindings, memory hint) when the agent needs more context before picking a codebase. Returns hints, not a decision.",
   },
   {
     id: "code_search",

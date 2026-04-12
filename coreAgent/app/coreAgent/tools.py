@@ -361,25 +361,28 @@ def escalate(team_name: str, summary: str, severity: str = "medium") -> str:
 
 @audited_tool("ask_codebase_choice")
 def ask_codebase_choice(candidates: list[str]) -> str:
-    """Ask the user to pick a codebase by posting Slack Block Kit buttons.
+    """Offer a pick-one Slack button UI for choosing between codebases.
 
-    Use this tool INSTEAD of asking in prose whenever the codebase
-    context block says no codebase is confirmed for this channel. The
-    buttons let the user answer with one click; the bridge's
-    interactivity handler catches the click, posts a synthetic
-    "use <repo>" message back into the thread, and re-invokes you with
-    the pick in context.
+    This is a UX affordance, not a fallback for uncertainty. Reach for
+    it only when you've reasoned about the message and the Connected
+    codebases list and you genuinely cannot tell which repo is meant —
+    AND there are two or three plausible candidates a human could pick
+    between in one click. If you already have a reasonable pick, just
+    use it. If a tool returned an error, reason about whether that's
+    a repo-choice problem or a backend problem before re-asking.
 
-    Always tell the user what you're doing in ONE short line before
-    calling this tool (e.g. "Before I dig in — which codebase?") so
-    the thread reads naturally even if the buttons fail to render.
+    When you do ask, a short one-line prose intro first is fine
+    ("Quick check — which one?") so the thread reads naturally even if
+    Slack fails to render the buttons.
 
     Args:
         candidates: List of ``owner/name`` repo slugs to offer as
-                    buttons, ordered by preference (default first).
+                    buttons, ordered by preference (best guess first).
                     Slack's action block supports up to 5 buttons;
                     extras are trimmed.
     """
+    import slack_api
+
     ctx = get_context()
     tenant_id = ctx.get("tenant_id", "")
     channel_id = ctx.get("channel_id", "")
@@ -444,6 +447,203 @@ def ask_codebase_choice(candidates: list[str]) -> str:
         f"{len(trimmed)} candidate(s). Wait for the user to click; "
         "the bridge will re-invoke you with their pick."
     )
+
+
+@audited_tool("inspect_codebase_context")
+def inspect_codebase_context() -> str:
+    """Gather extra signals for choosing a codebase when the Connected
+    codebases block + thread context aren't enough to reason from.
+
+    This tool does NOT make a decision — it returns labeled signals and
+    you reason about them. Reach for it when you genuinely need more
+    context before picking, not as a reflex whenever you're slightly
+    uncertain. Most messages already have enough signal in the thread
+    and the system prompt's Connected codebases list.
+
+    Returns a markdown block with these sections (each best-effort —
+    any section that can't be populated is labeled "no signal"):
+
+      1. **Connected codebases** — full list with aliases, default
+         branch, and channel pins. Channel pins are the primary
+         team-ownership signal: a repo pinned to the current channel
+         usually means that team owns it.
+      2. **This channel** — Slack metadata: name, topic, purpose.
+         Useful when the topic/purpose names a system or team
+         explicitly ("On-call for payments platform").
+      3. **This user** — Slack profile: display name, real name, job
+         title. Useful when the title points at a specific area
+         ("Staff SRE" → likely infra repos).
+      4. **Memory hint** — a repo slug from AgentCore Memory's
+         SEMANTIC namespace for this scope, when there's a confident
+         match. This is "what got used here recently."
+
+    Takes 1-2 Slack API calls + one memory query (~500ms total). No
+    arguments — reads the current invocation ctx for tenant, channel,
+    and user.
+    """
+    import slack_api
+    from codebase_memory import retrieve_codebase_affinity_hint
+    from tenant import load_tenant_config
+
+    ctx = get_context()
+    tenant_id = ctx.get("tenant_id", "")
+    channel_id = ctx.get("channel_id", "") or ""
+    user_id = ctx.get("user_id", "") or ""
+
+    if not tenant_id:
+        return "Error: no tenant_id in request context."
+
+    # Load the tenant config so we can show bindings + use the memory
+    # allow_learning flag. If this fails, we degrade by only returning
+    # the Slack signals.
+    codebases = None
+    try:
+        config = load_tenant_config(tenant_id)
+        codebases = config.codebases
+    except Exception as e:  # noqa: BLE001
+        log.warning("inspect_codebase_context: load_tenant_config failed: %s", e)
+
+    sections: list[str] = ["## Codebase context inspection"]
+
+    # --- Section 1: Connected codebases with channel-pin highlight ---
+    if codebases is not None and codebases.bindings:
+        lines = ["### Connected codebases"]
+        for b in codebases.bindings:
+            parts = [f"- `{b.repo}` (branch: `{b.default_branch}`)"]
+            if b.aliases:
+                aliases = ", ".join(repr(a) for a in b.aliases)
+                parts.append(f" — aliases: {aliases}")
+            if b.channels:
+                pinned = ", ".join(b.channels)
+                if channel_id and channel_id in b.channels:
+                    parts.append(
+                        f" — **pinned to THIS channel** ({pinned})"
+                    )
+                else:
+                    parts.append(f" — pinned channels: {pinned}")
+            else:
+                parts.append(" — no channel pins")
+            lines.append("".join(parts))
+        if codebases.default_repo:
+            lines.append(
+                f"\nInstall-time default: `{codebases.default_repo}`"
+            )
+        sections.append("\n".join(lines))
+    else:
+        sections.append(
+            "### Connected codebases\nno signal — tenant has no "
+            "codebase bindings configured"
+        )
+
+    # --- Slack signals: one token fetch, reuse for channel + user ---
+    token = slack_api.get_bot_token(tenant_id)
+
+    # --- Section 2: Channel metadata ---
+    channel_section = ["### This channel"]
+    if token and channel_id:
+        info = slack_api.get_channel_info(token, channel_id)
+        if info:
+            name = info.get("name") or ""
+            topic = (info.get("topic") or {}).get("value") or ""
+            purpose = (info.get("purpose") or {}).get("value") or ""
+            is_private = info.get("is_private", False)
+            channel_section.append(
+                f"- Name: #{name}" if name else "- Name: (unknown)"
+            )
+            channel_section.append(
+                f"- Type: {'private' if is_private else 'public'}"
+            )
+            channel_section.append(
+                f"- Topic: {topic}" if topic else "- Topic: (not set)"
+            )
+            channel_section.append(
+                f"- Purpose: {purpose}"
+                if purpose
+                else "- Purpose: (not set)"
+            )
+        else:
+            channel_section.append(
+                "no signal — conversations.info returned no data "
+                "(missing scope, or bot not in channel)"
+            )
+    else:
+        channel_section.append(
+            "no signal — missing Slack token or channel_id in context"
+        )
+    sections.append("\n".join(channel_section))
+
+    # --- Section 3: User metadata ---
+    user_section = ["### This user"]
+    if token and user_id:
+        info = slack_api.get_user_info(token, user_id)
+        if info:
+            profile = info.get("profile") or {}
+            display = profile.get("display_name") or ""
+            real = profile.get("real_name") or info.get("real_name") or ""
+            title = profile.get("title") or ""
+            user_section.append(
+                f"- Display name: {display}"
+                if display
+                else "- Display name: (not set)"
+            )
+            user_section.append(
+                f"- Real name: {real}"
+                if real
+                else "- Real name: (not set)"
+            )
+            user_section.append(
+                f"- Title: {title}" if title else "- Title: (not set)"
+            )
+        else:
+            user_section.append(
+                "no signal — users.info returned no data "
+                "(missing users:read scope, or user not visible)"
+            )
+    else:
+        user_section.append(
+            "no signal — missing Slack token or user_id in context"
+        )
+    sections.append("\n".join(user_section))
+
+    # --- Section 4: Semantic memory hint ---
+    memory_section = ["### Memory hint"]
+    if (
+        codebases is not None
+        and codebases.enabled
+        and codebases.allow_learning
+        and codebases.bindings
+    ):
+        known_repos = [b.repo for b in codebases.bindings]
+        isolated_list = config.memory.isolated_channels if codebases else []
+        is_isolated = bool(channel_id and channel_id in isolated_list)
+        hint = retrieve_codebase_affinity_hint(
+            tenant_id=tenant_id,
+            channel_id=channel_id,
+            known_repos=known_repos,
+            isolated=is_isolated,
+            user_id=user_id,
+        )
+        if hint:
+            memory_section.append(
+                f"- Most recently used repo in this scope: `{hint}`"
+            )
+        else:
+            memory_section.append(
+                "no signal — no prior repo usage indexed for this "
+                "(tenant, channel) scope"
+            )
+    else:
+        memory_section.append(
+            "no signal — memory learning disabled or no bindings configured"
+        )
+    sections.append("\n".join(memory_section))
+
+    sections.append(
+        "---\n"
+        "These are hints, not a decision. Combine them with the user's "
+        "message and the thread history to pick a repo."
+    )
+    return "\n\n".join(sections)
 
 
 @audited_tool("code_search")
