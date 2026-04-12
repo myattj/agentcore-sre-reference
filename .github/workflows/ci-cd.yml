@@ -8,6 +8,7 @@
 # Deploy (push to main only, after gates pass):
 #   - Agent runtime via `agentcore deploy`
 #   - Bridge + onboarding Fargate services via CDK
+#   - Sandbox container image + task def via CDK (after services)
 #
 # ── One-time setup ────────────────────────────────────────────────
 #
@@ -45,6 +46,7 @@
 #      SLACK_SECRETS_ARN     = arn:aws:secretsmanager:us-west-2:<ACCOUNT>:secret:agentcore/services/slack-<suffix>
 #      BRIDGE_SECRETS_ARN    = arn:aws:secretsmanager:us-west-2:<ACCOUNT>:secret:agentcore/services/bridge-<suffix>
 #      SANDBOX_SECRETS_ARN   = arn:aws:secretsmanager:us-west-2:<ACCOUNT>:secret:agentcore/services/sandbox-<suffix>
+#      ANTHROPIC_SECRETS_ARN = arn:aws:secretsmanager:us-west-2:<ACCOUNT>:secret:agentcore/platform/anthropic_api_key-<suffix>
 # ──────────────────────────────────────────────────────────────────
 
 name: CI/CD
@@ -175,3 +177,51 @@ jobs:
             --context slackSecretsArn=${{ vars.SLACK_SECRETS_ARN }} \
             --context bridgeSecretsArn=${{ vars.BRIDGE_SECRETS_ARN }} \
             --context sandboxSecretsArn=${{ vars.SANDBOX_SECRETS_ARN }}
+
+  deploy-sandbox:
+    name: Deploy sandbox
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: [deploy-services]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: us-west-2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: infra/data/package-lock.json
+      - run: cd infra/data && npm ci
+      - name: Read ServicesStack outputs
+        id: svc
+        run: |
+          STACK="AgentCore-coreAgent-services-us-west-2"
+          get() {
+            aws cloudformation describe-stacks \
+              --region us-west-2 \
+              --stack-name "$STACK" \
+              --query "Stacks[0].Outputs[?OutputKey=='$1'].OutputValue" \
+              --output text
+          }
+          echo "vpc_id=$(get VpcId)" >> "$GITHUB_OUTPUT"
+          echo "azs=$(get VpcAvailabilityZones)" >> "$GITHUB_OUTPUT"
+          echo "subnets=$(get VpcPublicSubnetIds)" >> "$GITHUB_OUTPUT"
+          echo "cluster_name=$(get ClusterName)" >> "$GITHUB_OUTPUT"
+          echo "cluster_arn=$(get ClusterArn)" >> "$GITHUB_OUTPUT"
+      - name: CDK deploy sandbox
+        working-directory: infra/data
+        run: |
+          npm run build
+          npx cdk deploy AgentCore-coreAgent-sandbox-us-west-2 \
+            --require-approval never \
+            --context sandboxSecretsArn=${{ vars.SANDBOX_SECRETS_ARN }} \
+            --context sandboxVpcId=${{ steps.svc.outputs.vpc_id }} \
+            --context sandboxAvailabilityZones=${{ steps.svc.outputs.azs }} \
+            --context sandboxPublicSubnetIds=${{ steps.svc.outputs.subnets }} \
+            --context sandboxClusterName=${{ steps.svc.outputs.cluster_name }} \
+            --context sandboxClusterArn=${{ steps.svc.outputs.cluster_arn }} \
+            --context sandboxDomainName=${{ vars.DOMAIN_NAME }} \
+            ${{ vars.ANTHROPIC_SECRETS_ARN && format('--context anthropicSecretsArn={0}', vars.ANTHROPIC_SECRETS_ARN) || '' }}
