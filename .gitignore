@@ -41,3 +41,4 @@ build/
 # Test env runtime state (scripts/testenv)
 .smoke-logs/
 scripts/testenv/.testenv-state.json
+scripts/testenv/integrations/.*-seeded.json
