@@ -39,6 +39,27 @@ class InMemoryStore:
         return list(self._data[namespace][-limit:])
 
 
+# Module-level singleton so main.py and tools.py share ONE InMemoryStore.
+# Same pattern as ``audit.build_audit_store()``.
+_cached_store: InMemoryStore | None = None
+
+
+def build_memory_store() -> InMemoryStore:
+    """Return the module-level InMemoryStore singleton.
+
+    Used for local dev (AGENT_LOCAL_STORES=1) memory writes. Both main.py
+    (post-stream extraction) and tools.py (record_feedback) call this so
+    they share the same in-process dict.
+
+    Production memory goes through AgentCoreMemorySessionManager and never
+    touches this store.
+    """
+    global _cached_store
+    if _cached_store is None:
+        _cached_store = InMemoryStore()
+    return _cached_store
+
+
 
 # ----------------------------------------------------------------------------
 # Extraction (local dev only — production uses built-in strategies)
@@ -96,5 +117,13 @@ def extract_records(
                 "answer": assistant_text,
                 "extracted_via": "faq_in_channel_v0",
             })
+
+    if "reaction_feedback" in rules:
+        # Feedback records are written directly by the reaction_feedback
+        # handler in main.py, not via the extraction pipeline. This rule
+        # entry exists for documentation and for future inline extraction
+        # of implicit signals (e.g. user re-asks the same question →
+        # negative implicit feedback).
+        pass
 
     return records

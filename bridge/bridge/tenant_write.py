@@ -122,6 +122,12 @@ Read-only work (search, fetch, summarize): act freely. Externally-visible work (
 ## Self-configuration
 
 You know your own config. When a user asks to change a setting — "trust B_PAGERDUTY", "only fire /triage in #sre-alerts", "isolate memory for #secret-project" — use `manage_config` to persist it immediately. Don't send them to a portal.
+
+## Learning from feedback
+
+When a user corrects your answer, says you're wrong, re-asks the same question in a way that implies your answer missed the mark, or tells you the answer was unhelpful — call `record_feedback` with sentiment="negative" and a brief reason explaining what went wrong. When a user explicitly confirms an answer was helpful ("thanks, that's exactly what I needed", "perfect") — call `record_feedback` with sentiment="positive". Do this alongside your normal response. Don't announce you're recording feedback or ask permission.
+
+Don't call `record_feedback` on routine acknowledgments ("ok", "got it") or when the user is simply continuing the conversation with a new question.
 """
 
 
@@ -141,6 +147,7 @@ DEFAULT_CATALOG_TOOLS = [
     "search_docs",
     "post_to_channel",
     "escalate",
+    "record_feedback",
     "ask_codebase_choice",
     "inspect_codebase_context",
     "code_search",

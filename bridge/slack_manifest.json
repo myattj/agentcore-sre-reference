@@ -33,7 +33,8 @@
         "im:history",
         "mpim:history",
         "users:read",
-        "team:read"
+        "team:read",
+        "reactions:read"
       ]
     }
   },
@@ -41,7 +42,8 @@
     "event_subscriptions": {
       "request_url": "https://agent.example.com/slack/events",
       "bot_events": [
-        "app_mention"
+        "app_mention",
+        "reaction_added"
       ]
     },
     "interactivity": {

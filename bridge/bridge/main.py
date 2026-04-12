@@ -33,6 +33,7 @@ from .api import api_router
 from .async_dispatcher import dispatch_async
 from .client import AgentCoreClient
 from .dedup import is_duplicate
+from .reaction_feedback import classify_reaction, dispatch_reaction_feedback
 from .gateway_jwt import get_jwks, get_oidc_configuration
 from .sandbox_callback import handle_sandbox_complete, verify_callback_auth
 from .sandbox_progress import handle_sandbox_progress
@@ -228,7 +229,32 @@ async def slack_events(request: Request, background: BackgroundTasks):
         log.info("slack_events: dropping duplicate event_id=%s", event_id)
         return {"ok": True}
 
-    # 5. Parse into InboundMessage + resolve tenant + dispatch.
+    # 5. Reaction feedback: detect reaction_added events before normal
+    #    message parsing. These go through a separate path that fetches
+    #    the bot message from Slack and invokes the agent with a feedback
+    #    payload (no LLM call, no Slack reply).
+    event = body.get("event", {})
+    if event.get("type") == "reaction_added":
+        reaction = event.get("reaction", "")
+        if classify_reaction(reaction) is None:
+            # Not a feedback-signal emoji — drop silently.
+            return {"ok": True}
+        workspace_id = body.get("team_id", "")
+        try:
+            tenant_id = resolve_tenant_id(workspace_id)
+        except KeyError:
+            return {"ok": True}
+        # Pass the full event + workspace_id to the background handler.
+        # The handler fetches the message from Slack and invokes the agent.
+        event_with_team = dict(event)
+        event_with_team["team_id"] = workspace_id
+        background.add_task(
+            dispatch_reaction_feedback, slack, event_with_team, client,
+            tenant_id, _SLACK_APP_ID,
+        )
+        return {"ok": True}
+
+    # 6. Parse into InboundMessage + resolve tenant + dispatch.
     inbound = await slack.parse(request)
     try:
         tenant_id = resolve_tenant_id(inbound.workspace_id)
@@ -243,7 +269,7 @@ async def slack_events(request: Request, background: BackgroundTasks):
         )
         return {"ok": True}
 
-    # 5b. Bot policy filtering — must happen before dispatch to save Bedrock
+    # 6b. Bot policy filtering — must happen before dispatch to save Bedrock
     #     spend on bot loops. Also filter our own app's messages.
     bot_id = inbound.metadata.get("bot_id")
     if bot_id:

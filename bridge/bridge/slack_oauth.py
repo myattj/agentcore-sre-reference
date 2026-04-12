@@ -85,6 +85,7 @@ _SCOPES = ",".join([
     "mpim:history",
     "users:read",
     "team:read",
+    "reactions:read",  # receive reaction_added events for feedback capture
 ])
 
 # State token validity window. 10 minutes is comfortable for users

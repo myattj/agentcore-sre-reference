@@ -1,6 +1,6 @@
-"""Audit log: per-invocation, per-tool-call, and per-propose-PR rows.
+"""Audit log: per-invocation, per-tool-call, per-propose-PR, and per-feedback rows.
 
-Three row types, one table:
+Four row types, one table:
   - row_type="invocation":  one per @app.entrypoint call, with model_id,
     token counts, input/output summaries, total duration.
   - row_type="tool_call":   one per catalog tool invocation, linked to its
@@ -70,6 +70,22 @@ propose_pr:
       status:          "launched" | "success" | "error" | "orphaned"
       pr_url:          present only on status="success"
       error:           present only on status in {"error","orphaned"}
+    }
+
+feedback:
+    {
+      tenant_id:       (PK)
+      sk:              "FB#{iso_ts}#{invocation_id}"
+      row_type:        "feedback"
+      invocation_id:   uuid4 hex (for dedup / correlation)
+      timestamp, created_at
+      user_id:         who reacted (not who originally asked)
+      channel_id, thread_id, workspace_id
+      reaction:        emoji name (e.g. "-1", "thumbsup")
+      sentiment:       "positive" | "negative"
+      bot_message_ts:  Slack ts of the reacted-to bot message
+      question_summary: truncated user question from the thread
+      answer_summary:  truncated bot answer that was reacted to
     }
 """
 from __future__ import annotations

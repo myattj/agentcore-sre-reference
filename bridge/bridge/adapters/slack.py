@@ -456,6 +456,48 @@ class SlackAdapter:
                     log.debug("stream_reply: stopStream cleanup failed", exc_info=True)
             raise
 
+    async def fetch_message(
+        self,
+        workspace_id: str,
+        channel_id: str,
+        message_ts: str,
+    ) -> dict[str, Any] | None:
+        """Fetch a single Slack message by channel + timestamp.
+
+        Calls `conversations.history` with `latest=ts, inclusive=True, limit=1`.
+        Returns the message dict if found, None otherwise. Used by the
+        reaction feedback handler to verify bot authorship and retrieve
+        the message text.
+        """
+        try:
+            tenant_id = resolve_tenant_id(workspace_id)
+        except KeyError:
+            return None
+
+        try:
+            token = get_bot_token(tenant_id)
+        except KeyError:
+            return None
+
+        if not token:
+            return None
+
+        from slack_sdk.web.async_client import AsyncWebClient
+
+        client = AsyncWebClient(token=token)
+        try:
+            resp = await client.conversations_history(
+                channel=channel_id,
+                latest=message_ts,
+                inclusive=True,
+                limit=1,
+            )
+            messages = resp.get("messages", [])
+            return messages[0] if messages else None
+        except Exception:
+            log.debug("fetch_message failed for channel=%s ts=%s", channel_id, message_ts, exc_info=True)
+            return None
+
     async def reply(self, original: InboundMessage, out: OutboundMessage) -> None:
         """Post a reply via Slack `chat.postMessage`.
 
