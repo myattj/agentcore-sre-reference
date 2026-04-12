@@ -134,10 +134,31 @@ These prevent bugs. Full detail + 14 more situational gotchas in `.claude/docs/g
 
 ## Reference files
 
-- **Current scaffold plan** (the source-of-truth for what was built): `~/.claude/plans/temporal-popping-duckling.md`
+- **Forward-looking roadmap**: `BUILD_PLAN.md` (post-week-7 pillar roadmap) + `NORTH_STAR.md` (product vision)
+- **Phase B sandbox v2 plan**: `~/.claude/plans/cached-pondering-feather.md` (Claude Agent SDK inner loop for `propose_pr`)
 - **AgentCore CLI conventions**: `coreAgent/AGENTS.md` (auto-generated; schema-first authority rule)
 - **AgentCore CLI schema types**: `coreAgent/agentcore/.llm-context/*.ts`
 - **Strands docs**: https://strandsagents.com/
 - **AgentCore docs**: https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/
 - **AgentCore Gateway** (BYO tools): https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/gateway.html
 - **AgentCore Memory self-managed strategy**: https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/memory-self-managed-strategies.html
+
+## Skill routing
+
+When the user's request matches an available skill, ALWAYS invoke it using the Skill
+tool as your FIRST action. Do NOT answer directly, do NOT use other tools first.
+The skill has specialized workflows that produce better results than ad-hoc answers.
+
+Key routing rules:
+- Product ideas, "is this worth building", brainstorming → invoke office-hours
+- Bugs, errors, "why is this broken", 500 errors → invoke investigate
+- Ship, deploy, push, create PR → invoke ship
+- QA, test the site, find bugs → invoke qa
+- Code review, check my diff → invoke review
+- Update docs after shipping → invoke document-release
+- Weekly retro → invoke retro
+- Design system, brand → invoke design-consultation
+- Visual audit, design polish → invoke design-review
+- Architecture review → invoke plan-eng-review
+- Save progress, checkpoint, resume → invoke checkpoint
+- Code quality, health check → invoke health
