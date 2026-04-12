@@ -44,6 +44,7 @@
 #      DOMAIN_NAME           = agent.example.com
 #      SLACK_SECRETS_ARN     = arn:aws:secretsmanager:us-west-2:<ACCOUNT>:secret:agentcore/services/slack-<suffix>
 #      BRIDGE_SECRETS_ARN    = arn:aws:secretsmanager:us-west-2:<ACCOUNT>:secret:agentcore/services/bridge-<suffix>
+#      SANDBOX_SECRETS_ARN   = arn:aws:secretsmanager:us-west-2:<ACCOUNT>:secret:agentcore/services/sandbox-<suffix>
 # ──────────────────────────────────────────────────────────────────
 
 name: CI/CD
@@ -172,4 +173,5 @@ jobs:
             --context certificateArn=${{ vars.CERTIFICATE_ARN }} \
             --context domainName=${{ vars.DOMAIN_NAME }} \
             --context slackSecretsArn=${{ vars.SLACK_SECRETS_ARN }} \
-            --context bridgeSecretsArn=${{ vars.BRIDGE_SECRETS_ARN }}
+            --context bridgeSecretsArn=${{ vars.BRIDGE_SECRETS_ARN }} \
+            --context sandboxSecretsArn=${{ vars.SANDBOX_SECRETS_ARN }}
