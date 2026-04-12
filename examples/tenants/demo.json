@@ -86,17 +86,6 @@
   },
   "skills": [
     {
-      "trigger": "/triage",
-      "name": "incident-triage",
-      "prompt_template": "An incident-triage request was made by {user_id} in {channel_id}. Start by calling search_team_history for similar past incidents, then search_docs for matching runbooks. Summarize likely causes and the next 2\u20133 steps. If the severity is unclear, ask the reporter.",
-      "required_tools": [
-        "search_team_history",
-        "search_docs",
-        "read_thread_context"
-      ],
-      "channels": []
-    },
-    {
       "trigger": "(?i)\\b(schema|dbt|pipeline|warehouse)\\b",
       "name": "data-qa",
       "prompt_template": "The user is asking a data-platform question. Before answering, call search_docs (data namespace first) and search_team_history for prior answers. Cite your sources inline and prefer short, direct answers.",

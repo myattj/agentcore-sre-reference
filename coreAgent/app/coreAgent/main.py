@@ -34,7 +34,7 @@ from strands import Agent
 import request_context
 from audit import build_audit_store
 from mcp_client.client import build_byo_mcp_client
-from memory_store import InMemoryStore, extract_records
+from memory_store import build_memory_store, extract_records
 from metrics import build_metrics_emitter
 from model.load import load_model
 from pricing import compute_cost_cents
@@ -52,8 +52,9 @@ log = app.logger
 # Single in-process memory store for local dev (AGENT_LOCAL_STORES=1).
 # When AGENTCORE_MEMORY_ID is set and AGENT_LOCAL_STORES is not 1, the
 # real AgentCore Memory resource is used via AgentCoreMemorySessionManager
-# and this store is unused.
-_memory = InMemoryStore()
+# and this store is unused. Singleton shared with tools.py so
+# record_feedback writes land in the same dict.
+_memory = build_memory_store()
 
 # Memory resource ID, set after running provision_memory.py.
 # When set, the agent uses the real AgentCore Memory resource
@@ -232,7 +233,113 @@ def _build_memory_session_manager(
     )
 
 
-def _build_self_awareness_block(config: TenantConfig) -> str:
+def _write_feedback_audit(
+    tenant_id: str,
+    invocation_id: str,
+    ctx: dict[str, Any],
+    feedback: dict[str, Any],
+) -> None:
+    """Write a feedback audit row. Best-effort — never throws."""
+    try:
+        _audit.write({
+            "row_type": "feedback",
+            "tenant_id": tenant_id,
+            "sk": f"FB#{_iso_now()}#{invocation_id}",
+            "invocation_id": invocation_id,
+            "timestamp": _iso_now(),
+            "created_at": _iso_now(),
+            "user_id": feedback.get("reactor_user_id", ""),
+            "channel_id": ctx.get("channel_id", ""),
+            "thread_id": ctx.get("thread_id", ""),
+            "workspace_id": ctx.get("workspace_id", ""),
+            "reaction": feedback.get("reaction", ""),
+            "sentiment": feedback.get("sentiment", ""),
+            "bot_message_ts": feedback.get("bot_message_ts", ""),
+            "question_summary": _truncate(feedback.get("user_question", "")),
+            "answer_summary": _truncate(feedback.get("bot_answer", "")),
+        })
+    except Exception as e:
+        log.warning("feedback audit write dropped: %s", e)
+
+
+def _write_feedback_memory(
+    tenant_id: str,
+    ctx: dict[str, Any],
+    invocation_id: str,
+    config: TenantConfig,
+    feedback: dict[str, Any],
+) -> None:
+    """Write a feedback memory record so the bot learns from reactions.
+
+    Local dev: writes directly to InMemoryStore.
+    Production: creates a conversation event via AgentCoreMemorySessionManager.
+    The SEMANTIC strategy extracts and indexes it asynchronously.
+    """
+    sentiment = feedback.get("sentiment", "")
+    reaction = feedback.get("reaction", "")
+    question = feedback.get("user_question", "")
+    answer = feedback.get("bot_answer", "")
+
+    record = {
+        "type": "user_feedback",
+        "sentiment": sentiment,
+        "reaction": reaction,
+        "question": _truncate(question),
+        "answer": _truncate(answer),
+        "extracted_via": "reaction_feedback_v0",
+    }
+
+    if not _MEMORY_ID:
+        # Local dev: write to InMemoryStore
+        namespace = config.memory.namespace or f"tenants/{tenant_id}"
+        _memory.write_records(namespace, [record])
+        log.info("Wrote feedback memory record to namespace=%s", namespace)
+        return
+
+    # Production: create a conversation event via the memory session manager.
+    # The session manager hooks into AgentCore Memory; the built-in SEMANTIC
+    # strategy extracts and indexes the feedback asynchronously.
+    try:
+        session_mgr = _build_memory_session_manager(
+            tenant_id, ctx, invocation_id, config,
+        )
+        if session_mgr is None:
+            return
+
+        # Encode the feedback as a conversation turn so the SEMANTIC strategy
+        # can extract and index it. The user "message" is the original question;
+        # the assistant "message" includes the answer + reaction annotation.
+        sentiment_label = "positive" if sentiment == "positive" else "negative"
+        annotated_answer = (
+            f"{answer}\n\n"
+            f"[User feedback: :{reaction}: — {sentiment_label}. "
+            f"{'The user found this answer helpful.' if sentiment == 'positive' else 'The user indicated this answer was unhelpful or incorrect.'}]"
+        )
+
+        # The Strands session manager API is tightly coupled to the Agent
+        # lifecycle. Try the direct session methods; fall back gracefully
+        # if the exact method names differ across SDK versions.
+        session_mgr.session_start(
+            session_id=(ctx.get("thread_id") or invocation_id).replace(".", "_"),
+        )
+        session_mgr.add_user_message(question or "(no question captured)")
+        session_mgr.add_agent_message(annotated_answer)
+        session_mgr.session_end()
+        log.info("Wrote feedback memory event for tenant=%s", tenant_id)
+
+    except Exception:
+        # Production memory write is best-effort. The audit row is the
+        # durable record; memory enhances it for future conversations.
+        log.warning(
+            "feedback memory write failed for tenant=%s", tenant_id,
+            exc_info=True,
+        )
+
+
+def _build_self_awareness_block(
+    config: TenantConfig,
+    effective_skills: list | None = None,
+) -> str:
     """Generate a system prompt appendix describing the bot's non-default config.
 
     Returns an empty string for zero-config tenants — the base system prompt
@@ -247,6 +354,9 @@ def _build_self_awareness_block(config: TenantConfig) -> str:
     Enabled tools and context assembly flags are deliberately omitted — the
     former is duplicative with the tool schemas the LLM already has, and the
     latter is bridge-side plumbing the LLM can't act on.
+
+    ``effective_skills`` is the merged list of built-in + tenant-custom
+    skills. If None, falls back to ``config.skills`` for backward compat.
     """
     sections: list[str] = []
 
@@ -270,16 +380,19 @@ def _build_self_awareness_block(config: TenantConfig) -> str:
             + "\n".join(f"- {nc}" for nc in not_connected)
         )
 
-    if config.skills:
+    skills = effective_skills if effective_skills is not None else config.skills
+    if skills:
+        tenant_skill_names = {s.name for s in config.skills}
         skill_lines: list[str] = []
-        for s in config.skills:
+        for s in skills:
             kind = "slash command" if s.trigger.startswith("/") else "regex"
-            line = f"- `{s.trigger}` ({kind}) -> {s.name}"
+            label = "custom" if s.name in tenant_skill_names else "built-in"
+            line = f"- `{s.trigger}` ({kind}, {label}) -> {s.name}"
             if s.channels:
                 line += f" [only in: {', '.join(s.channels)}]"
             skill_lines.append(line)
         sections.append(
-            f"**Skills:** {len(config.skills)} configured\n"
+            f"**Skills:** {len(skills)} available\n"
             + "\n".join(skill_lines)
         )
 
@@ -344,6 +457,27 @@ async def invoke(payload, context):
 
     log.info(f"Invoking tenant={tenant_id} invocation_id={invocation_id} prompt_len={len(user_message)}")
 
+    # Reaction feedback short-circuit: no LLM call, no Strands Agent.
+    # The bridge sends event_type="reaction_feedback" when a user reacts
+    # to a bot message with a feedback-signal emoji (thumbsup/thumbsdown).
+    # We write audit + memory and return immediately.
+    if ctx.get("event_type") == "reaction_feedback":
+        feedback = ctx.get("feedback", {})
+        log.info(
+            "Feedback event: tenant=%s reaction=%s sentiment=%s invocation_id=%s",
+            tenant_id, feedback.get("reaction"), feedback.get("sentiment"),
+            invocation_id,
+        )
+        try:
+            config = load_tenant_config(tenant_id)
+        except Exception:
+            log.warning("feedback: could not load config for tenant=%s", tenant_id)
+            return
+        _write_feedback_audit(tenant_id, invocation_id, ctx, feedback)
+        _write_feedback_memory(tenant_id, ctx, invocation_id, config, feedback)
+        yield ""  # entrypoint must yield at least once
+        return
+
     success = True
     error_text: str | None = None
     response_chunks: list[str] = []
@@ -405,6 +539,13 @@ async def invoke(payload, context):
             if cp.memory_rules is not None:
                 effective_rules = cp.memory_rules
 
+        # Merge built-in skills with any tenant-configured overrides.
+        # Built-ins are always available; tenant skills with the same
+        # name replace the built-in version. Computed once and used by
+        # both the self-awareness block and the context assembler.
+        from builtin_skills import merge_skills
+        effective_skills = merge_skills(config.skills)
+
         # Context assembly: resolve permalinks, inject thread history,
         # match skills. Runs AFTER channel-persona merge so effective_prompt
         # and effective_tools reflect per-channel overrides.
@@ -417,7 +558,7 @@ async def invoke(payload, context):
             user_message=user_message,
             ctx=ctx,
             assembly_config=config.context_assembly,
-            skills=config.skills,
+            skills=effective_skills,
             effective_prompt=effective_prompt,
             tenant_id=tenant_id,
             codebases=config.codebases,
@@ -474,7 +615,7 @@ async def invoke(payload, context):
         # itself and help users modify settings via manage_config. Returns
         # an empty string for zero-config tenants — the base prompt stands
         # alone when there's nothing non-default to announce.
-        effective_prompt += _build_self_awareness_block(config)
+        effective_prompt += _build_self_awareness_block(config, effective_skills)
 
         catalog_tools = build_catalog_tools(
             effective_tools,

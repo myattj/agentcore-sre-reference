@@ -1,0 +1,141 @@
+{
+  "tenant_id": "sre-ops",
+  "model_id": "global.anthropic.claude-sonnet-4-6",
+  "system_prompt": "You are the SRE team assistant. You help with incident response, oncall operations, deploy monitoring, and operational knowledge management. Be direct, precise, and concise — your users are engineers working under time pressure. When an incident is active, prioritize actionable next steps over analysis. When things are calm, be thorough. Always check team history and docs before answering operational questions. When you reference past incidents or runbooks, cite the source so the team can verify.",
+  "catalog": {
+    "allowed_tools": [
+      "search_team_history",
+      "read_thread_context",
+      "search_docs",
+      "post_to_channel",
+      "escalate",
+      "code_list_commits",
+      "code_search",
+      "code_read_file"
+    ],
+    "tool_config": {}
+  },
+  "byo": {
+    "enabled": false,
+    "gateway_endpoint": null,
+    "gateway_auth": null,
+    "connected_integrations": []
+  },
+  "memory": {
+    "triggers": {
+      "message_count": 6,
+      "token_count": 1000,
+      "idle_timeout_seconds": 1800
+    },
+    "namespace": "tenants/sre-ops",
+    "extraction": {
+      "enabled": true,
+      "rules": [
+        "facts",
+        "user_preferences",
+        "faq_in_channel"
+      ]
+    }
+  },
+  "heartbeat": {
+    "busy_threshold": 1,
+    "max_background_seconds": 3600
+  },
+  "cost_cap": {
+    "monthly_limit_dollars": 100.0,
+    "enabled": true
+  },
+  "channels": {
+    "C_INCIDENTS": {
+      "system_prompt": "You are in the incident response channel. Prioritize speed and clarity. Every message should move the incident toward resolution. Use structured formats. When an alert fires here, proactively assess severity and search for relevant runbooks.",
+      "allowed_tools": [
+        "search_team_history",
+        "search_docs",
+        "read_thread_context",
+        "escalate",
+        "post_to_channel"
+      ],
+      "memory_rules": [
+        "facts"
+      ]
+    },
+    "C_ONCALL": {
+      "system_prompt": "You are in the oncall channel. Help with shift handoffs, alert triage, and operational questions. Check team history before answering — someone may have already solved this.",
+      "allowed_tools": [
+        "search_team_history",
+        "search_docs",
+        "read_thread_context"
+      ],
+      "memory_rules": [
+        "faq_in_channel"
+      ]
+    },
+    "C_DEPLOYS": {
+      "system_prompt": "You are in the deploy channel. When a deploy is announced, proactively surface what changed, what to watch, and any recent incidents with the affected service.",
+      "allowed_tools": [
+        "search_team_history",
+        "search_docs",
+        "read_thread_context",
+        "code_list_commits",
+        "code_search"
+      ],
+      "memory_rules": []
+    },
+    "C_SRE_GENERAL": {
+      "system_prompt": "You are in the SRE general channel. Answer operational questions, help find runbooks and documentation, and assist with knowledge sharing. Search docs and team history before responding.",
+      "allowed_tools": [
+        "search_team_history",
+        "search_docs",
+        "read_thread_context"
+      ],
+      "memory_rules": [
+        "faq_in_channel"
+      ]
+    }
+  },
+  "bot_policy": {
+    "trusted_bot_ids": [],
+    "open_channels": []
+  },
+  "context_assembly": {
+    "resolve_permalinks": true,
+    "inject_thread_history": true,
+    "thread_history_depth": 50,
+    "max_permalinks": 5
+  },
+  "skills": [],
+  "escalation": {
+    "routes": [
+      {
+        "team_name": "sre",
+        "channel_id": "C_SRE_ESCALATIONS",
+        "description": "Site Reliability Engineering — infrastructure, availability, incidents",
+        "contacts": []
+      },
+      {
+        "team_name": "platform",
+        "channel_id": "C_PLATFORM_ESCALATIONS",
+        "description": "Platform Engineering — build systems, CI/CD, developer tools",
+        "contacts": []
+      },
+      {
+        "team_name": "database",
+        "channel_id": "C_DB_ESCALATIONS",
+        "description": "Database team — MySQL, Postgres, Redis, data store issues",
+        "contacts": []
+      },
+      {
+        "team_name": "security",
+        "channel_id": "C_SECURITY",
+        "description": "Security — access control, vulnerabilities, compliance",
+        "contacts": []
+      },
+      {
+        "team_name": "networking",
+        "channel_id": "C_NETWORKING",
+        "description": "Networking — DNS, load balancers, CDN, connectivity issues",
+        "contacts": []
+      }
+    ]
+  }
+}
