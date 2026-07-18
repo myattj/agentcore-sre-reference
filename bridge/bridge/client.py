@@ -35,29 +35,11 @@ log = logging.getLogger(__name__)
 
 _ACCOUNT_RE = re.compile(r"^[0-9]{12}$")
 _REGION_RE = re.compile(r"^[a-z]{2}(?:-[a-z0-9]+)+-[0-9]+$")
-_SUPPORTED_AGENTCORE_REGIONS = frozenset(
-    {
-        "ap-northeast-1",
-        "ap-northeast-2",
-        "ap-south-1",
-        "ap-southeast-1",
-        "ap-southeast-2",
-        "ap-southeast-5",
-        "ap-southeast-7",
-        "ca-central-1",
-        "eu-central-1",
-        "eu-north-1",
-        "eu-south-1",
-        "eu-south-2",
-        "eu-west-1",
-        "eu-west-2",
-        "eu-west-3",
-        "sa-east-1",
-        "us-east-1",
-        "us-east-2",
-        "us-gov-west-1",
-        "us-west-2",
-    }
+_GOVCLOUD_REGION_RE = re.compile(r"^us-gov-(?:east|west)-[0-9]+$")
+_COMMERCIAL_REGION_RE = re.compile(
+    r"^(?:af-south|ap-(?:east|northeast|south|southeast)|"
+    r"ca-(?:central|west)|eu-(?:central|north|south|west)|il-central|"
+    r"me-(?:central|south)|mx-central|sa-east|us-(?:east|west))-[0-9]+$"
 )
 _RUNTIME_RESOURCE_RE = re.compile(
     r"^(?:"
@@ -69,16 +51,19 @@ _RUNTIME_RESOURCE_RE = re.compile(
 
 
 def _expected_partition(region: str) -> str:
+    if _GOVCLOUD_REGION_RE.fullmatch(region):
+        return "aws-us-gov"
     if region.startswith("cn-"):
         raise RuntimeError(
             "AWS China is not a supported AgentCore Runtime target for this "
             "reference deployment."
         )
-    if region not in _SUPPORTED_AGENTCORE_REGIONS:
-        raise RuntimeError(
-            f"AWS region {region!r} is not supported by the pinned AgentCore CLI."
-        )
-    return "aws-us-gov" if region == "us-gov-west-1" else "aws"
+    if _COMMERCIAL_REGION_RE.fullmatch(region):
+        return "aws"
+    raise RuntimeError(
+        f"AWS region {region!r} is outside the supported commercial and "
+        "GovCloud partitions."
+    )
 
 
 def _runtime_region(runtime_arn: str) -> str:

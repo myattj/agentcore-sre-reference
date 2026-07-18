@@ -1,6 +1,7 @@
-.PHONY: help setup doctor aws-doctor aws-configure check demo
+.PHONY: help setup doctor aws-doctor aws-configure agent-deploy check demo
 
 AWS_CONFIGURE_ARGS ?=
+AGENTCORE_DEPLOY_ARGS ?=
 
 help:
 	@printf '%s\n' \
@@ -9,6 +10,7 @@ help:
 	  '  make doctor  Check required and optional developer tools' \
 	  '  make aws-doctor Verify the selected AWS identity, region, and AgentCore access' \
 	  '  make aws-configure Verify AWS and write the ignored AgentCore deployment target' \
+	  '  make agent-deploy Validate and deploy AgentCore with the selected AWS target' \
 	  '  make demo    Run the bridge + web UI with a no-cloud incident dashboard' \
 	  '  make check   Run the same local validation gates used by CI' \
 	  '' \
@@ -26,6 +28,9 @@ aws-doctor:
 
 aws-configure:
 	@./scripts/configure_aws.py $(AWS_CONFIGURE_ARGS)
+
+agent-deploy:
+	@./scripts/deploy_agent.sh $(AGENTCORE_DEPLOY_ARGS)
 
 check:
 	@./scripts/check.sh

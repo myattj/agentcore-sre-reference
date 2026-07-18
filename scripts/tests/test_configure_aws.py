@@ -115,7 +115,7 @@ class RegionResolutionTests(unittest.TestCase):
         with self.assertRaisesRegex(
             configure_aws.AwsConfigurationError, "pinned AgentCore CLI"
         ):
-            configure_aws._resolve_region("ap-east-1", None, {})
+            configure_aws._resolve_region("eu-west-2", None, {})
 
 
 class IdentityTests(unittest.TestCase):

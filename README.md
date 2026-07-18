@@ -105,8 +105,9 @@ disagree, setup stops with a repair instruction instead of guessing.
 You need Git, Python **3.13**, [uv](https://docs.astral.sh/uv/), Node.js **22+**,
 and npm. <code>make doctor</code> checks each one, distinguishes required tools
 from optional cloud tooling, and prints an exact install path for anything
-missing. The scripts support <code>--help</code> and work with the Bash versions
-shipped by current macOS and mainstream Linux distributions.
+missing. The four developer entrypoints listed below support <code>--help</code>
+and work with the Bash versions shipped by current macOS and mainstream Linux
+distributions.
 Make is only a convenience wrapper: if it is not installed, run the matching
 <code>./scripts/doctor.sh</code>, <code>./scripts/setup.sh</code>,
 <code>./scripts/demo.sh</code>, or <code>./scripts/check.sh</code> entrypoint
@@ -153,17 +154,22 @@ scripts, and the manual GitHub Actions release jobs. The fallback for examples
 and credential-free synth is <code>us-west-2</code>.
 
 This does not mean every AWS partition and region has the same service set. The
-full reference path supports any commercial AWS account in a region accepted
-by the pinned AgentCore CLI where Runtime, the chosen Bedrock model, Gateway,
-Memory, and the other enabled features are available. The exact release
-allowlist is tracked in
-[<code>scripts/agentcore_regions.txt</code>](./scripts/agentcore_regions.txt);
-it is intentionally narrower than the set of syntactically valid AWS region
-names. The CDK policies are partition-aware and can synthesize
-for GovCloud, but the default global Bedrock model and optional AgentCore
-features must be replaced or disabled there. AWS China is not a supported full
-deployment target; neither are isolated or other sovereign partitions outside
-commercial AWS and GovCloud. Check the current
+complete CLI-driven release path supports any commercial AWS account in one of
+the nine regions accepted by the pinned AgentCore CLI, provided Runtime, the
+chosen Bedrock model, Gateway, Memory, and the other enabled features are
+available there. That exact release allowlist is tracked in
+[<code>scripts/agentcore_cli_regions.txt</code>](./scripts/agentcore_cli_regions.txt)
+and is kept in sync with the CLI schema checked into this repository.
+
+That nine-region list is a tooling boundary, not the complete AgentCore service
+catalog. AgentCore Runtime is available in additional commercial regions and
+in GovCloud. The bridge, runtime resolver, and hand-authored CDK validation can
+therefore attach to an existing Runtime or synthesize infrastructure across the
+broader commercial and GovCloud partitions. <code>make aws-configure</code> and
+<code>make agent-deploy</code> still fail closed outside the pinned CLI's nine
+regions. The default global Bedrock model and optional AgentCore features must
+be replaced or disabled for GovCloud. AWS China, isolated, and other sovereign
+partitions are not supported. Check the current
 [AgentCore region matrix](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/agentcore-regions.html)
 before spending money. A region choice is not, by itself, a privacy or
 compliance guarantee.
@@ -262,7 +268,8 @@ There is no single safe <code>deploy everything</code> command. A real deploymen
 4. If you enable GitHub App code access, explicitly bind each numeric installation ID to the intended tenant through the privileged approval endpoint. Tenant sessions cannot create or change <code>codebases.github_installation_id</code>.
 5. Provision Gateway targets and credentials for only the integrations you intend to expose.
 6. Treat the Fargate PR sandbox in [<code>infra/sandbox/</code>](./infra/sandbox/) as hostile code execution and harden it before enabling <code>propose_pr</code>.
-7. Set an HTTPS <code>DASHBOARD_BASE_URL</code> if you enable dashboards.
+7. Set <code>DOMAIN_NAME</code> if you enable dashboards; the deployment wrapper
+   injects its HTTPS origin as <code>DASHBOARD_BASE_URL</code> for the runtime.
 
 For GitHub Actions deployment, set the repository variable
 <code>AWS_REGION</code> to the same region as the configured OIDC role and every

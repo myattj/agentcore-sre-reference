@@ -17,6 +17,7 @@ uv.lock.bak
 cdk.out/
 cdk.out.*/
 cdk.context.json
+coreAgent/agentcore/.agentcore-deploy.lock/
 
 # Node
 node_modules/

@@ -12,7 +12,7 @@
 #
 # Deploy (manual workflow dispatch only, with deploy_production=true):
 #   - Data + observability stacks first
-#   - Agent runtime via `agentcore deploy`
+#   - Agent runtime via `scripts/deploy_agent.sh`
 #   - Bridge + onboarding Fargate services via CDK
 #   - Experimental PR sandbox only with a second explicit opt-in
 #
@@ -346,7 +346,7 @@ jobs:
           DOMAIN_NAME: ${{ vars.DOMAIN_NAME }}
         run: |
           missing=0
-          if ! grep -Fxq -- "$DEPLOY_REGION" scripts/agentcore_regions.txt; then
+          if ! grep -Fxq -- "$DEPLOY_REGION" scripts/agentcore_cli_regions.txt; then
             echo "::error::AWS_REGION is not supported by the pinned AgentCore CLI: $DEPLOY_REGION"
             missing=1
           fi
@@ -426,47 +426,24 @@ jobs:
           cache-dependency-path: coreAgent/agentcore/cdk/package-lock.json
       - run: npm install -g @aws/agentcore@0.24.1
       - run: cd coreAgent/agentcore/cdk && npm ci
-      - name: Configure portable runtime environment
+      - name: Write portable AgentCore target
         working-directory: coreAgent
-        env:
-          GITHUB_APP_ID: ${{ vars.PLATFORM_GITHUB_APP_ID }}
-          DOMAIN_NAME: ${{ vars.DOMAIN_NAME }}
-          AGENTCORE_MEMORY_ID: ${{ vars.AGENTCORE_MEMORY_ID }}
-          AGENTCORE_SEMANTIC_STRATEGY_ID: ${{ vars.AGENTCORE_SEMANTIC_STRATEGY_ID }}
-          AGENTCORE_USER_PREF_STRATEGY_ID: ${{ vars.AGENTCORE_USER_PREF_STRATEGY_ID }}
-          DEPLOY_EXPERIMENTAL_SANDBOX: ${{ inputs.deploy_experimental_sandbox }}
         run: |
           set -euo pipefail
           account_id=$(aws sts get-caller-identity --query Account --output text)
           jq --arg account "$account_id" --arg region "$DEPLOY_REGION" \
             '.[0].account = $account | .[0].region = $region' \
             agentcore/aws-targets.example.json > agentcore/aws-targets.json
-          add_env() {
-            local name="$1"
-            local value="$2"
-            if [ -n "$value" ]; then
-              jq --arg name "$name" --arg value "$value" \
-                '.runtimes[0].envVars = ((.runtimes[0].envVars // []) | map(select(.name != $name)) + [{name: $name, value: $value}])' \
-                agentcore/agentcore.json > agentcore/agentcore.json.tmp
-              mv agentcore/agentcore.json.tmp agentcore/agentcore.json
-            fi
-          }
-          add_env AWS_REGION "$DEPLOY_REGION"
-          add_env GITHUB_APP_ID "$GITHUB_APP_ID"
-          if [ -n "$DOMAIN_NAME" ]; then
-            add_env DASHBOARD_BASE_URL "https://$DOMAIN_NAME"
-          fi
-          add_env AGENTCORE_MEMORY_ID "$AGENTCORE_MEMORY_ID"
-          add_env AGENTCORE_SEMANTIC_STRATEGY_ID "$AGENTCORE_SEMANTIC_STRATEGY_ID"
-          add_env AGENTCORE_USER_PREF_STRATEGY_ID "$AGENTCORE_USER_PREF_STRATEGY_ID"
-          if [ "$DEPLOY_EXPERIMENTAL_SANDBOX" = "true" ]; then
-            add_env ENABLE_EXPERIMENTAL_PR_SANDBOX "1"
-          fi
-          jq -e . agentcore/agentcore.json >/dev/null
-          agentcore validate
-      - name: agentcore deploy
-        working-directory: coreAgent
-        run: agentcore deploy
+      - name: Validate and deploy AgentCore runtime
+        env:
+          AWS_REGION: ${{ env.DEPLOY_REGION }}
+          GITHUB_APP_ID: ${{ vars.PLATFORM_GITHUB_APP_ID }}
+          DOMAIN_NAME: ${{ vars.DOMAIN_NAME }}
+          AGENTCORE_MEMORY_ID: ${{ vars.AGENTCORE_MEMORY_ID }}
+          AGENTCORE_SEMANTIC_STRATEGY_ID: ${{ vars.AGENTCORE_SEMANTIC_STRATEGY_ID }}
+          AGENTCORE_USER_PREF_STRATEGY_ID: ${{ vars.AGENTCORE_USER_PREF_STRATEGY_ID }}
+          DEPLOY_EXPERIMENTAL_SANDBOX: ${{ inputs.deploy_experimental_sandbox }}
+        run: bash scripts/deploy_agent.sh --yes
       - name: Resolve deployed AgentCore Runtime ARN
         id: resolve-runtime
         env:

@@ -47,12 +47,15 @@ access policies. The sandbox stack adds its own access policy.
 - AWS Secrets Manager entries for Slack and bridge secrets
 
 AgentCore, Bedrock model, Gateway, and Memory availability varies by AWS region.
-Verify current support and pricing before choosing a region. The reference
-validates commercial AWS and GovCloud targets; AWS China, isolated, and other
-sovereign partitions are outside its supported deployment boundary. The full
-deployment workflow also requires a region listed in
-[<code>scripts/agentcore_regions.txt</code>](../../scripts/agentcore_regions.txt),
-matching the pinned AgentCore CLI schema.
+Verify current support and pricing before choosing a region. The hand-authored
+CDK validates and synthesizes commercial AWS and GovCloud targets; AWS China,
+isolated, and other sovereign partitions are outside its supported boundary.
+The complete CLI-driven deployment workflow is narrower: it requires one of
+the nine regions in
+[<code>scripts/agentcore_cli_regions.txt</code>](../../scripts/agentcore_cli_regions.txt),
+matching the pinned AgentCore CLI schema. Existing Runtime ARNs in other current
+commercial or GovCloud service regions can still be validated by the bridge,
+runtime resolver, and CDK without claiming that the pinned CLI can deploy them.
 
 From the repository root, select and verify the AWS identity once. Named
 profiles, AWS SSO, environment credentials, and workload roles all use the

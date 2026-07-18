@@ -105,6 +105,7 @@ tokens, private keys, resource-specific ARNs, or deployed AgentCore state.
 ## Deployment note
 
 Edit `coreAgent/agentcore/agentcore.json`, not the generated CDK under
-`coreAgent/agentcore/cdk/`. Validate from `coreAgent/` with
-`agentcore validate`; review IAM, memory IDs, Gateway endpoints, model access,
-and cost controls before running `agentcore deploy`.
+`coreAgent/agentcore/cdk/`. From the repository root, run `make aws-configure`
+and `make agent-deploy`; the wrapper validates and deploys with the selected
+region, then restores the tracked manifest. Review IAM, memory IDs, Gateway
+endpoints, model access, and cost controls before deploying.

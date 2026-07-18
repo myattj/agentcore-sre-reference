@@ -67,7 +67,7 @@ Important environment variables include:
 | <code>AGENTCORE_SEMANTIC_STRATEGY_ID</code> / <code>AGENTCORE_USER_PREF_STRATEGY_ID</code> | Optional memory strategies |
 | <code>GITHUB_APP_ID</code> | GitHub App used by codebase workflows |
 | <code>SANDBOX_JOBS_TABLE</code> | Sandbox job coordination table |
-| <code>DASHBOARDS_TABLE</code> / <code>DASHBOARD_BASE_URL</code> | Temporary dashboard publishing |
+| <code>DASHBOARDS_TABLE</code> / <code>DOMAIN_NAME</code> (deploy wrapper) / <code>DASHBOARD_BASE_URL</code> (runtime) | Temporary dashboard publishing; the wrapper derives the HTTPS runtime URL from the domain |
 | <code>AWS_REGION</code> | AWS region for Bedrock and AgentCore resources |
 
 Never put private keys or tokens in <code>agentcore.json</code>. Use AWS Secrets
@@ -81,10 +81,7 @@ Validate and deploy the runtime from the repository root:
 export AWS_PROFILE=my-sandbox-profile  # omit for the default credential chain
 export AWS_REGION=eu-west-1
 make aws-configure
-cd coreAgent
-agentcore validate
-agentcore deploy
-cd ..
+make agent-deploy
 REGION="$AWS_REGION" bash infra/data/scripts/attach_agent_policy.sh
 ~~~
 
@@ -93,7 +90,19 @@ AgentCore control plane is reachable in the selected region, and writes only the
 ignored <code>agentcore/aws-targets.json</code>. It never copies an account ID
 into the tracked runtime manifest. The region must appear in the pinned CLI
 allowlist at
-[<code>scripts/agentcore_regions.txt</code>](../scripts/agentcore_regions.txt).
+[<code>scripts/agentcore_cli_regions.txt</code>](../scripts/agentcore_cli_regions.txt).
+The deployment wrapper temporarily injects the selected region and other
+non-secret runtime settings into <code>agentcore.json</code>, runs validation and
+deployment, and atomically restores the tracked manifest on success, failure,
+or a trappable signal. It also rejects concurrent deployments.
+
+<code>SIGKILL</code> cannot run cleanup. If a killed process leaves
+<code>coreAgent/agentcore/.agentcore-deploy.lock/</code>, first confirm that no
+AgentCore deployment is still running. If the lock contains
+<code>agentcore.json.original</code>, move that file back to
+<code>coreAgent/agentcore/agentcore.json</code>; then remove the lock's PID file
+and any rendered temporary manifest before removing the empty directory. Do not
+simply delete a lock that still holds the original manifest.
 
 Provision memory separately from <code>infra/data</code> with
 <code>uv run --with boto3 python infra/data/scripts/provision_memory.py

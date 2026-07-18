@@ -202,8 +202,17 @@ class ResolveAgentRuntimeTests(unittest.TestCase):
             [self.runtime(RUNTIME_ONE)],
             region="us-iso-east-1",
         )
-        self.assertEqual(result.returncode, 2)
-        self.assertIn("pinned AgentCore CLI", result.stderr)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("partition does not match", result.stderr)
+
+    def test_existing_runtime_beyond_pinned_cli_regions_can_be_resolved(self) -> None:
+        runtime_arn = RUNTIME_ONE.replace(REGION, "eu-west-2")
+        result = self.run_resolver(
+            [self.runtime(runtime_arn)],
+            region="eu-west-2",
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertEqual(result.stdout.strip(), runtime_arn)
 
 
 if __name__ == "__main__":

@@ -12,20 +12,14 @@
 
 set -euo pipefail
 
-SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 DEFAULT_MANIFEST="$SCRIPT_DIR/../coreAgent/agentcore/agentcore.json"
-SUPPORTED_REGIONS_FILE="$SCRIPT_DIR/agentcore_regions.txt"
 AWS_REGION="${AWS_REGION:-${AWS_DEFAULT_REGION:-}}"
 RUNTIME_NAME="${RUNTIME_NAME:-}"
 RUNTIME_ARN_OVERRIDE="${RUNTIME_ARN_OVERRIDE:-}"
 
 if [[ ! "$AWS_REGION" =~ ^[a-z]{2}(-[a-z0-9]+)+-[0-9]+$ ]]; then
   echo "resolve-agent-runtime: AWS_REGION is required and must be a valid region" >&2
-  exit 2
-fi
-if [[ ! -r "$SUPPORTED_REGIONS_FILE" ]] || \
-   ! grep -Fxq -- "$AWS_REGION" "$SUPPORTED_REGIONS_FILE"; then
-  echo "resolve-agent-runtime: AWS_REGION is not supported by the pinned AgentCore CLI" >&2
   exit 2
 fi
 command -v aws >/dev/null 2>&1 || {
@@ -60,6 +54,9 @@ if [[ ! "$RUNTIME_NAME" =~ ^[A-Za-z][A-Za-z0-9_]{0,47}$ ]]; then
   echo "resolve-agent-runtime: RUNTIME_NAME is invalid" >&2
   exit 2
 fi
+commercial_region_pattern='^(af-south|ap-(east|northeast|south|southeast)|ca-(central|west)|eu-(central|north|south|west)|il-central|me-(central|south)|mx-central|sa-east|us-(east|west))-[0-9]+$'
+govcloud_region_pattern='^us-gov-(east|west)-[0-9]+$'
+
 identity_json=$(aws sts get-caller-identity \
   --region "$AWS_REGION" \
   --output json \
@@ -74,13 +71,13 @@ partition="${caller_arn#arn:}"
 partition="${partition%%:*}"
 case "$partition" in
   aws)
-    if [[ "$AWS_REGION" == "us-gov-west-1" ]]; then
+    if [[ ! "$AWS_REGION" =~ $commercial_region_pattern ]]; then
       echo "resolve-agent-runtime: STS partition does not match AWS_REGION" >&2
       exit 1
     fi
     ;;
   aws-us-gov)
-    if [[ "$AWS_REGION" != "us-gov-west-1" ]]; then
+    if [[ ! "$AWS_REGION" =~ $govcloud_region_pattern ]]; then
       echo "resolve-agent-runtime: STS partition does not match AWS_REGION" >&2
       exit 1
     fi
