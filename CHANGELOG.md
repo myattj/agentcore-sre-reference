@@ -2,6 +2,17 @@
 
 This changelog begins with the public archive snapshot. The public repository preserves meaningful development history after removing private planning artifacts, deployment fingerprints, and personal commit metadata.
 
+## Unreleased
+
+### AWS portability
+
+- Added a read-only STS and AgentCore preflight plus an ignored, mode-0600 deployment-target generator for named profiles, SSO, environment credentials, and workload roles.
+- Threaded one selected region through AgentCore, the bridge, CDK, sandbox helpers, and manual GitHub Actions deployments, with fail-closed ARN account/partition/region validation.
+- Replaced commercial-partition IAM ARN literals with partition-aware CDK formatting and verified commercial and GovCloud synthesis.
+- Kept deployment targets aligned with the pinned AgentCore CLI's explicit region schema.
+- Validated both current versioned AgentCore Runtime ARNs and legacy runtime IDs during bridge startup, CDK synthesis, and deployment-time runtime discovery.
+- Made source-archive verification ignore generated local secrets and build output while preserving full-history secret scanning for Git clones.
+
 ## 0.1.0 — 2026-07-17
 
 This is an open-source archive milestone, not a promise of a hosted service, active roadmap, or SemVer support policy.

@@ -24,9 +24,16 @@ import pytest
 # via `AgentCoreClient.__init__`'s `or os.getenv(...)` fallback. Tests
 # never actually hit this ARN — it just satisfies the constructor's "have
 # at least one transport" check.
-os.environ.setdefault(
-    "AGENT_RUNTIME_ARN",
-    "arn:aws:bedrock-agentcore:us-west-2:000000000000:runtime/test-fixture",
+for variable in (
+    "AWS_PROFILE",
+    "AWS_DEFAULT_PROFILE",
+    "AWS_REGION",
+    "AWS_DEFAULT_REGION",
+):
+    os.environ.pop(variable, None)
+os.environ["AGENT_RUNTIME_ARN"] = (
+    "arn:aws:bedrock-agentcore:us-west-2:000000000000:"
+    "agent/00000000-0000-0000-0000-000000000001:1"
 )
 os.environ.setdefault("LOCAL_DEV", "1")
 os.environ.setdefault(
@@ -53,7 +60,12 @@ def _local_dev_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "test-state-secret-at-least-32-characters",
     )
     monkeypatch.setenv("SANDBOX_CALLBACK_SECRET", "test-sandbox-secret")
-    for var in ("AWS_PROFILE",):
+    for var in (
+        "AWS_PROFILE",
+        "AWS_DEFAULT_PROFILE",
+        "AWS_REGION",
+        "AWS_DEFAULT_REGION",
+    ):
         monkeypatch.delenv(var, raising=False)
 
 

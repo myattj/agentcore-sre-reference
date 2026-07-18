@@ -37,7 +37,8 @@
 #                           `aws secretsmanager create-secret`).
 #
 # Optional:
-#   REGION                — default us-west-2
+#   REGION                — defaults to AWS_REGION/AWS_DEFAULT_REGION, the active
+#                           AWS profile region, then us-west-2
 #   ATTACH_POLICY         — set to "1" to also run attach_agent_policy.sh
 #                           after sandbox deploy. Default 0 (run it
 #                           manually so you can review).
@@ -54,15 +55,16 @@
 
 set -euo pipefail
 
-REGION="${REGION:-us-west-2}"
-DATA_STACK="AgentCore-coreAgent-data-${REGION}"
-SERVICES_STACK="AgentCore-coreAgent-services-${REGION}"
-SANDBOX_STACK="AgentCore-coreAgent-sandbox-${REGION}"
-
 # Capture the script directory BEFORE the cd so later helper-script
 # invocations resolve correctly. After the cd, $0 is still the original
 # path, but resolving it relative to cwd would double-prepend infra/data/.
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=aws_region.sh
+source "$SCRIPT_DIR/aws_region.sh"
+REGION="$(resolve_aws_region)"
+DATA_STACK="AgentCore-coreAgent-data-${REGION}"
+SERVICES_STACK="AgentCore-coreAgent-services-${REGION}"
+SANDBOX_STACK="AgentCore-coreAgent-sandbox-${REGION}"
 
 cd "$(dirname "$0")/.."
 
@@ -93,6 +95,7 @@ if (( ${#missing[@]} )); then
 fi
 
 CONTEXT_FLAGS=(
+  "--context" "region=$REGION"
   "--context" "agentRuntimeArn=$AGENT_RUNTIME_ARN"
   "--context" "slackSecretsArn=$SLACK_SECRETS_ARN"
   "--context" "bridgeSecretsArn=$BRIDGE_SECRETS_ARN"
@@ -178,7 +181,7 @@ fi
 echo
 if [[ "${ATTACH_POLICY:-0}" == "1" ]]; then
   echo "==> Attaching managed policies to agent role"
-  ATTACH_SANDBOX_POLICY=1 bash "$SCRIPT_DIR/attach_agent_policy.sh"
+  REGION="$REGION" ATTACH_SANDBOX_POLICY=1 bash "$SCRIPT_DIR/attach_agent_policy.sh"
 else
   echo "==> Skipping attach_agent_policy.sh (set ATTACH_POLICY=1 to run)."
   echo "    To attach manually:"

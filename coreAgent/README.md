@@ -37,9 +37,11 @@ uv run --frozen python -m unittest test_metrics
 To run the AgentCore development server with the checked-in tenant fixtures:
 
 ~~~bash
+# From the repository root:
+export AWS_PROFILE=my-sandbox-profile  # omit for the default credential chain
+export AWS_REGION=eu-west-1
+make aws-configure
 cd coreAgent
-test -e agentcore/aws-targets.json || \
-  cp agentcore/aws-targets.example.json agentcore/aws-targets.json
 AGENT_LOCAL_STORES=1 agentcore dev --logs
 ~~~
 
@@ -73,23 +75,31 @@ Manager or local environment files that are excluded from Git.
 
 ## Reference deployment
 
-Validate and deploy the runtime from this directory:
+Validate and deploy the runtime from the repository root:
 
 ~~~bash
+export AWS_PROFILE=my-sandbox-profile  # omit for the default credential chain
+export AWS_REGION=eu-west-1
+make aws-configure
 cd coreAgent
-# Replace the placeholder account in this ignored file before deployment.
-test -e agentcore/aws-targets.json || \
-  cp agentcore/aws-targets.example.json agentcore/aws-targets.json
 agentcore validate
 agentcore deploy
 cd ..
-bash infra/data/scripts/attach_agent_policy.sh
+REGION="$AWS_REGION" bash infra/data/scripts/attach_agent_policy.sh
 ~~~
 
+The configuration helper derives the 12-digit account from STS, checks that the
+AgentCore control plane is reachable in the selected region, and writes only the
+ignored <code>agentcore/aws-targets.json</code>. It never copies an account ID
+into the tracked runtime manifest. The region must appear in the pinned CLI
+allowlist at
+[<code>scripts/agentcore_regions.txt</code>](../scripts/agentcore_regions.txt).
+
 Provision memory separately from <code>infra/data</code> with
-<code>uv run --with boto3 python infra/data/scripts/provision_memory.py</code>, then configure
-the resulting resource and strategy IDs. Gateway provisioning, sandbox support,
-and public dashboards are optional integrations described in
+<code>uv run --with boto3 python infra/data/scripts/provision_memory.py
+--region "$AWS_REGION"</code>, then configure the resulting resource and strategy
+IDs. Gateway provisioning, sandbox support, and public dashboards are optional
+integrations described in
 [infra/data/README.md](../infra/data/README.md).
 
 The repository's production workflow is manual-only and requires explicit
@@ -102,7 +112,6 @@ costs before deploying an archived example.
 coreAgent/
 ├── agentcore/              # Runtime manifest and generated deployment output
 ├── app/coreAgent/          # Runtime, tenant model, tools, memory, audit, metrics
-├── Dockerfile              # AgentCore runtime image
 └── README.md
 ~~~
 

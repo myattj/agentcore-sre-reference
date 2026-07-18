@@ -35,6 +35,8 @@ import sys
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from aws_region import resolve_default_region
+
 
 # Per-million-token prices for Claude Sonnet 4.6 via Bedrock (us-west-2).
 # Update if pricing changes or if multiple models need attribution.
@@ -42,6 +44,7 @@ SONNET_4_6_PRICING = {
     "input_per_million": 3.00,
     "output_per_million": 15.00,
 }
+DEFAULT_REGION = resolve_default_region()
 
 
 def _connect_table(table_name: str, region: str) -> Any:
@@ -180,7 +183,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--table", default="audit_log",
                         help="DynamoDB table name (default: audit_log)")
-    parser.add_argument("--region", default="us-west-2")
+    parser.add_argument("--region", default=DEFAULT_REGION)
 
     sub = parser.add_subparsers(dest="cmd", required=True)
 

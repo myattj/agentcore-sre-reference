@@ -15,10 +15,7 @@
       "codeLocation": "app/coreAgent/",
       "runtimeVersion": "PYTHON_3_13",
       "networkMode": "PUBLIC",
-      "protocol": "HTTP",
-      "envVars": [
-        { "name": "AWS_REGION", "value": "us-west-2" }
-      ]
+      "protocol": "HTTP"
     }
   ],
   "memories": [],

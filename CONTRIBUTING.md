@@ -70,7 +70,7 @@ while iterating on one area:
 | Pull-request sandbox | <code>uv sync --frozen --extra test && uv run --frozen python -m pytest</code> |
 | Synthetic incident seed | <code>uv run --python 3.13 --with requests==2.32.5 python -m unittest discover -s seed/tests -v</code> |
 | Onboarding | <code>npm ci && npm test && NEXT_PUBLIC_BRIDGE_INSTALL_URL=https://ci.test/slack/install npm run build</code> |
-| CDK | <code>npm ci && npm run build && CDK_DEFAULT_ACCOUNT=000000000000 npx cdk synth --quiet</code> |
+| CDK | <code>npm ci && npm test && npx cdk synth --quiet --app 'env CDK_DEFAULT_ACCOUNT=000000000000 CDK_DEFAULT_REGION=us-west-2 node dist/bin/data.js' -c region=us-west-2</code> |
 
 Tests should be deterministic and should not contact AWS, Slack, GitHub, Datadog, or another external service unless they are explicitly marked as integration tests.
 

@@ -29,6 +29,7 @@
  * `updated_at` so future GDPR deletion / compliance work is tractable.
  */
 import {
+  ArnFormat,
   CfnOutput,
   RemovalPolicy,
   Stack,
@@ -59,6 +60,32 @@ export class DataStack extends Stack {
 
   constructor(scope: Construct, id: string, props: StackProps) {
     super(scope, id, props);
+
+    const tenantSecretsArn = this.formatArn({
+      service: 'secretsmanager',
+      resource: 'secret',
+      resourceName: 'agentcore/tenants/*',
+      arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+    });
+    const platformSecretsArn = this.formatArn({
+      service: 'secretsmanager',
+      resource: 'secret',
+      resourceName: 'agentcore/platform/*',
+      arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+    });
+    const agentCoreArn = (resource: string, resourceName: string) =>
+      this.formatArn({
+        service: 'bedrock-agentcore',
+        resource,
+        resourceName,
+        arnFormat: ArnFormat.SLASH_RESOURCE_NAME,
+      });
+    const gatewaySsmParametersArn = this.formatArn({
+      service: 'ssm',
+      resource: 'parameter',
+      resourceName: 'agentcore/gateway/*',
+      arnFormat: ArnFormat.SLASH_RESOURCE_NAME,
+    });
 
     // ------------------------------------------------------------------
     // DynamoDB tables
@@ -220,9 +247,7 @@ export class DataStack extends Stack {
           sid: 'TenantSecretsRead',
           effect: Effect.ALLOW,
           actions: ['secretsmanager:GetSecretValue'],
-          resources: [
-            `arn:aws:secretsmanager:${this.region}:${this.account}:secret:agentcore/tenants/*`,
-          ],
+          resources: [tenantSecretsArn],
         }),
         // Platform-level secrets shared across tenants (GitHub App private
         // key, future: observability API keys, etc.). Separate statement
@@ -231,9 +256,7 @@ export class DataStack extends Stack {
           sid: 'PlatformSecretsRead',
           effect: Effect.ALLOW,
           actions: ['secretsmanager:GetSecretValue'],
-          resources: [
-            `arn:aws:secretsmanager:${this.region}:${this.account}:secret:agentcore/platform/*`,
-          ],
+          resources: [platformSecretsArn],
         }),
         // Memory data plane: create events, retrieve/write memory records.
         // Resource-level ARNs not supported for AgentCore Memory yet.
@@ -341,9 +364,7 @@ export class DataStack extends Stack {
             'secretsmanager:PutSecretValue',
             'secretsmanager:DescribeSecret',
           ],
-          resources: [
-            `arn:aws:secretsmanager:${this.region}:${this.account}:secret:agentcore/tenants/*`,
-          ],
+          resources: [tenantSecretsArn],
         }),
         // Platform-level secrets: read-only. The bridge reads the GitHub
         // App private key during install-time warm-start to mint an
@@ -354,9 +375,7 @@ export class DataStack extends Stack {
           sid: 'PlatformSecretsRead',
           effect: Effect.ALLOW,
           actions: ['secretsmanager:GetSecretValue'],
-          resources: [
-            `arn:aws:secretsmanager:${this.region}:${this.account}:secret:agentcore/platform/*`,
-          ],
+          resources: [platformSecretsArn],
         }),
         // CloudWatch metrics read — powers the tenant-scoped metrics page
         // in the onboarding/admin UI and the /ops operator dashboard.
@@ -411,9 +430,9 @@ export class DataStack extends Stack {
             'bedrock-agentcore:DeleteGatewayTarget',
           ],
           resources: [
-            `arn:aws:bedrock-agentcore:${this.region}:${this.account}:token-vault/default`,
-            `arn:aws:bedrock-agentcore:${this.region}:${this.account}:token-vault/default/apikeycredentialprovider/*`,
-            `arn:aws:bedrock-agentcore:${this.region}:${this.account}:gateway/*`,
+            agentCoreArn('token-vault', 'default'),
+            agentCoreArn('token-vault', 'default/apikeycredentialprovider/*'),
+            agentCoreArn('gateway', '*'),
           ],
         }),
         // SSM parameters for the shared Gateway coordinates written by
@@ -429,9 +448,7 @@ export class DataStack extends Stack {
             'ssm:GetParameter',
             'ssm:GetParameters',
           ],
-          resources: [
-            `arn:aws:ssm:${this.region}:${this.account}:parameter/agentcore/gateway/*`,
-          ],
+          resources: [gatewaySsmParametersArn],
         }),
       ],
     });

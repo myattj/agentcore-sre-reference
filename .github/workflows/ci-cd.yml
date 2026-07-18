@@ -29,7 +29,7 @@
 #          "Statement": [{
 #            "Effect": "Allow",
 #            "Principal": {
-#              "Federated": "arn:aws:iam::<ACCOUNT>:oidc-provider/token.actions.githubusercontent.com"
+#              "Federated": "arn:<PARTITION>:iam::<ACCOUNT>:oidc-provider/token.actions.githubusercontent.com"
 #            },
 #            "Action": "sts:AssumeRoleWithWebIdentity",
 #            "Condition": {
@@ -48,15 +48,16 @@
 #                   by the stacks below. Do not use AdministratorAccess.
 #
 # 3. Add GitHub repository variables (Settings > Secrets and variables > Actions > Variables):
-#      AWS_DEPLOY_ROLE_ARN   = arn:aws:iam::<ACCOUNT>:role/github-actions-deploy
+#      AWS_DEPLOY_ROLE_ARN   = arn:<PARTITION>:iam::<ACCOUNT>:role/github-actions-deploy
+#      AWS_REGION            = optional deployment region; defaults to us-west-2
 #      AGENT_RUNTIME_ARN     = optional, exact ARN assertion/selector when more than one
 #                              runtime named coreAgent exists; normally auto-discovered
 #      CERTIFICATE_ARN       = required ACM certificate ARN for production HTTPS
 #      DOMAIN_NAME           = required production hostname covered by CERTIFICATE_ARN
-#      SLACK_SECRETS_ARN     = arn:aws:secretsmanager:us-west-2:<ACCOUNT>:secret:agentcore/services/slack-<suffix>
-#      BRIDGE_SECRETS_ARN    = arn:aws:secretsmanager:us-west-2:<ACCOUNT>:secret:agentcore/services/bridge-<suffix>
-#      SANDBOX_SECRETS_ARN   = arn:aws:secretsmanager:us-west-2:<ACCOUNT>:secret:agentcore/services/sandbox-<suffix>
-#      ANTHROPIC_SECRETS_ARN = arn:aws:secretsmanager:us-west-2:<ACCOUNT>:secret:agentcore/platform/anthropic_api_key-<suffix>
+#      SLACK_SECRETS_ARN     = arn:<PARTITION>:secretsmanager:<REGION>:<ACCOUNT>:secret:agentcore/services/slack-<suffix>
+#      BRIDGE_SECRETS_ARN    = arn:<PARTITION>:secretsmanager:<REGION>:<ACCOUNT>:secret:agentcore/services/bridge-<suffix>
+#      SANDBOX_SECRETS_ARN   = arn:<PARTITION>:secretsmanager:<REGION>:<ACCOUNT>:secret:agentcore/services/sandbox-<suffix>
+#      ANTHROPIC_SECRETS_ARN = arn:<PARTITION>:secretsmanager:<REGION>:<ACCOUNT>:secret:agentcore/platform/anthropic_api_key-<suffix>
 #      PLATFORM_GITHUB_APP_ID   = numeric GitHub App ID used by bridge + sandbox
 #      PLATFORM_GITHUB_APP_SLUG = public GitHub App URL slug used by onboarding
 #      AGENTCORE_MEMORY_ID          = optional AgentCore Memory resource ID
@@ -90,6 +91,11 @@ concurrency:
 
 permissions:
   contents: read
+
+env:
+  # One deployment-region source for every manual cloud job. Validation-only
+  # synths below keep explicit synthetic regions so they remain deterministic.
+  DEPLOY_REGION: ${{ vars.AWS_REGION || 'us-west-2' }}
 
 jobs:
   # ─── Test gates ──────────────────────────────────────
@@ -252,31 +258,39 @@ jobs:
       - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
       - run: npm ci
       - run: npm run build
+      - run: npm test
       # GatewayStack consumes this ignored build artifact. Build it from
       # source so synth also works in a clean checkout.
       - run: bash scripts/build_interceptor_zip.sh
       # Dummy account; cdk.json supplies deterministic AZs so synth stays offline.
       - run: npx cdk synth --quiet
+          --context region=us-west-2
         env:
           CDK_DEFAULT_ACCOUNT: "000000000000"
+          CDK_DEFAULT_REGION: us-west-2
       - name: Synth gateway stack
         run: >-
           npx cdk synth AgentCore-coreAgent-gateway-us-west-2 --quiet
+          --context region=us-west-2
           --context bridgePublicUrl=https://bridge.example.test
         env:
           CDK_DEFAULT_ACCOUNT: "000000000000"
+          CDK_DEFAULT_REGION: us-west-2
       - name: Synth certificate-free services stack
         run: >-
           npx cdk synth AgentCore-coreAgent-services-us-west-2 --quiet
-          --context agentRuntimeArn=arn:aws:bedrock-agentcore:us-west-2:000000000000:runtime/example
+          --context region=us-west-2
+          --context agentRuntimeArn=arn:aws:bedrock-agentcore:us-west-2:000000000000:agent/00000000-0000-0000-0000-000000000001:1
           --context slackSecretsArn=arn:aws:secretsmanager:us-west-2:000000000000:secret:slack-abc123
           --context bridgeSecretsArn=arn:aws:secretsmanager:us-west-2:000000000000:secret:bridge-abc123
         env:
           CDK_DEFAULT_ACCOUNT: "000000000000"
+          CDK_DEFAULT_REGION: us-west-2
       - name: Synth HTTPS services stack
         run: >-
           npx cdk synth AgentCore-coreAgent-services-us-west-2 --quiet
-          --context agentRuntimeArn=arn:aws:bedrock-agentcore:us-west-2:000000000000:runtime/example
+          --context region=us-west-2
+          --context agentRuntimeArn=arn:aws:bedrock-agentcore:us-west-2:000000000000:agent/00000000-0000-0000-0000-000000000001:1
           --context certificateArn=arn:aws:acm:us-west-2:000000000000:certificate/00000000-0000-0000-0000-000000000000
           --context domainName=example.test
           --context slackSecretsArn=arn:aws:secretsmanager:us-west-2:000000000000:secret:slack-abc123
@@ -284,9 +298,11 @@ jobs:
           --context sandboxSecretsArn=arn:aws:secretsmanager:us-west-2:000000000000:secret:sandbox-abc123
         env:
           CDK_DEFAULT_ACCOUNT: "000000000000"
+          CDK_DEFAULT_REGION: us-west-2
       - name: Synth sandbox stack
         run: >-
           npx cdk synth AgentCore-coreAgent-sandbox-us-west-2 --quiet
+          --context region=us-west-2
           --context sandboxSecretsArn=arn:aws:secretsmanager:us-west-2:000000000000:secret:sandbox-abc123
           --context sandboxVpcId=vpc-00000000000000000
           --context sandboxAvailabilityZones=us-west-2a,us-west-2b
@@ -297,6 +313,9 @@ jobs:
           --context sandboxGithubAppId=123456
         env:
           CDK_DEFAULT_ACCOUNT: "000000000000"
+          CDK_DEFAULT_REGION: us-west-2
+      - name: Check partition portability and required contexts
+        run: bash scripts/check_portability.sh
 
   # ─── Deploy (explicit manual opt-in, after gates pass) ────────────
 
@@ -319,6 +338,7 @@ jobs:
       contents: read
       id-token: write
     steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - name: Validate data deployment configuration
         env:
           AWS_DEPLOY_ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
@@ -326,6 +346,10 @@ jobs:
           DOMAIN_NAME: ${{ vars.DOMAIN_NAME }}
         run: |
           missing=0
+          if ! grep -Fxq -- "$DEPLOY_REGION" scripts/agentcore_regions.txt; then
+            echo "::error::AWS_REGION is not supported by the pinned AgentCore CLI: $DEPLOY_REGION"
+            missing=1
+          fi
           for name in AWS_DEPLOY_ROLE_ARN CERTIFICATE_ARN DOMAIN_NAME; do
             if [ -z "${!name}" ]; then
               echo "::error::Missing required production variable: $name"
@@ -333,11 +357,10 @@ jobs:
             fi
           done
           exit "$missing"
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - uses: aws-actions/configure-aws-credentials@517a711dbcd0e402f90c77e7e2f81e849156e31d # v6.2.2
         with:
           role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
-          aws-region: us-west-2
+          aws-region: ${{ env.DEPLOY_REGION }}
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: 22
@@ -350,8 +373,9 @@ jobs:
         run: |
           npm run build
           npx cdk deploy \
-            AgentCore-coreAgent-data-us-west-2 \
-            AgentCore-coreAgent-observability-us-west-2 \
+            "AgentCore-coreAgent-data-${DEPLOY_REGION}" \
+            "AgentCore-coreAgent-observability-${DEPLOY_REGION}" \
+            --context "region=${DEPLOY_REGION}" \
             --require-approval never
 
   deploy-agent:
@@ -390,7 +414,11 @@ jobs:
       - uses: aws-actions/configure-aws-credentials@517a711dbcd0e402f90c77e7e2f81e849156e31d # v6.2.2
         with:
           role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
-          aws-region: us-west-2
+          aws-region: ${{ env.DEPLOY_REGION }}
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.13"
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: 22
@@ -410,8 +438,8 @@ jobs:
         run: |
           set -euo pipefail
           account_id=$(aws sts get-caller-identity --query Account --output text)
-          jq --arg account "$account_id" \
-            '.[0].account = $account | .[0].region = "us-west-2"' \
+          jq --arg account "$account_id" --arg region "$DEPLOY_REGION" \
+            '.[0].account = $account | .[0].region = $region' \
             agentcore/aws-targets.example.json > agentcore/aws-targets.json
           add_env() {
             local name="$1"
@@ -423,6 +451,7 @@ jobs:
               mv agentcore/agentcore.json.tmp agentcore/agentcore.json
             fi
           }
+          add_env AWS_REGION "$DEPLOY_REGION"
           add_env GITHUB_APP_ID "$GITHUB_APP_ID"
           if [ -n "$DOMAIN_NAME" ]; then
             add_env DASHBOARD_BASE_URL "https://$DOMAIN_NAME"
@@ -442,69 +471,15 @@ jobs:
         id: resolve-runtime
         env:
           RUNTIME_ARN_OVERRIDE: ${{ vars.AGENT_RUNTIME_ARN }}
-          RUNTIME_NAME: coreAgent
-          AWS_REGION: us-west-2
+          AWS_REGION: ${{ env.DEPLOY_REGION }}
         run: |
           set -euo pipefail
-          account_id=$(aws sts get-caller-identity --query Account --output text)
-          runtimes_json=$(aws bedrock-agentcore-control list-agent-runtimes \
-            --region "$AWS_REGION" \
-            --output json \
-            --no-cli-pager)
-          mapfile -t runtime_arns < <(
-            jq -r --arg name "$RUNTIME_NAME" \
-              '.agentRuntimes[]? | select(.agentRuntimeName == $name) | .agentRuntimeArn' \
-              <<<"$runtimes_json" | sort -u
-          )
-
-          expected_arn_pattern="^arn:aws:bedrock-agentcore:${AWS_REGION}:${account_id}:runtime/[A-Za-z][A-Za-z0-9_]{0,99}-[A-Za-z0-9]{10}$"
-          if [ -n "$RUNTIME_ARN_OVERRIDE" ]; then
-            if [[ ! "$RUNTIME_ARN_OVERRIDE" =~ $expected_arn_pattern ]]; then
-              echo "::error::AGENT_RUNTIME_ARN is not a Runtime ARN in the active account and region"
-              exit 1
-            fi
-            runtime_arn="$RUNTIME_ARN_OVERRIDE"
-            found=0
-            for candidate in "${runtime_arns[@]}"; do
-              if [ "$candidate" = "$runtime_arn" ]; then
-                found=1
-                break
-              fi
-            done
-            if [ "$found" -ne 1 ]; then
-              echo "::error::AGENT_RUNTIME_ARN does not identify a runtime named $RUNTIME_NAME"
-              exit 1
-            fi
-          elif [ "${#runtime_arns[@]}" -eq 1 ]; then
-            runtime_arn="${runtime_arns[0]}"
-          else
-            echo "::error::Expected exactly one runtime named $RUNTIME_NAME; found ${#runtime_arns[@]}. Set AGENT_RUNTIME_ARN to select an exact matching ARN."
-            exit 1
-          fi
-
-          if [[ ! "$runtime_arn" =~ $expected_arn_pattern ]]; then
-            echo "::error::Discovered runtime ARN has an unexpected account, region, or resource ID"
-            exit 1
-          fi
-          runtime_id="${runtime_arn##*/}"
-          runtime_json=$(aws bedrock-agentcore-control get-agent-runtime \
-            --agent-runtime-id "$runtime_id" \
-            --region "$AWS_REGION" \
-            --output json \
-            --no-cli-pager)
-          actual_arn=$(jq -r '.agentRuntimeArn // empty' <<<"$runtime_json")
-          actual_name=$(jq -r '.agentRuntimeName // empty' <<<"$runtime_json")
-          actual_status=$(jq -r '.status // empty' <<<"$runtime_json")
-          if [ "$actual_arn" != "$runtime_arn" ] || \
-             [ "$actual_name" != "$RUNTIME_NAME" ] || \
-             [ "$actual_status" != "READY" ]; then
-            echo "::error::Resolved runtime failed identity/readiness validation (name=$actual_name status=$actual_status)"
-            exit 1
-          fi
-
-          echo "Resolved $actual_name runtime: $runtime_arn"
+          runtime_arn=$(bash scripts/resolve_agent_runtime.sh)
+          echo "Resolved runtime: $runtime_arn"
           echo "arn=$runtime_arn" >> "$GITHUB_OUTPUT"
       - name: Attach data access policy to the runtime
+        env:
+          REGION: ${{ env.DEPLOY_REGION }}
         run: bash infra/data/scripts/attach_agent_policy.sh
 
   deploy-services:
@@ -554,7 +529,7 @@ jobs:
       - uses: aws-actions/configure-aws-credentials@517a711dbcd0e402f90c77e7e2f81e849156e31d # v6.2.2
         with:
           role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
-          aws-region: us-west-2
+          aws-region: ${{ env.DEPLOY_REGION }}
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: 22
@@ -592,8 +567,9 @@ jobs:
           if [ "$DEPLOY_EXPERIMENTAL_SANDBOX" = "true" ]; then
             optional_context+=(--context "sandboxSecretsArn=$SANDBOX_SECRETS_ARN")
           fi
-          npx cdk deploy AgentCore-coreAgent-services-us-west-2 \
+          npx cdk deploy "AgentCore-coreAgent-services-${DEPLOY_REGION}" \
             --require-approval never \
+            --context "region=$DEPLOY_REGION" \
             --context "agentRuntimeArn=$AGENT_RUNTIME_ARN" \
             --context "slackSecretsArn=$SLACK_SECRETS_ARN" \
             --context "bridgeSecretsArn=$BRIDGE_SECRETS_ARN" \
@@ -634,7 +610,7 @@ jobs:
       - uses: aws-actions/configure-aws-credentials@517a711dbcd0e402f90c77e7e2f81e849156e31d # v6.2.2
         with:
           role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
-          aws-region: us-west-2
+          aws-region: ${{ env.DEPLOY_REGION }}
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: 22
@@ -644,10 +620,10 @@ jobs:
       - name: Read ServicesStack outputs
         id: svc
         run: |
-          STACK="AgentCore-coreAgent-services-us-west-2"
+          STACK="AgentCore-coreAgent-services-${DEPLOY_REGION}"
           get() {
             aws cloudformation describe-stacks \
-              --region us-west-2 \
+              --region "$DEPLOY_REGION" \
               --stack-name "$STACK" \
               --query "Stacks[0].Outputs[?OutputKey=='$1'].OutputValue" \
               --output text
@@ -686,8 +662,9 @@ jobs:
           if [ -n "$ANTHROPIC_SECRETS_ARN" ]; then
             optional_context+=(--context "anthropicSecretsArn=$ANTHROPIC_SECRETS_ARN")
           fi
-          npx cdk deploy AgentCore-coreAgent-sandbox-us-west-2 \
+          npx cdk deploy "AgentCore-coreAgent-sandbox-${DEPLOY_REGION}" \
             --require-approval never \
+            --context "region=$DEPLOY_REGION" \
             --context "sandboxSecretsArn=$SANDBOX_SECRETS_ARN" \
             --context "sandboxVpcId=$SANDBOX_VPC_ID" \
             --context "sandboxAvailabilityZones=$SANDBOX_AVAILABILITY_ZONES" \
@@ -698,4 +675,6 @@ jobs:
             --context "sandboxGithubAppId=$PLATFORM_GITHUB_APP_ID" \
             "${optional_context[@]}"
       - name: Attach sandbox access policy to the runtime
+        env:
+          REGION: ${{ env.DEPLOY_REGION }}
         run: ATTACH_SANDBOX_POLICY=1 bash infra/data/scripts/attach_agent_policy.sh

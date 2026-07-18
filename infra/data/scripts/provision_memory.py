@@ -31,8 +31,10 @@ from typing import Any
 import boto3
 from botocore.exceptions import ClientError
 
+from aws_region import resolve_default_region
+
 DEFAULT_MEMORY_NAME = "agentcore_shared_memory"
-DEFAULT_REGION = "us-west-2"
+DEFAULT_REGION = resolve_default_region()
 DEFAULT_EVENT_EXPIRY_DAYS = 90
 
 SSM_MEMORY_ID = "/agentcore/memory/id"

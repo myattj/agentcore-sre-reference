@@ -30,8 +30,10 @@ from typing import Any
 import boto3
 from botocore.exceptions import ClientError
 
+from aws_region import resolve_default_region
+
 DEFAULT_GATEWAY_NAME = "agentcore-shared-gateway"
-DEFAULT_REGION = "us-west-2"
+DEFAULT_REGION = resolve_default_region()
 
 SSM_PARAMS = (
     "/agentcore/gateway/id",

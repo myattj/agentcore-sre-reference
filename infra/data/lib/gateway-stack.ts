@@ -26,6 +26,7 @@ import * as path from 'node:path';
 import * as fs from 'node:fs';
 
 import {
+  ArnFormat,
   CfnOutput,
   Duration,
   Stack,
@@ -78,6 +79,20 @@ export class GatewayStack extends Stack {
 
   constructor(scope: Construct, id: string, props: GatewayStackProps) {
     super(scope, id, props);
+
+    const agentCoreArn = (resource: string, resourceName: string) =>
+      this.formatArn({
+        service: 'bedrock-agentcore',
+        resource,
+        resourceName,
+        arnFormat: ArnFormat.SLASH_RESOURCE_NAME,
+      });
+    const agentCoreIdentitySecretsArn = this.formatArn({
+      service: 'secretsmanager',
+      resource: 'secret',
+      resourceName: 'bedrock-agentcore-identity!default/apikey/*-*',
+      arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+    });
 
     // ------------------------------------------------------------------
     // Pre-deploy zip check
@@ -192,10 +207,11 @@ export class GatewayStack extends Stack {
               effect: Effect.ALLOW,
               actions: ['bedrock-agentcore:GetWorkloadAccessToken'],
               resources: [
-                `arn:aws:bedrock-agentcore:${this.region}:${this.account}:` +
-                  'workload-identity-directory/default',
-                `arn:aws:bedrock-agentcore:${this.region}:${this.account}:` +
-                  'workload-identity-directory/default/workload-identity/*',
+                agentCoreArn('workload-identity-directory', 'default'),
+                agentCoreArn(
+                  'workload-identity-directory',
+                  'default/workload-identity/*',
+                ),
               ],
             }),
             new PolicyStatement({
@@ -206,16 +222,14 @@ export class GatewayStack extends Stack {
               // both shapes to this account's default token vault rather than
               // falling back to an account-wide `*` resource.
               resources: [
-                `arn:aws:bedrock-agentcore:${this.region}:${this.account}:` +
-                  'workload-identity-directory/default',
-                `arn:aws:bedrock-agentcore:${this.region}:${this.account}:` +
-                  'workload-identity-directory/default/workload-identity/*',
-                `arn:aws:bedrock-agentcore:${this.region}:${this.account}:` +
-                  'token-vault/default',
-                `arn:aws:bedrock-agentcore:${this.region}:${this.account}:` +
-                  'token-vault/default/api-key/*',
-                `arn:aws:bedrock-agentcore:${this.region}:${this.account}:` +
-                  'token-vault/default/apikeycredentialprovider/*',
+                agentCoreArn('workload-identity-directory', 'default'),
+                agentCoreArn(
+                  'workload-identity-directory',
+                  'default/workload-identity/*',
+                ),
+                agentCoreArn('token-vault', 'default'),
+                agentCoreArn('token-vault', 'default/api-key/*'),
+                agentCoreArn('token-vault', 'default/apikeycredentialprovider/*'),
               ],
             }),
             new PolicyStatement({
@@ -224,10 +238,7 @@ export class GatewayStack extends Stack {
               // Prefix documented by AgentCore Identity for API-key providers.
               // The suffix wildcard accounts for Secrets Manager's generated
               // six-character ARN suffix.
-              resources: [
-                `arn:aws:secretsmanager:${this.region}:${this.account}:` +
-                  'secret:bedrock-agentcore-identity!default/apikey/*-*',
-              ],
+              resources: [agentCoreIdentitySecretsArn],
             }),
           ],
         }),
