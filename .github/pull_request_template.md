@@ -1,6 +1,8 @@
 ## Summary
 
-Describe the behavior before and after this change. Keep the pull request focused on making the archived reference safer, clearer, easier to run, or more useful as an example.
+Describe the behavior before and after this change. Keep the pull request focused
+on making the self-hosted product safer, clearer, easier to install, or easier to
+operate.
 
 ## Verification
 
@@ -18,5 +20,5 @@ List any other commands or manual checks:
 
 ## Scope
 
-- [ ] This belongs in an archived reference implementation rather than a new product roadmap
+- [ ] This belongs in the shared self-hosted product rather than one deployment-specific fork
 - [ ] I read `CONTRIBUTING.md`, `SECURITY.md`, and `CODE_OF_CONDUCT.md`

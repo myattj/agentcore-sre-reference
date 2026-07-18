@@ -1,5 +1,5 @@
 name: Reproducible bug
-description: Report a defect in the archived reference implementation
+description: Report a reproducible defect in the self-hosted project
 title: "[Bug]: "
 labels:
   - bug
@@ -7,7 +7,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Agent is archived and has no support SLA. Please report only reproducible defects that improve the repository as a reference. Never include credentials, customer data, private URLs, AWS account identifiers, or undisclosed vulnerability details.
+        Agent is self-hosted and has no support SLA. Please report reproducible defects with redacted diagnostics. Never include credentials, customer data, private URLs, AWS account identifiers, or undisclosed vulnerability details.
   - type: checkboxes
     id: checks
     attributes:

@@ -1,8 +1,16 @@
 # Changelog
 
-This changelog begins with the public archive snapshot. The public repository preserves meaningful development history after removing private planning artifacts, deployment fingerprints, and personal commit metadata.
+This changelog begins with the original public release. The public repository
+preserves meaningful development history after removing private planning
+artifacts, deployment fingerprints, and personal commit metadata.
 
 ## Unreleased
+
+### Self-hosted product path
+
+- Reposition Agent as a maintained self-hosted open-source project rather than an archived reference.
+- Add <code>make self-host</code>, a guided, fail-closed commercial AWS deployment that generates the Slack manifest, keeps secrets out of command arguments, deploys the supported stack in dependency order, and verifies HTTPS health.
+- Keep the experimental PR sandbox disabled and preserve the manual advanced paths for Memory, GitHub code access, and custom topologies.
 
 ### AWS portability
 
@@ -16,7 +24,8 @@ This changelog begins with the public archive snapshot. The public repository pr
 
 ## 0.1.0 — 2026-07-17
 
-This is an open-source archive milestone, not a promise of a hosted service, active roadmap, or SemVer support policy.
+This was the first open-source milestone. It did not include a hosted service or
+a SemVer compatibility policy.
 
 ### Included
 
@@ -25,12 +34,12 @@ This is an open-source archive milestone, not a promise of a hosted service, act
 - Built-in SRE workflows for incident response, runbooks, on-call handoff, deploy review, status updates, and post-mortem drafting.
 - GitHub App code search, file and symbol inspection, commit correlation, and an experimental Fargate PR sandbox.
 - Next.js onboarding, workspace settings, operator views, and experimental ephemeral dashboards.
-- CDK reference stacks for data, IAM, services, observability, Gateway, and sandbox resources.
+- CDK stacks for data, IAM, services, observability, Gateway, and sandbox resources.
 - Synthetic incident and persistent test-environment tooling.
 
 ### Open-source preparation
 
-- Reframed the project honestly as an archived reference implementation.
+- Initially published the project as an archived reference implementation.
 - Added a three-command no-cloud demo that boots the real bridge and Next.js dashboard renderer with a synthetic incident.
 - Added setup, verification, architecture, cost, security, and cleanup guidance.
 - Added MIT licensing, contribution guidance, a security policy, and a code of conduct.
@@ -46,7 +55,7 @@ This is an open-source archive milestone, not a promise of a hosted service, act
 
 ### Known limitations
 
-- The archived cloud deployment is not provided or supported.
+- No hosted cloud deployment is provided; operators deploy and support their own installation.
 - Production security, compliance, cost, and reliability have not been independently revalidated.
 - Dashboard URLs are bearer links without per-user authorization.
 - The PR sandbox is disabled by default. Its current in-task credential boundary is unsafe for production and requires a trusted broker plus stronger isolation before real use.

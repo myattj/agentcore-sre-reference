@@ -1,6 +1,6 @@
 # Core agent
 
-The core agent is the AI runtime for this archived reference project. It runs on
+The core agent is the AI runtime for the self-hosted Agent project. It runs on
 Amazon Bedrock AgentCore Runtime and keeps tenant-specific behavior, tools,
 memory, audit logging, metrics, and heartbeat handling out of the transport
 bridge.
@@ -73,7 +73,7 @@ Important environment variables include:
 Never put private keys or tokens in <code>agentcore.json</code>. Use AWS Secrets
 Manager or local environment files that are excluded from Git.
 
-## Reference deployment
+## Manual deployment
 
 Validate and deploy the runtime from the repository root:
 
@@ -113,7 +113,7 @@ integrations described in
 
 The repository's production workflow is manual-only and requires explicit
 confirmation. Review AWS region availability, IAM scope, secrets, domains, and
-costs before deploying an archived example.
+costs before deploying into an account you operate.
 
 ## Layout
 

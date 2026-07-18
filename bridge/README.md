@@ -1,7 +1,9 @@
 # Bridge
 
 > [!NOTE]
-> This service is part of the archived Agent reference implementation. Start with the [root README](../README.md) before deploying it.
+> This service is part of the self-hosted Agent deployment. Start with the
+> [guided installer](../README.md#self-host-in-your-aws-account) before using
+> these lower-level service instructions.
 
 The bridge is a FastAPI transport service between Slack and the shared AgentCore runtime. It owns webhook timing, OAuth, tenant resolution, session boundaries, and outbound Slack messages. It does not own agent tools or reasoning.
 
@@ -104,11 +106,11 @@ concurrent-read pool. Tune them with <code>DASHBOARD_READS_PER_MINUTE</code>
 (default 60) and <code>DASHBOARD_MAX_CONCURRENT_READS</code> (default 16).
 These controls are per bridge process; add AWS WAF or an equivalent distributed
 edge limit for an internet-facing production deployment.
-The reference CDK also sets <code>DASHBOARD_TRUST_X_FORWARDED_FOR=1</code>
+The supported CDK topology also sets <code>DASHBOARD_TRUST_X_FORWARDED_FOR=1</code>
 because its security group accepts bridge traffic only from an ALB that appends
 the real peer address. Do not enable that flag behind an untrusted proxy.
 
-## Reference deployment
+## Manual deployment
 
 A real deployment needs:
 

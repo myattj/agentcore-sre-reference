@@ -1,7 +1,7 @@
 # Onboarding and operations UI
 
 This Next.js application provides the human-facing setup and operations surfaces
-for the archived AgentCore reference project. It talks to the bridge API and
+for the self-hosted AgentCore project. It talks to the bridge API and
 does not access DynamoDB or the agent runtime directly.
 
 See the [root README](../README.md) for project status and the end-to-end local
@@ -103,14 +103,14 @@ BRIDGE_OAUTH_STATE_SECRET=$(openssl rand -hex 32) npm test
 NEXT_PUBLIC_BRIDGE_INSTALL_URL=https://ci.test/slack/install npm run build
 ~~~
 
-## Reference deployment
+## Manual deployment
 
 The optional Services CDK stack builds and runs this app as an ECS Fargate
 service behind an Application Load Balancer. It is enabled only when the
 required runtime and secret contexts are supplied. See
 [infra/data/README.md](../infra/data/README.md).
 
-Keep the reference stack's shared public-origin routing for the bridge and this
+Keep the supported stack's shared public-origin routing for the bridge and this
 UI. A split-host deployment needs a separately reviewed one-time code exchange
 or explicit cookie-domain design; never pass the onboarding session in a URL.
 
