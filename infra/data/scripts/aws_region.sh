@@ -9,15 +9,9 @@ resolve_aws_region() {
   if [[ -z "$selected_region" ]] && command -v aws >/dev/null 2>&1; then
     profile="${AWS_PROFILE:-${AWS_DEFAULT_PROFILE:-}}"
     if [[ -n "$profile" ]]; then
-      if ! profile_region=$(aws configure get region --profile "$profile" 2>/dev/null); then
-        echo "ERROR: could not read region from AWS profile: $profile" >&2
-        return 1
-      fi
+      profile_region=$(aws configure get region --profile "$profile" 2>/dev/null || true)
     else
-      if ! profile_region=$(aws configure get region 2>/dev/null); then
-        echo "ERROR: could not read region from the default AWS profile" >&2
-        return 1
-      fi
+      profile_region=$(aws configure get region 2>/dev/null || true)
     fi
     selected_region="$profile_region"
   fi

@@ -176,7 +176,8 @@ class AwsRegionResolutionTests(unittest.TestCase):
                 "#!/usr/bin/env bash\n"
                 "set -eu\n"
                 '[[ " $* " == *" configure get region "* ]]\n'
-                'printf "%s\\n" "${FAKE_PROFILE_REGION:-}"\n',
+                '[[ -n "${FAKE_PROFILE_REGION:-}" ]] || exit 1\n'
+                'printf "%s\\n" "$FAKE_PROFILE_REGION"\n',
                 encoding="utf-8",
             )
             fake_aws.chmod(0o755)

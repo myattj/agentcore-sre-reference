@@ -153,17 +153,22 @@ scripts, and the manual GitHub Actions release jobs. The fallback for examples
 and credential-free synth is <code>us-west-2</code>.
 
 This does not mean every AWS partition and region has the same service set. The
-full reference path supports any commercial AWS account in a region accepted
-by the pinned AgentCore CLI where Runtime, the chosen Bedrock model, Gateway,
-Memory, and the other enabled features are available. The exact release
-allowlist is tracked in
-[<code>scripts/agentcore_regions.txt</code>](./scripts/agentcore_regions.txt);
-it is intentionally narrower than the set of syntactically valid AWS region
-names. The CDK policies are partition-aware and can synthesize
-for GovCloud, but the default global Bedrock model and optional AgentCore
-features must be replaced or disabled there. AWS China is not a supported full
-deployment target; neither are isolated or other sovereign partitions outside
-commercial AWS and GovCloud. Check the current
+complete CLI-driven release path supports any commercial AWS account in one of
+the nine regions accepted by the pinned AgentCore CLI, provided Runtime, the
+chosen Bedrock model, Gateway, Memory, and the other enabled features are
+available there. That exact release allowlist is tracked in
+[<code>scripts/agentcore_cli_regions.txt</code>](./scripts/agentcore_cli_regions.txt)
+and is kept in sync with the CLI schema checked into this repository.
+
+That nine-region list is a tooling boundary, not the complete AgentCore service
+catalog. AgentCore Runtime is available in additional commercial regions and
+in GovCloud. The bridge, runtime resolver, and hand-authored CDK validation can
+therefore attach to an existing Runtime or synthesize infrastructure across the
+broader commercial and GovCloud partitions. <code>make aws-configure</code> and
+<code>make agent-deploy</code> still fail closed outside the pinned CLI's nine
+regions. The default global Bedrock model and optional AgentCore features must
+be replaced or disabled for GovCloud. AWS China, isolated, and other sovereign
+partitions are not supported. Check the current
 [AgentCore region matrix](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/agentcore-regions.html)
 before spending money. A region choice is not, by itself, a privacy or
 compliance guarantee.

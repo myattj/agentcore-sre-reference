@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import ast
 import importlib.util
 import json
 import os
@@ -209,6 +208,7 @@ class RepositoryCheckTests(unittest.TestCase):
         ):
             (root / directory).mkdir(parents=True)
         for relative_path in (
+            "scripts/deploy_agent.sh",
             "scripts/resolve_agent_runtime.sh",
             "infra/data/scripts/aws_region.sh",
             "infra/data/scripts/attach_agent_policy.sh",
@@ -348,65 +348,38 @@ class RepositoryCheckTests(unittest.TestCase):
 
 class ReleaseWorkflowContractTests(unittest.TestCase):
     def test_pinned_agentcore_region_allowlist_is_shared(self) -> None:
-        canonical = {
+        canonical = [
             line
-            for line in (ROOT / "scripts/agentcore_regions.txt")
+            for line in (ROOT / "scripts/agentcore_cli_regions.txt")
             .read_text(encoding="utf-8")
             .splitlines()
             if line
-        }
+        ]
+        self.assertEqual(canonical, sorted(set(canonical)))
         self.assertEqual(
             canonical,
-            {
+            [
                 "ap-northeast-1",
-                "ap-northeast-2",
                 "ap-south-1",
                 "ap-southeast-1",
                 "ap-southeast-2",
-                "ap-southeast-5",
-                "ap-southeast-7",
-                "ca-central-1",
                 "eu-central-1",
-                "eu-north-1",
-                "eu-south-1",
-                "eu-south-2",
                 "eu-west-1",
-                "eu-west-2",
-                "eu-west-3",
-                "sa-east-1",
                 "us-east-1",
                 "us-east-2",
-                "us-gov-west-1",
                 "us-west-2",
-            },
+            ],
         )
 
-        bridge_tree = ast.parse(
-            (ROOT / "bridge/bridge/client.py").read_text(encoding="utf-8")
-        )
-        bridge_regions: set[str] | None = None
-        for node in bridge_tree.body:
-            if (
-                isinstance(node, ast.Assign)
-                and any(
-                    isinstance(target, ast.Name)
-                    and target.id == "_SUPPORTED_AGENTCORE_REGIONS"
-                    for target in node.targets
-                )
-                and isinstance(node.value, ast.Call)
-                and node.value.args
-            ):
-                bridge_regions = set(ast.literal_eval(node.value.args[0]))
-                break
-        self.assertEqual(bridge_regions, canonical)
-
-        target_source = (ROOT / "infra/data/lib/aws-target.ts").read_text(
+        schema_source = (
+            ROOT / "coreAgent/agentcore/.llm-context/aws-targets.ts"
+        ).read_text(
             encoding="utf-8"
         )
-        region_block = target_source.split(
-            "export const SUPPORTED_AGENTCORE_REGIONS = [", 1
-        )[1].split("] as const;", 1)[0]
-        self.assertEqual(set(re.findall(r"'([^']+)'", region_block)), canonical)
+        region_block = schema_source.split("type AgentCoreRegion =", 1)[1].split(
+            ";", 1
+        )[0]
+        self.assertEqual(re.findall(r"\| '([^']+)'", region_block), canonical)
 
         configure = (ROOT / "scripts/configure_aws.py").read_text(encoding="utf-8")
         resolver = (ROOT / "scripts/resolve_agent_runtime.sh").read_text(
@@ -415,9 +388,15 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         workflow = (ROOT / ".github/workflows/ci-cd.yml").read_text(
             encoding="utf-8"
         )
-        self.assertIn('with_name("agentcore_regions.txt")', configure)
-        self.assertIn('SUPPORTED_REGIONS_FILE="$SCRIPT_DIR/agentcore_regions.txt"', resolver)
-        self.assertIn("grep -Fxq -- \"$DEPLOY_REGION\" scripts/agentcore_regions.txt", workflow)
+        wrapper = (ROOT / "scripts/deploy_agent.sh").read_text(encoding="utf-8")
+        self.assertIn('with_name("agentcore_cli_regions.txt")', configure)
+        self.assertIn('print("  make agent-deploy")', configure)
+        self.assertNotIn("agentcore_cli_regions.txt", resolver)
+        self.assertIn('SUPPORTED_REGIONS="$SCRIPT_DIR/agentcore_cli_regions.txt"', wrapper)
+        self.assertIn(
+            'grep -Fxq -- "$DEPLOY_REGION" scripts/agentcore_cli_regions.txt',
+            workflow,
+        )
 
     def test_cdk_checks_ignore_the_active_aws_profile(self) -> None:
         check = (ROOT / "scripts/check.sh").read_text(encoding="utf-8")
@@ -493,7 +472,7 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertIn("astral-sh/setup-uv@", deploy_agent)
         self.assertLess(
             deploy_agent.index("astral-sh/setup-uv@"),
-            deploy_agent.index("run: agentcore deploy"),
+            deploy_agent.index("run: bash scripts/deploy_agent.sh --yes"),
         )
 
     def test_ci_synthesizes_govcloud_and_rejects_commercial_arns(self) -> None:
@@ -564,10 +543,31 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
 
         self.assertIn("DEPLOY_REGION: ${{ vars.AWS_REGION || 'us-west-2' }}", workflow)
         self.assertIn('.region = $region', deploy_jobs)
-        self.assertIn('add_env AWS_REGION "$DEPLOY_REGION"', deploy_jobs)
+        self.assertEqual(deploy_jobs.count("bash scripts/deploy_agent.sh --yes"), 1)
+        self.assertNotIn("add_env", deploy_jobs)
+        self.assertNotIn("agentcore.json.tmp", deploy_jobs)
         self.assertIn('--context "region=$DEPLOY_REGION"', deploy_jobs)
-        self.assertIn("scripts/agentcore_regions.txt", deploy_jobs)
+        self.assertIn("scripts/agentcore_cli_regions.txt", deploy_jobs)
         self.assertIn("not supported by the pinned AgentCore CLI", deploy_jobs)
+        for variable in (
+            "AWS_REGION",
+            "GITHUB_APP_ID",
+            "DOMAIN_NAME",
+            "AGENTCORE_MEMORY_ID",
+            "AGENTCORE_SEMANTIC_STRATEGY_ID",
+            "AGENTCORE_USER_PREF_STRATEGY_ID",
+            "DEPLOY_EXPERIMENTAL_SANDBOX",
+        ):
+            self.assertIn(variable, deploy_jobs)
+        deploy_agent = deploy_jobs.split("  deploy-agent:", 1)[1].split(
+            "  deploy-services:", 1
+        )[0]
+        self.assertNotIn("agentcore validate", deploy_agent)
+        self.assertNotIn("run: agentcore deploy", deploy_agent)
+        self.assertLess(
+            deploy_agent.index("Write portable AgentCore target"),
+            deploy_agent.index("Validate and deploy AgentCore runtime"),
+        )
         deploy_data = deploy_jobs.split("  deploy-data:", 1)[1].split(
             "  deploy-agent:", 1
         )[0]

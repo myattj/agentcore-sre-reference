@@ -197,7 +197,7 @@ def test_client_rejects_sovereign_region_disguised_as_commercial(monkeypatch):
     monkeypatch.delenv("AWS_REGION", raising=False)
     monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
 
-    with pytest.raises(RuntimeError, match="pinned AgentCore CLI"):
+    with pytest.raises(RuntimeError, match="outside the supported"):
         AgentCoreClient(
             runtime_arn=(
                 "arn:aws:bedrock-agentcore:us-iso-east-1:"
@@ -206,18 +206,18 @@ def test_client_rejects_sovereign_region_disguised_as_commercial(monkeypatch):
         )
 
 
-def test_client_rejects_region_outside_pinned_agentcore_enum(monkeypatch):
-    monkeypatch.delenv("LOCAL_AGENT_URL", raising=False)
-    monkeypatch.delenv("AWS_REGION", raising=False)
+def test_client_accepts_existing_runtime_beyond_pinned_cli_regions(monkeypatch):
+    monkeypatch.setenv("AWS_REGION", "eu-west-2")
     monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
 
-    with pytest.raises(RuntimeError, match="pinned AgentCore CLI"):
-        AgentCoreClient(
-            runtime_arn=(
-                "arn:aws:bedrock-agentcore:ap-east-1:"
-                "000000000000:agent/00000000-0000-0000-0000-000000000001:1"
-            )
+    client = AgentCoreClient(
+        runtime_arn=(
+            "arn:aws:bedrock-agentcore:eu-west-2:"
+            "000000000000:agent/00000000-0000-0000-0000-000000000001:1"
         )
+    )
+
+    assert client.region == "eu-west-2"
 
 
 def test_client_rejects_runtime_arn_without_twelve_digit_account(monkeypatch):

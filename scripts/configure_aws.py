@@ -23,7 +23,7 @@ _ACCOUNT_RE = re.compile(r"^[0-9]{12}$")
 _REGION_RE = re.compile(r"^[a-z]{2}(?:-[a-z0-9]+)+-[0-9]+$")
 _SUPPORTED_AGENTCORE_REGIONS = frozenset(
     Path(__file__)
-    .with_name("agentcore_regions.txt")
+    .with_name("agentcore_cli_regions.txt")
     .read_text(encoding="utf-8")
     .splitlines()
 )
@@ -137,7 +137,7 @@ def _resolve_region(
     if region not in _SUPPORTED_AGENTCORE_REGIONS:
         raise AwsConfigurationError(
             f"AWS region {region!r} is not supported by the pinned AgentCore CLI; "
-            "choose a region listed in scripts/agentcore_regions.txt"
+            "choose a region listed in scripts/agentcore_cli_regions.txt"
         )
     return region
 
@@ -345,8 +345,8 @@ def _print_shell_exports(target: AwsTarget) -> None:
     if target.profile:
         print(f"  export AWS_PROFILE={shlex.quote(target.profile)}")
     print(f"  export AWS_REGION={shlex.quote(target.region)}")
-    print("  cd infra/data && npx cdk bootstrap")
-    print("  cd ../../coreAgent && agentcore validate")
+    print("  (cd infra/data && npx cdk bootstrap)")
+    print("  make agent-deploy")
 
 
 def main(argv: Sequence[str] | None = None) -> int:

@@ -1,5 +1,11 @@
 const ACCOUNT_RE = /^[0-9]{12}$/;
 const REGION_RE = /^[a-z]{2}(?:-[a-z0-9]+)+-[0-9]+$/;
+const GOVCLOUD_REGION_RE = /^us-gov-(?:east|west)-[0-9]+$/;
+const COMMERCIAL_REGION_RE = new RegExp(
+  '^(?:af-south|ap-(?:east|northeast|south|southeast)|' +
+    'ca-(?:central|west)|eu-(?:central|north|south|west)|il-central|' +
+    'me-(?:central|south)|mx-central|sa-east|us-(?:east|west))-[0-9]+$',
+);
 const AGENT_RUNTIME_RESOURCE_RE = new RegExp(
   '^(?:agent/[A-Fa-f0-9]{8}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{4}-' +
     '[A-Fa-f0-9]{4}-[A-Fa-f0-9]{12}:[1-9][0-9]{0,4}|' +
@@ -7,31 +13,6 @@ const AGENT_RUNTIME_RESOURCE_RE = new RegExp(
 );
 
 export const SUPPORTED_AWS_PARTITIONS = ['aws', 'aws-us-gov'] as const;
-export const SUPPORTED_AGENTCORE_REGIONS = [
-  'ap-northeast-1',
-  'ap-northeast-2',
-  'ap-south-1',
-  'ap-southeast-1',
-  'ap-southeast-2',
-  'ap-southeast-5',
-  'ap-southeast-7',
-  'ca-central-1',
-  'eu-central-1',
-  'eu-north-1',
-  'eu-south-1',
-  'eu-south-2',
-  'eu-west-1',
-  'eu-west-2',
-  'eu-west-3',
-  'sa-east-1',
-  'us-east-1',
-  'us-east-2',
-  'us-gov-west-1',
-  'us-west-2',
-] as const;
-
-const SUPPORTED_AGENTCORE_REGION_SET = new Set<string>(SUPPORTED_AGENTCORE_REGIONS);
-
 interface ParsedArn {
   readonly partition: string;
   readonly service: string;
@@ -46,15 +27,14 @@ export function expectedPartition(region: string): string {
       `AWS region must be a valid regional identifier; got ${JSON.stringify(region)}.`,
     );
   }
+  if (GOVCLOUD_REGION_RE.test(region)) return 'aws-us-gov';
   if (region.startsWith('cn-')) {
     throw new Error('AWS China is not a supported deployment target for this reference stack.');
   }
-  if (!SUPPORTED_AGENTCORE_REGION_SET.has(region)) {
-    throw new Error(
-      `AWS region ${JSON.stringify(region)} is not supported by the pinned AgentCore CLI.`,
-    );
-  }
-  return region === 'us-gov-west-1' ? 'aws-us-gov' : 'aws';
+  if (COMMERCIAL_REGION_RE.test(region)) return 'aws';
+  throw new Error(
+    `AWS region ${JSON.stringify(region)} is outside the supported commercial and GovCloud partitions.`,
+  );
 }
 
 export function validateAwsTarget(account: string, region: string): void {

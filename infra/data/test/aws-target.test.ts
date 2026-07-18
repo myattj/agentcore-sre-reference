@@ -16,6 +16,7 @@ const VALID_LEGACY_RUNTIME =
 
 test('commercial and GovCloud targets select their matching partition', () => {
   assert.equal(expectedPartition('eu-west-1'), 'aws');
+  assert.equal(expectedPartition('eu-west-2'), 'aws');
   assert.equal(expectedPartition('us-gov-west-1'), 'aws-us-gov');
   assert.doesNotThrow(() => validateAwsTarget(ACCOUNT, 'eu-west-1'));
   assert.doesNotThrow(() => validateAwsTarget(ACCOUNT, 'us-gov-west-1'));
@@ -25,8 +26,7 @@ test('unsupported or malformed targets fail closed', () => {
   assert.throws(() => validateAwsTarget('123', 'eu-west-1'), /12-digit/);
   assert.throws(() => validateAwsTarget(ACCOUNT, 'not-a-region'), /valid regional/);
   assert.throws(() => validateAwsTarget(ACCOUNT, 'cn-north-1'), /China/);
-  assert.throws(() => validateAwsTarget(ACCOUNT, 'us-iso-east-1'), /pinned AgentCore CLI/);
-  assert.throws(() => validateAwsTarget(ACCOUNT, 'ap-east-1'), /pinned AgentCore CLI/);
+  assert.throws(() => validateAwsTarget(ACCOUNT, 'us-iso-east-1'), /outside the supported/);
 });
 
 test('current and legacy AgentCore Runtime ARNs are returned unchanged', () => {

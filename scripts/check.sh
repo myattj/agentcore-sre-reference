@@ -113,6 +113,7 @@ run "shell syntax" bash -n \
   "$ROOT_DIR/scripts/demo.sh" \
   "$ROOT_DIR/scripts/check.sh" \
   "$ROOT_DIR/scripts/offline_aws_env.sh" \
+  "$ROOT_DIR/scripts/deploy_agent.sh" \
   "$ROOT_DIR/scripts/resolve_agent_runtime.sh" \
   "$ROOT_DIR/infra/data/scripts/aws_region.sh" \
   "$ROOT_DIR/infra/data/scripts/attach_agent_policy.sh" \
