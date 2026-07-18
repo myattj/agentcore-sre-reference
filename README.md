@@ -344,6 +344,7 @@ The authoritative tenant schema is <code>coreAgent/app/coreAgent/tenant.py</code
 Agent is archived. Issues and pull requests may be useful to future readers, but there is no roadmap, hosted service, support SLA, or promise of dependency updates.
 
 - Read [<code>NORTH_STAR.md</code>](./NORTH_STAR.md) for the archived product thesis.
+- Browse the component guides for the [bridge](./bridge/README.md), [core agent](./coreAgent/README.md), [onboarding UI](./onboarding/README.md), [AWS infrastructure](./infra/data/README.md), and [PR sandbox](./infra/sandbox/README.md).
 - See [<code>CONTRIBUTING.md</code>](./CONTRIBUTING.md) before proposing a change.
 - Read [<code>SUPPORT.md</code>](./SUPPORT.md) for the archive's support boundaries.
 - Report vulnerabilities through [<code>SECURITY.md</code>](./SECURITY.md).

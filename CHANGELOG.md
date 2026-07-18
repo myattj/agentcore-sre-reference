@@ -6,12 +6,12 @@ This changelog begins with the public archive snapshot. The public repository pr
 
 ### AWS portability
 
-- Added a read-only STS and AgentCore preflight plus an ignored, mode-0600 deployment-target generator for named profiles, SSO, environment credentials, and workload roles.
-- Threaded one selected region through AgentCore, the bridge, CDK, sandbox helpers, and manual GitHub Actions deployments, with fail-closed ARN account/partition/region validation.
-- Replaced commercial-partition IAM ARN literals with partition-aware CDK formatting and verified commercial and GovCloud synthesis.
-- Kept deployment targets aligned with the pinned AgentCore CLI's explicit region schema.
-- Validated both current versioned AgentCore Runtime ARNs and legacy runtime IDs during bridge startup, CDK synthesis, and deployment-time runtime discovery.
-- Made source-archive verification ignore generated local secrets and build output while preserving full-history secret scanning for Git clones.
+- Configure named profiles, SSO, environment credentials, or workload roles through a read-only STS and AgentCore preflight that writes an ignored, mode-0600 deployment target.
+- Carry one selected region through AgentCore, the bridge, CDK, sandbox helpers, and manual GitHub Actions deployments, with fail-closed account, partition, region, and ARN checks.
+- Synthesize partition-aware IAM policies for commercial AWS and GovCloud instead of baking in commercial ARN literals.
+- Fail early when a deployment region falls outside the pinned AgentCore CLI's explicit region schema.
+- Use either current versioned AgentCore Runtime ARNs or legacy runtime IDs during bridge startup, CDK synthesis, and deployment-time discovery.
+- Run verification from a downloaded source archive without scanning generated local secrets or build output, while Git clones retain full-history secret scanning.
 
 ## 0.1.0 — 2026-07-17
 

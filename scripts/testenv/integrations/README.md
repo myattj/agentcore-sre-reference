@@ -388,12 +388,16 @@ The seeder couldn't find the Secrets Manager secret. Re-run the `aws secretsmana
 This applies to the PagerDuty, Jira, or Linear managed connectors, not the
 content-only Datadog and Sentry seeders.
 
-The bridge's IAM role is missing Gateway permissions. Deploy the data stack:
+The bridge's IAM role is missing Gateway permissions. Use the same
+<code>AWS_PROFILE</code> and <code>AWS_REGION</code> as the bridge deployment,
+then deploy the matching regional data stack:
 
 ```bash
+: "${AWS_REGION:?set AWS_REGION to the bridge deployment region}"
 cd infra/data
 npm run build
-npx cdk deploy AgentCore-coreAgent-data-us-west-2
+npx cdk deploy "AgentCore-coreAgent-data-${AWS_REGION}" \
+  -c "region=${AWS_REGION}"
 ```
 
 ### "bridge connect failed for X: HTTP 401"
