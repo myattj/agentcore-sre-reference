@@ -9,8 +9,8 @@ This is the inverse of provision_gateway.py — it deletes:
 The interceptor Lambda + IAM roles are NOT deleted by this script —
 those live in the GatewayStack and are removed by `cdk destroy`.
 
-Use case: re-running provision after changing the JWT issuer URL, or
-during chunk C/D iteration when the gateway config needs to change.
+Use this before reprovisioning after changing the JWT issuer URL or other
+Gateway configuration that cannot be updated in place.
 
 Usage:
   cd infra/data

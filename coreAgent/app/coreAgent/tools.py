@@ -27,17 +27,31 @@ generate the tool schema for the model; `functools.wraps` on the audit
 wrapper preserves `__wrapped__`, `__name__`, `__doc__`, and the signature
 so Strands sees the user-visible function, not the shim.
 """
+
 from __future__ import annotations
 
 import functools
 import json
 import logging
+import math
 import os
+import re
 import threading
 import time
 import uuid
-from typing import Any, Callable
+from decimal import Decimal
+from pathlib import Path
+from typing import Annotated, Any, Callable, Literal
+from urllib.parse import urlsplit
 
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 from strands import tool
 
 import ping
@@ -57,7 +71,7 @@ _audit = build_audit_store()
 
 # Shared metrics emitter (EMF in production). Same factory singleton main.py
 # uses, so tool-level and invocation-level EMF records land in the same
-# CloudWatch Logs stream and roll up into the same AgentCore Reference/Agent namespace.
+# CloudWatch Logs stream and roll up into the same Agent/Runtime namespace.
 _metrics = build_metrics_emitter()
 
 
@@ -69,13 +83,20 @@ def register(name: str):
     cannot be audited for some reason, or tool-like objects that already
     have their own audit hook).
     """
+
     def deco(fn):
         CATALOG[name] = fn
         return fn
+
     return deco
 
 
-def audited_tool(name: str):
+def audited_tool(
+    name: str,
+    *,
+    args_summarizer: Callable[[tuple[Any, ...], dict[str, Any]], str] | None = None,
+    result_summarizer: Callable[[Any], str] | None = None,
+):
     """Register a catalog tool with transparent audit logging.
 
     Replaces `@register(name)` + `@tool`. Applies Strands' `@tool` decorator
@@ -88,10 +109,11 @@ def audited_tool(name: str):
             '''Echo the input back.'''
             return text
 
-    The docstring, parameter names, and type hints are preserved via
-    `functools.wraps`, so Strands' schema generation sees the original
-    signature.
+    Sensitive tools may provide summaries that omit raw arguments or bearer
+    results. The docstring, parameter names, and type hints are preserved via
+    `functools.wraps`, so Strands' schema generation sees the original signature.
     """
+
     def deco(fn: Callable[..., Any]) -> Any:
         @functools.wraps(fn)
         def audited(*args: Any, **kwargs: Any) -> Any:
@@ -125,15 +147,22 @@ def audited_tool(name: str):
                         "user_id": ctx.get("user_id", ""),
                         "channel_id": _ch,
                         "tool_name": name,
-                        "tool_args_summary": _summarize_args(args, kwargs),
+                        "tool_args_summary": (
+                            args_summarizer(args, kwargs)
+                            if args_summarizer is not None
+                            else _summarize_args(args, kwargs)
+                        ),
                         "tool_result_summary": (
-                            repr(result) if success else (error_text or "")
+                            result_summarizer(result)
+                            if success and result_summarizer is not None
+                            else (repr(result) if success else (error_text or ""))
                         ),
                         "duration_ms": int((time.time() - start) * 1000),
                         "success": success,
                         "slack_message_link": (
                             f"https://slack.com/archives/{_ch}/p{_th.replace('.', '')}"
-                            if _ch and _th else ""
+                            if _ch and _th
+                            else ""
                         ),
                     }
                     _audit.write(row)
@@ -169,7 +198,11 @@ def audited_tool(name: str):
 def _iso_now() -> str:
     from datetime import datetime, timezone
 
-    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    return (
+        datetime.now(timezone.utc)
+        .isoformat(timespec="milliseconds")
+        .replace("+00:00", "Z")
+    )
 
 
 def _tool_call_sk(invocation_id: str) -> str:
@@ -185,6 +218,21 @@ def _summarize_args(args: tuple, kwargs: dict) -> str:
         return json.dumps({"args": list(args), "kwargs": kwargs}, default=str)
     except Exception:
         return f"<unserializable args: {len(args)} positional, {len(kwargs)} kw>"
+
+
+def filter_runtime_available_tools(allowed: list[str]) -> list[str]:
+    """Remove tools whose deployment-level safety dependencies are absent."""
+    dashboard_available = bool(os.getenv("DASHBOARD_BASE_URL", "").strip()) or (
+        os.getenv("AGENT_LOCAL_STORES") == "1" or os.getenv("LOCAL_DEV") == "1"
+    )
+    experimental_sandbox_enabled = os.getenv("ENABLE_EXPERIMENTAL_PR_SANDBOX") == "1"
+
+    unavailable: set[str] = set()
+    if not dashboard_available:
+        unavailable.add("render_dashboard")
+    if not experimental_sandbox_enabled:
+        unavailable.add("propose_pr")
+    return [name for name in allowed if name not in unavailable]
 
 
 # ----------------------------------------------------------------------------
@@ -224,6 +272,102 @@ _ecs_client_singleton: Any | None = None
 
 _SANDBOX_SSM_PREFIX = "/agentcore/sandbox/"
 _SANDBOX_JOBS_TABLE_NAME = os.getenv("SANDBOX_JOBS_TABLE", "sandbox_jobs")
+_GITHUB_REPO_SLUG_RE = re.compile(
+    r"(?P<owner>[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?)/"
+    r"(?P<name>[A-Za-z0-9._-]{1,100})"
+)
+
+
+def _validate_github_repo_slug(repo: str) -> str:
+    """Return a normalized, exact GitHub ``owner/name`` slug.
+
+    This is duplicated in ``infra/sandbox/entrypoint.py`` because the agent
+    and sandbox ship in separate runtimes. Keep both validators in sync.
+    """
+    normalized = (repo or "").strip()
+    match = _GITHUB_REPO_SLUG_RE.fullmatch(normalized)
+    if (
+        match is None
+        or "--" in match.group("owner")
+        or match.group("name") in {".", ".."}
+    ):
+        raise ValueError("repo must be an exact GitHub owner/name slug")
+    return normalized
+
+
+def normalize_github_repo_slug(repo: str) -> str:
+    """Return the canonical authorization key for a GitHub repository.
+
+    GitHub owner and repository names are case-insensitive. Authorization
+    therefore compares fully-qualified ``owner/name`` slugs after exact-shape
+    validation and case folding; substrings and URL-like values never match.
+    """
+    return _validate_github_repo_slug(repo).casefold()
+
+
+def _authorize_github_repo(
+    repo: str,
+    ctx: dict[str, Any] | None = None,
+) -> tuple[str | None, str | None]:
+    """Authorize an exact repo slug against the invocation's tenant allowlist.
+
+    ``main.py`` populates ``allowed_github_repos`` from the tenant's configured
+    codebase bindings on every invocation. Missing, malformed, or empty context
+    denies access. The normalized repo is returned so downstream GitHub and
+    sandbox calls use the same canonical value that was authorized.
+    """
+    try:
+        normalized = normalize_github_repo_slug(repo)
+    except ValueError:
+        return None, (
+            "Error: repo must be an exact GitHub owner/name slug from the "
+            "## Connected codebases list (for example, 'acme/api')."
+        )
+
+    request_ctx = ctx if ctx is not None else get_context()
+    raw_allowed = request_ctx.get("allowed_github_repos")
+    if not isinstance(raw_allowed, (list, tuple, set, frozenset)):
+        return None, "Error: this repository is not authorized for this tenant."
+
+    allowed: set[str] = set()
+    for configured_repo in raw_allowed:
+        if not isinstance(configured_repo, str):
+            continue
+        try:
+            allowed.add(normalize_github_repo_slug(configured_repo))
+        except ValueError:
+            continue
+
+    if normalized not in allowed:
+        return None, "Error: this repository is not authorized for this tenant."
+    return normalized, None
+
+
+def _validate_run_task_response(response: Any) -> str:
+    """Require ECS to report exactly one launched task and no failures."""
+    if not isinstance(response, dict):
+        raise RuntimeError("ecs.run_task returned a non-object response")
+
+    tasks = response.get("tasks")
+    failures = response.get("failures")
+    if not isinstance(tasks, list) or not isinstance(failures, list):
+        raise RuntimeError("ecs.run_task response is missing tasks or failures")
+    if failures or len(tasks) != 1:
+        reasons = ", ".join(
+            str(failure.get("reason", "unknown"))
+            for failure in failures
+            if isinstance(failure, dict)
+        )
+        detail = f"; reasons: {reasons}" if reasons else ""
+        raise RuntimeError(
+            "ecs.run_task launched "
+            f"{len(tasks)} task(s) and returned {len(failures)} failure(s){detail}"
+        )
+
+    task = tasks[0]
+    if not isinstance(task, dict) or not task.get("taskArn"):
+        raise RuntimeError("ecs.run_task response task is missing taskArn")
+    return str(task["taskArn"])
 
 
 def _load_sandbox_coords() -> dict[str, str]:
@@ -259,6 +403,7 @@ def _load_sandbox_coords() -> dict[str, str]:
             return cache
 
         import boto3
+
         ssm = boto3.client("ssm", region_name=os.getenv("AWS_REGION", "us-west-2"))
         try:
             resp = ssm.get_parameters_by_path(Path=_SANDBOX_SSM_PREFIX, Recursive=False)
@@ -272,7 +417,11 @@ def _load_sandbox_coords() -> dict[str, str]:
         cache = {}
         for param in resp.get("Parameters", []):
             name = param.get("Name", "")
-            key = name[len(_SANDBOX_SSM_PREFIX):] if name.startswith(_SANDBOX_SSM_PREFIX) else name
+            key = (
+                name[len(_SANDBOX_SSM_PREFIX) :]
+                if name.startswith(_SANDBOX_SSM_PREFIX)
+                else name
+            )
             cache[key] = param.get("Value", "")
 
         required = {"task_def_arn", "cluster_arn", "subnets", "security_groups"}
@@ -294,6 +443,7 @@ def _sandbox_jobs_table() -> Any:
     global _sandbox_jobs_table_singleton
     if _sandbox_jobs_table_singleton is None:
         import boto3
+
         resource = boto3.resource(
             "dynamodb", region_name=os.getenv("AWS_REGION", "us-west-2")
         )
@@ -307,6 +457,7 @@ def _ecs_client() -> Any:
     global _ecs_client_singleton
     if _ecs_client_singleton is None:
         import boto3
+
         _ecs_client_singleton = boto3.client(
             "ecs", region_name=os.getenv("AWS_REGION", "us-west-2")
         )
@@ -362,13 +513,25 @@ def _write_propose_pr_audit(
             row["error"] = error
         _audit.write(row)
     except Exception as e:  # pragma: no cover — gotcha #10
-        log.warning("propose_pr audit row dropped (event=%s task=%s): %s", event, task_id, e)
+        log.warning(
+            "propose_pr audit row dropped (event=%s task=%s): %s", event, task_id, e
+        )
+
+
+def _heartbeat_max_background_seconds(ctx: dict[str, Any]) -> int:
+    """Return the tenant's positive background-work tracking ceiling."""
+    try:
+        configured = int(ctx.get("heartbeat_max_background_seconds", 3600) or 3600)
+    except (TypeError, ValueError):
+        configured = 3600
+    return max(1, configured)
 
 
 def _poll_sandbox_completion(
     task_id: str,
     repo: str,
     ctx_snapshot: dict[str, Any],
+    max_background_seconds: int,
 ) -> None:
     """Daemon: poll sandbox_jobs until terminal status, then write the
     completion audit row and clear HealthyBusy.
@@ -379,8 +542,9 @@ def _poll_sandbox_completion(
     DDB poll independently, so a callback failure (network blip, ALB
     503) doesn't leak HealthyBusy.
 
-    Bounded backoff: 5s → 7s → ~10s → ... → cap at 20s, max ~10 minutes
-    of total wall time before we give up. The hard ceiling is critical:
+    Bounded backoff: 5s → 7s → ~10s → ... → cap at 20s, with
+    total wall time bounded by the tenant's heartbeat background-work ceiling.
+    The hard ceiling is critical:
     if a Fargate task crashes mid-flight without writing a terminal
     row, we DO NOT want to leak HealthyBusy forever and pin the agent
     container alive past its natural idle shutdown. The orphan branch
@@ -395,16 +559,23 @@ def _poll_sandbox_completion(
     on-demand pricing). Not a real cost concern.
     """
     backoff = 5.0
-    deadline = time.time() + 10 * 60
+    ceiling_seconds = max(1, int(max_background_seconds))
+    deadline = time.monotonic() + ceiling_seconds
     final_status = "orphaned"
     final_pr_url = ""
     final_error = ""
     try:
-        while time.time() < deadline:
-            time.sleep(backoff)
+        while time.monotonic() < deadline:
+            remaining = max(0.0, deadline - time.monotonic())
+            time.sleep(min(backoff, remaining))
+            if time.monotonic() >= deadline:
+                continue
             backoff = min(backoff * 1.4, 20.0)
             try:
-                row = _sandbox_jobs_table().get_item(Key={"task_id": task_id}).get("Item") or {}
+                row = (
+                    _sandbox_jobs_table().get_item(Key={"task_id": task_id}).get("Item")
+                    or {}
+                )
             except Exception:  # noqa: BLE001 — transient DDB error, retry
                 continue
             status = row.get("status", "")
@@ -412,7 +583,9 @@ def _poll_sandbox_completion(
                 final_status = status
                 final_pr_url = row.get("pr_url", "")
                 final_error = row.get("error", "")
-                log.info("sandbox poll: task_id=%s reached terminal=%s", task_id, status)
+                log.info(
+                    "sandbox poll: task_id=%s reached terminal=%s", task_id, status
+                )
                 # Record sandbox API spend against the tenant's monthly
                 # counter. The sandbox writes agent_cost_cents to the row
                 # on completion — we read it here and charge via the same
@@ -422,10 +595,12 @@ def _poll_sandbox_completion(
                 if cost_cents > 0 and tenant_id:
                     try:
                         from spend_tracker import build_spend_tracker
+
                         build_spend_tracker().record_spend(tenant_id, cost_cents)
                         log.info(
                             "sandbox poll: recorded %d cents sandbox spend for tenant=%s",
-                            cost_cents, tenant_id,
+                            cost_cents,
+                            tenant_id,
                         )
                     except Exception:  # noqa: BLE001
                         log.exception("sandbox poll: failed to record sandbox spend")
@@ -433,11 +608,12 @@ def _poll_sandbox_completion(
         else:
             # Loop exited via the deadline (no break). Mark orphaned.
             log.warning(
-                "sandbox poll: task_id=%s exceeded 10-minute ceiling — marking orphaned",
+                "sandbox poll: task_id=%s exceeded %d-second ceiling — marking orphaned",
                 task_id,
+                ceiling_seconds,
             )
             final_status = "orphaned"
-            final_error = "exceeded 10-minute poll ceiling"
+            final_error = f"exceeded {ceiling_seconds}-second background-work ceiling"
             try:
                 _sandbox_jobs_table().update_item(
                     Key={"task_id": task_id},
@@ -454,7 +630,9 @@ def _poll_sandbox_completion(
                     },
                 )
             except Exception:  # noqa: BLE001
-                log.exception("sandbox poll: failed to mark task_id=%s orphaned", task_id)
+                log.exception(
+                    "sandbox poll: failed to mark task_id=%s orphaned", task_id
+                )
     finally:
         # Always: write the terminal audit row + clear HealthyBusy.
         _write_propose_pr_audit(
@@ -466,13 +644,30 @@ def _poll_sandbox_completion(
             error=final_error,
             ctx_snapshot=ctx_snapshot,
         )
-        ping._inflight_tasks.discard(task_id)
+        ping.complete_task(task_id)
         app.complete_async_task(task_id)
 
 
 # ----------------------------------------------------------------------------
 # Catalog tools
 # ----------------------------------------------------------------------------
+
+
+def _register_async_task(task_id: str, busy_threshold: int) -> None:
+    """Register local and AgentCore async state as one failure-safe operation."""
+    ping.register_task(task_id, busy_threshold)
+    try:
+        app.add_async_task(task_id)
+    except Exception:
+        ping.complete_task(task_id)
+        # The SDK may have accepted the task before surfacing an error. A
+        # best-effort completion keeps that partial registration from leaking.
+        try:
+            app.complete_async_task(task_id)
+        except Exception:  # noqa: BLE001
+            log.exception("async task rollback failed for task_id=%s", task_id)
+        raise
+
 
 @audited_tool("echo")
 def echo(text: str) -> str:
@@ -484,33 +679,90 @@ def echo(text: str) -> str:
 def start_background_task(duration_seconds: int = 90) -> str:
     """Start a background task to demonstrate the HealthyBusy heartbeat lifecycle.
 
-    Spawns a daemon thread that sleeps for `duration_seconds`. While the task
-    is in flight, custom_ping returns HEALTHY_BUSY, which keeps the AgentCore
-    Runtime session alive past the 15-minute idle timeout.
+    Spawns a daemon thread that sleeps for `duration_seconds`. Once the
+    tenant's configured concurrency threshold is reached, custom_ping returns
+    HEALTHY_BUSY, which keeps the AgentCore Runtime session alive past the
+    15-minute idle timeout.
 
     Use duration_seconds >= 60 to actually observe HEALTHY_BUSY (a 3-second
     task finishes before you can query /ping).
     """
+    ctx = get_context()
+    busy_threshold = max(1, int(ctx.get("heartbeat_busy_threshold", 1) or 1))
+    max_seconds = _heartbeat_max_background_seconds(ctx)
+    requested_seconds = max(1, int(duration_seconds))
+    effective_seconds = min(requested_seconds, max_seconds)
+
     task_id = f"bg-{uuid.uuid4().hex[:8]}"
-    ping._inflight_tasks.add(task_id)
-    app.add_async_task(task_id)
+    _register_async_task(task_id, busy_threshold)
 
     def run():
         try:
-            time.sleep(duration_seconds)
+            time.sleep(effective_seconds)
         finally:
-            ping._inflight_tasks.discard(task_id)
+            ping.complete_task(task_id)
             app.complete_async_task(task_id)
 
     threading.Thread(target=run, daemon=True).start()
     return (
-        f"Started background task {task_id} for {duration_seconds}s. "
-        f"Agent is now HealthyBusy."
+        f"Started background task {task_id} for {effective_seconds}s. "
+        "The runtime heartbeat reports HealthyBusy whenever at least "
+        f"{busy_threshold} background tasks are active."
     )
 
 
+def _authorize_slack_channel_access(
+    token: str,
+    target_channel_id: str,
+    ctx: dict[str, Any] | None = None,
+) -> str | None:
+    """Authorize a current- or cross-channel Slack tool operation.
+
+    A signed event proves the requester is operating in the current channel,
+    so that channel is allowed without an extra API round trip. Any other
+    channel requires a positive ``conversations.members`` result for the exact
+    requesting Slack user. Missing context and indeterminate membership deny.
+    Escalation routes intentionally bypass this helper and remain a separate,
+    narrowly configured authorization mechanism.
+    """
+    import slack_api
+
+    request_ctx = ctx if ctx is not None else get_context()
+    tenant_id = str(request_ctx.get("tenant_id") or "").strip()
+    current_channel_id = str(request_ctx.get("channel_id") or "").strip()
+    requester_user_id = str(request_ctx.get("user_id") or "").strip()
+    target_channel_id = (target_channel_id or "").strip()
+
+    if not tenant_id or not current_channel_id or not target_channel_id:
+        return (
+            "Error: Slack channel authorization context is unavailable; "
+            "the operation was denied."
+        )
+    if target_channel_id == current_channel_id:
+        return None
+    if not requester_user_id:
+        return (
+            "Error: Slack requester identity is unavailable; cross-channel "
+            "access was denied."
+        )
+
+    membership = slack_api.is_user_member_of_channel(
+        token,
+        target_channel_id,
+        requester_user_id,
+    )
+    if membership is not True:
+        return (
+            "Error: you must be a member of the target Slack channel "
+            "before the agent can access or post to it."
+        )
+    return None
+
+
 @audited_tool("search_team_history")
-def search_team_history(query: str, channel_id: str | None = None, limit: int = 20) -> str:
+def search_team_history(
+    query: str, channel_id: str | None = None, limit: int = 20
+) -> str:
     """Search past Slack messages in a channel for messages matching a keyword query.
 
     Args:
@@ -521,18 +773,23 @@ def search_team_history(query: str, channel_id: str | None = None, limit: int = 
     from slack_api import fetch_channel_history, get_bot_token
 
     ctx = get_context()
-    cid = channel_id or ctx.get("channel_id", "")
+    cid = (channel_id or ctx.get("channel_id", "") or "").strip()
     if not cid:
         return "Error: no channel_id available. Pass channel_id explicitly."
     tenant_id = ctx.get("tenant_id", "")
     token = get_bot_token(tenant_id)
     if not token:
         return "Error: no Slack bot token configured for this tenant."
+    authorization_error = _authorize_slack_channel_access(token, cid, ctx)
+    if authorization_error:
+        return authorization_error
     return fetch_channel_history(token, cid, query, min(limit, 100))
 
 
 @audited_tool("read_thread_context")
-def read_thread_context(channel_id: str | None = None, thread_id: str | None = None) -> str:
+def read_thread_context(
+    channel_id: str | None = None, thread_id: str | None = None
+) -> str:
     """Fetch the full conversation thread from Slack.
 
     Call this whenever the user references "this thread" or "this conversation"
@@ -545,7 +802,7 @@ def read_thread_context(channel_id: str | None = None, thread_id: str | None = N
     from slack_api import fetch_thread_replies, get_bot_token
 
     ctx = get_context()
-    cid = channel_id or ctx.get("channel_id", "")
+    cid = (channel_id or ctx.get("channel_id", "") or "").strip()
     tid = thread_id or ctx.get("thread_id", "")
     if not cid or not tid:
         return "Error: both channel_id and thread_id are required."
@@ -553,32 +810,15 @@ def read_thread_context(channel_id: str | None = None, thread_id: str | None = N
     token = get_bot_token(tenant_id)
     if not token:
         return "Error: no Slack bot token configured for this tenant."
+    authorization_error = _authorize_slack_channel_access(token, cid, ctx)
+    if authorization_error:
+        return authorization_error
     return fetch_thread_replies(token, cid, tid)
-
-
-@audited_tool("search_docs")
-def search_docs(query: str) -> str:
-    """Search across all configured documentation sources (Confluence, Notion, etc.).
-
-    Returns results from connected doc integrations, or a clear message when
-    no integrations are connected yet.
-
-    Args:
-        query: The search query to run across doc sources.
-    """
-    # TODO: when real doc integrations land, check tenant config for
-    # connected sources and dispatch to each one.
-    return (
-        f"No documentation integrations are connected for this workspace. "
-        f"Cannot search for '{query}'. "
-        "Ask a workspace admin to connect a doc source (Confluence, Notion, "
-        "etc.) in the AgentCore Reference onboarding dashboard."
-    )
 
 
 @audited_tool("post_to_channel")
 def post_to_channel(channel_id: str, message: str, thread_ts: str | None = None) -> str:
-    """Post a message to any Slack channel the bot is a member of.
+    """Post in the current channel or a channel the requester belongs to.
 
     Use this when you need to send information to a different channel than
     the one you're currently in (e.g., posting a summary to #incidents,
@@ -595,7 +835,11 @@ def post_to_channel(channel_id: str, message: str, thread_ts: str | None = None)
     token = slack_api.get_bot_token(ctx.get("tenant_id", ""))
     if not token:
         return "Error: no Slack bot token configured for this tenant."
-    return slack_api.post_message(token, channel_id, message, thread_ts)
+    cid = (channel_id or "").strip()
+    authorization_error = _authorize_slack_channel_access(token, cid, ctx)
+    if authorization_error:
+        return authorization_error
+    return slack_api.post_message(token, cid, message, thread_ts)
 
 
 @audited_tool("escalate")
@@ -681,27 +925,34 @@ def record_feedback(
     # additional row uses row_type="feedback" for the dedicated feedback
     # schema so it can be queried independently of tool_call rows.
     from datetime import datetime, timezone
-    now = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+    now = (
+        datetime.now(timezone.utc)
+        .isoformat(timespec="milliseconds")
+        .replace("+00:00", "Z")
+    )
     try:
-        _audit.write({
-            "row_type": "feedback",
-            "tenant_id": tenant_id,
-            "sk": f"FB#{now}#{invocation_id}",
-            "invocation_id": invocation_id,
-            "timestamp": now,
-            "created_at": now,
-            "user_id": ctx.get("user_id", ""),
-            "channel_id": ctx.get("channel_id", ""),
-            "thread_id": ctx.get("thread_id", ""),
-            "workspace_id": ctx.get("workspace_id", ""),
-            "reaction": "",
-            "sentiment": sentiment,
-            "source": "conversation",
-            "reason": reason[:512],
-            "bot_message_ts": "",
-            "question_summary": original_question[:512],
-            "answer_summary": original_answer[:512],
-        })
+        _audit.write(
+            {
+                "row_type": "feedback",
+                "tenant_id": tenant_id,
+                "sk": f"FB#{now}#{invocation_id}",
+                "invocation_id": invocation_id,
+                "timestamp": now,
+                "created_at": now,
+                "user_id": ctx.get("user_id", ""),
+                "channel_id": ctx.get("channel_id", ""),
+                "thread_id": ctx.get("thread_id", ""),
+                "workspace_id": ctx.get("workspace_id", ""),
+                "reaction": "",
+                "sentiment": sentiment,
+                "source": "conversation",
+                "reason": reason[:512],
+                "bot_message_ts": "",
+                "question_summary": original_question[:512],
+                "answer_summary": original_answer[:512],
+            }
+        )
     except Exception as e:
         log.warning("record_feedback: audit write dropped: %s", e)
 
@@ -712,16 +963,26 @@ def record_feedback(
     # with a structured record for local dev (InMemoryStore).
     try:
         from memory_store import build_memory_store
+
         store = build_memory_store()
-        namespace = f"tenants/{tenant_id}"
-        store.write_records(namespace, [{
-            "type": "user_feedback",
-            "sentiment": sentiment,
-            "reason": reason,
-            "question": original_question,
-            "answer": original_answer,
-            "extracted_via": "record_feedback_tool_v0",
-        }])
+        namespace = str(ctx.get("memory_namespace") or "")
+        if not namespace:
+            # Direct calls without an initialized invocation context must not
+            # silently fall back to a tenant-wide memory namespace.
+            raise RuntimeError("memory authorization context is unavailable")
+        store.write_records(
+            namespace,
+            [
+                {
+                    "type": "user_feedback",
+                    "sentiment": sentiment,
+                    "reason": reason,
+                    "question": original_question,
+                    "answer": original_answer,
+                    "extracted_via": "record_feedback_tool_v0",
+                }
+            ],
+        )
     except Exception as e:
         log.warning("record_feedback: memory write dropped: %s", e)
 
@@ -885,18 +1146,14 @@ def inspect_codebase_context() -> str:
             if b.channels:
                 pinned = ", ".join(b.channels)
                 if channel_id and channel_id in b.channels:
-                    parts.append(
-                        f" — **pinned to THIS channel** ({pinned})"
-                    )
+                    parts.append(f" — **pinned to THIS channel** ({pinned})")
                 else:
                     parts.append(f" — pinned channels: {pinned}")
             else:
                 parts.append(" — no channel pins")
             lines.append("".join(parts))
         if codebases.default_repo:
-            lines.append(
-                f"\nInstall-time default: `{codebases.default_repo}`"
-            )
+            lines.append(f"\nInstall-time default: `{codebases.default_repo}`")
         sections.append("\n".join(lines))
     else:
         sections.append(
@@ -916,19 +1173,13 @@ def inspect_codebase_context() -> str:
             topic = (info.get("topic") or {}).get("value") or ""
             purpose = (info.get("purpose") or {}).get("value") or ""
             is_private = info.get("is_private", False)
-            channel_section.append(
-                f"- Name: #{name}" if name else "- Name: (unknown)"
-            )
-            channel_section.append(
-                f"- Type: {'private' if is_private else 'public'}"
-            )
+            channel_section.append(f"- Name: #{name}" if name else "- Name: (unknown)")
+            channel_section.append(f"- Type: {'private' if is_private else 'public'}")
             channel_section.append(
                 f"- Topic: {topic}" if topic else "- Topic: (not set)"
             )
             channel_section.append(
-                f"- Purpose: {purpose}"
-                if purpose
-                else "- Purpose: (not set)"
+                f"- Purpose: {purpose}" if purpose else "- Purpose: (not set)"
             )
         else:
             channel_section.append(
@@ -951,27 +1202,19 @@ def inspect_codebase_context() -> str:
             real = profile.get("real_name") or info.get("real_name") or ""
             title = profile.get("title") or ""
             user_section.append(
-                f"- Display name: {display}"
-                if display
-                else "- Display name: (not set)"
+                f"- Display name: {display}" if display else "- Display name: (not set)"
             )
             user_section.append(
-                f"- Real name: {real}"
-                if real
-                else "- Real name: (not set)"
+                f"- Real name: {real}" if real else "- Real name: (not set)"
             )
-            user_section.append(
-                f"- Title: {title}" if title else "- Title: (not set)"
-            )
+            user_section.append(f"- Title: {title}" if title else "- Title: (not set)")
         else:
             user_section.append(
                 "no signal — users.info returned no data "
                 "(missing users:read scope, or user not visible)"
             )
     else:
-        user_section.append(
-            "no signal — missing Slack token or user_id in context"
-        )
+        user_section.append("no signal — missing Slack token or user_id in context")
     sections.append("\n".join(user_section))
 
     # --- Section 4: Semantic memory hint ---
@@ -990,12 +1233,11 @@ def inspect_codebase_context() -> str:
             channel_id=channel_id,
             known_repos=known_repos,
             isolated=is_isolated,
+            shared_across_channels=config.memory.shared_across_channels,
             user_id=user_id,
         )
         if hint:
-            memory_section.append(
-                f"- Most recently used repo in this scope: `{hint}`"
-            )
+            memory_section.append(f"- Most recently used repo in this scope: `{hint}`")
         else:
             memory_section.append(
                 "no signal — no prior repo usage indexed for this "
@@ -1049,9 +1291,13 @@ def code_search(query: str, repo: str, max_results: int = 20) -> str:
             "codebases list in the system prompt and retry with "
             "repo='owner/name'."
         )
+    repo, authorization_error = _authorize_github_repo(repo, ctx)
+    if authorization_error:
+        return authorization_error
+    assert repo is not None
     if not installation_id:
         return (
-            "Error: this tenant has not installed the AgentCore Reference GitHub App "
+            "Error: this tenant has not installed the Agent GitHub App "
             "yet. Ask the user to install it from the onboarding "
             "integrations page, then retry."
         )
@@ -1109,9 +1355,13 @@ def code_read_file(path: str, repo: str, ref: str | None = None) -> str:
             "codebases list in the system prompt and retry with "
             "repo='owner/name'."
         )
+    repo, authorization_error = _authorize_github_repo(repo, ctx)
+    if authorization_error:
+        return authorization_error
+    assert repo is not None
     if not installation_id:
         return (
-            "Error: this tenant has not installed the AgentCore Reference GitHub App "
+            "Error: this tenant has not installed the Agent GitHub App "
             "yet. Ask the user to install it from the onboarding "
             "integrations page, then retry."
         )
@@ -1132,13 +1382,9 @@ def code_read_file(path: str, repo: str, ref: str | None = None) -> str:
         )
         return f"Error: code_read_file failed unexpectedly: {type(e).__name__}: {e}"
 
-    header = (
-        f"=== {file.repo}/{file.path} @ {file.ref} ({file.size} bytes) ==="
-    )
+    header = f"=== {file.repo}/{file.path} @ {file.ref} ({file.size} bytes) ==="
     suffix = (
-        "\n\n[truncated — file is larger than the 64 KB cap]"
-        if file.truncated
-        else ""
+        "\n\n[truncated — file is larger than the 64 KB cap]" if file.truncated else ""
     )
     return f"{header}\n{file.content}{suffix}"
 
@@ -1173,9 +1419,13 @@ def code_find_symbol(symbol: str, repo: str, max_results: int = 15) -> str:
             "codebases list in the system prompt and retry with "
             "repo='owner/name'."
         )
+    repo, authorization_error = _authorize_github_repo(repo, ctx)
+    if authorization_error:
+        return authorization_error
+    assert repo is not None
     if not installation_id:
         return (
-            "Error: this tenant has not installed the AgentCore Reference GitHub App "
+            "Error: this tenant has not installed the Agent GitHub App "
             "yet. Ask the user to install it from the onboarding "
             "integrations page, then retry."
         )
@@ -1242,9 +1492,13 @@ def code_list_commits(
             "codebases list in the system prompt and retry with "
             "repo='owner/name'."
         )
+    repo, authorization_error = _authorize_github_repo(repo, ctx)
+    if authorization_error:
+        return authorization_error
+    assert repo is not None
     if not installation_id:
         return (
-            "Error: this tenant has not installed the AgentCore Reference GitHub App "
+            "Error: this tenant has not installed the Agent GitHub App "
             "yet. Ask the user to install it from the onboarding "
             "integrations page, then retry."
         )
@@ -1262,10 +1516,7 @@ def code_list_commits(
             ref,
             path,
         )
-        return (
-            f"Error: code_list_commits failed unexpectedly: "
-            f"{type(e).__name__}: {e}"
-        )
+        return f"Error: code_list_commits failed unexpectedly: {type(e).__name__}: {e}"
 
     if not commits:
         scope = f" on {ref}" if ref else ""
@@ -1278,8 +1529,7 @@ def code_list_commits(
     for i, c in enumerate(commits, start=1):
         date = c.date.split("T", 1)[0] if c.date else "?"
         lines.append(
-            f"{i}. {c.short_sha} — {c.message}  "
-            f"[{c.author}, {date}]  ({c.html_url})"
+            f"{i}. {c.short_sha} — {c.message}  [{c.author}, {date}]  ({c.html_url})"
         )
     return "\n".join(lines)
 
@@ -1325,16 +1575,19 @@ def propose_pr(
     channel_id = ctx.get("channel_id", "") or ""
     thread_id = ctx.get("thread_id", "") or ""
 
-    repo = (repo or "").strip()
-    if not repo:
+    if not (repo or "").strip():
         return (
             "Error: repo is required. Pick one from the ## Connected "
             "codebases list in the system prompt and retry with "
             "repo='owner/name'."
         )
+    repo, authorization_error = _authorize_github_repo(repo, ctx)
+    if authorization_error:
+        return authorization_error
+    assert repo is not None
     if not installation_id:
         return (
-            "Error: this tenant has not installed the AgentCore Reference GitHub App "
+            "Error: this tenant has not installed the Agent GitHub App "
             "yet. Ask the user to install it from the onboarding "
             "integrations page, then retry."
         )
@@ -1387,19 +1640,37 @@ def propose_pr(
         )
 
     # 2. Mark inflight + register async task BEFORE firing the
-    #    Fargate task. Order matters: ping._inflight_tasks must be
+    #    Fargate task. Order matters: heartbeat registration must be
     #    populated before app.add_async_task so the next /ping
     #    response sees >0 inflight (gotcha noted in
     #    start_background_task above).
-    ping._inflight_tasks.add(task_id)
-    app.add_async_task(task_id)
+    busy_threshold = max(1, int(ctx.get("heartbeat_busy_threshold", 1) or 1))
+    try:
+        _register_async_task(task_id, busy_threshold)
+    except Exception as exc:  # noqa: BLE001
+        error = f"{type(exc).__name__}: {exc}"
+        log.exception("propose_pr: failed to register async task")
+        try:
+            _sandbox_jobs_table().update_item(
+                Key={"task_id": task_id},
+                UpdateExpression="SET #s = :s, completed_at = :c, #e = :e",
+                ExpressionAttributeNames={"#s": "status", "#e": "error"},
+                ExpressionAttributeValues={
+                    ":s": "error",
+                    ":c": _iso_now(),
+                    ":e": error,
+                },
+            )
+        except Exception:  # noqa: BLE001
+            log.exception("propose_pr: failed to record async registration error")
+        return f"Error: could not register the PR job with AgentCore ({error})."
 
     # 3. Fire the Fargate sandbox task. On failure, roll back the
     #    HealthyBusy state immediately so the agent doesn't get
     #    stuck pinned alive on a launch error.
     try:
         ecs = _ecs_client()
-        ecs.run_task(
+        response = ecs.run_task(
             cluster=coords["cluster_arn"],
             taskDefinition=coords["task_def_arn"],
             launchType="FARGATE",
@@ -1407,7 +1678,9 @@ def propose_pr(
             networkConfiguration={
                 "awsvpcConfiguration": {
                     "subnets": [s for s in coords["subnets"].split(",") if s],
-                    "securityGroups": [s for s in coords["security_groups"].split(",") if s],
+                    "securityGroups": [
+                        s for s in coords["security_groups"].split(",") if s
+                    ],
                     "assignPublicIp": "ENABLED",
                 }
             },
@@ -1422,6 +1695,7 @@ def propose_pr(
                 ]
             },
         )
+        _validate_run_task_response(response)
     except Exception as e:  # noqa: BLE001
         log.exception("propose_pr: ecs.run_task failed for task_id=%s", task_id)
         try:
@@ -1441,7 +1715,7 @@ def propose_pr(
             )
         except Exception:  # noqa: BLE001
             log.exception("propose_pr: also failed to mark row as error")
-        ping._inflight_tasks.discard(task_id)
+        ping.complete_task(task_id)
         app.complete_async_task(task_id)
         return (
             f"Error: failed to launch the sandbox task "
@@ -1468,12 +1742,13 @@ def propose_pr(
 
     # 6. Spawn the daemon poller. It will write the completion audit
     #    row and clear HealthyBusy when the sandbox writes a terminal
-    #    status (or when the 10-min ceiling hits). The bridge callback
+    #    status (or when the tenant's background-work ceiling hits). The bridge callback
     #    path posts the Slack message in parallel — both signals are
     #    independent so a callback failure doesn't leak HealthyBusy.
+    poll_ceiling_seconds = _heartbeat_max_background_seconds(ctx)
     threading.Thread(
         target=_poll_sandbox_completion,
-        args=(task_id, repo, ctx_snapshot),
+        args=(task_id, repo, ctx_snapshot, poll_ceiling_seconds),
         daemon=True,
     ).start()
 
@@ -1508,7 +1783,7 @@ def check_task_status(task_id: str = "") -> str:
     - **running**: sandbox container is executing
     - **success**: PR opened successfully (``pr_url`` included)
     - **error**: sandbox failed (``error`` message included)
-    - **orphaned**: 10-minute poll ceiling exceeded without terminal status
+    - **orphaned**: the tenant's background-work ceiling elapsed without terminal status
 
     Args:
         task_id: The ``pr-XXXXXXXX`` identifier returned by
@@ -1597,14 +1872,16 @@ def _format_task_row(row: dict[str, Any]) -> str:
     if status == "pending":
         lines.append("\nThe sandbox container hasn't started yet.")
     elif status == "running":
-        lines.append("\nThe sandbox is working on it — cloning, editing, and opening the PR.")
+        lines.append(
+            "\nThe sandbox is working on it — cloning, editing, and opening the PR."
+        )
     elif status == "success":
         lines.append("\nThe PR is open and ready for review.")
     elif status == "error":
         lines.append("\nThe sandbox failed. See the error above.")
     elif status == "orphaned":
         lines.append(
-            "\nThe task exceeded the 10-minute deadline without completing. "
+            "\nThe task exceeded its configured background-work deadline. "
             "The sandbox container may have crashed. Try re-queuing."
         )
 
@@ -1613,7 +1890,7 @@ def _format_task_row(row: dict[str, Any]) -> str:
 
 @audited_tool("manage_config")
 def manage_config(action: str, section: str, data: str | None = None) -> str:
-    """View or update this bot's configuration.
+    """View this bot's configuration or update it as an authorized admin.
 
     Call this when a user asks to view or change the bot's settings: adding
     skills/runbooks, modifying bot-to-bot policy, updating escalation routes,
@@ -1632,6 +1909,7 @@ def manage_config(action: str, section: str, data: str | None = None) -> str:
     """
     from tenant import (
         BotPolicyConfig,
+        CatalogConfig,
         ChannelPersona,
         ContextAssemblyConfig,
         EscalationConfig,
@@ -1646,26 +1924,70 @@ def manage_config(action: str, section: str, data: str | None = None) -> str:
         return "Error: no tenant_id in request context."
 
     allowed_sections = {
-        "skills", "bot_policy", "escalation", "context_assembly",
-        "catalog_tools", "system_prompt", "channels", "all",
+        "skills",
+        "bot_policy",
+        "escalation",
+        "context_assembly",
+        "catalog_tools",
+        "system_prompt",
+        "channels",
+        "all",
     }
     if section not in allowed_sections:
         return f"Error: unknown section '{section}'. Choose from: {sorted(allowed_sections)}"
 
+    config = load_tenant_config(tenant_id)
+    requester_user_id = str(ctx.get("user_id") or "")
+    configured_admin_ids = ctx.get("config_admin_user_ids")
+    is_admin = bool(
+        requester_user_id
+        and isinstance(configured_admin_ids, (tuple, list))
+        and requester_user_id in configured_admin_ids
+    )
+
     if action == "view":
-        config = load_tenant_config(tenant_id)
-        if section == "all":
-            return json.dumps({
-                "skills": [s.model_dump() for s in config.skills],
-                "bot_policy": config.bot_policy.model_dump(),
-                "escalation": config.escalation.model_dump(),
+        # Non-admin reads expose capability summaries, not prompt text,
+        # channel IDs, escalation contacts, or allowlisted identity IDs.
+        if not is_admin:
+            safe_sections: dict[str, Any] = {
+                "skills": [
+                    {"name": skill.name, "trigger": skill.trigger}
+                    for skill in config.skills
+                ],
+                "bot_policy": {
+                    "allow_all_bots": config.bot_policy.allow_all_bots,
+                    "trusted_bot_count": len(config.bot_policy.trusted_bot_ids),
+                    "open_channel_count": len(config.bot_policy.open_channels),
+                },
+                "escalation": {
+                    "teams": [route.team_name for route in config.escalation.routes],
+                    "route_count": len(config.escalation.routes),
+                },
                 "context_assembly": config.context_assembly.model_dump(),
                 "catalog_tools": config.catalog.allowed_tools,
-                "channels": {cid: p.model_dump() for cid, p in config.channels.items()},
-                "system_prompt": config.system_prompt[:200] + (
-                    "..." if len(config.system_prompt) > 200 else ""
-                ),
-            }, indent=2)
+                "channels": {"configured_count": len(config.channels)},
+                "system_prompt": "redacted; configured admin access required",
+            }
+            if section == "all":
+                return json.dumps(safe_sections, indent=2)
+            return json.dumps(safe_sections[section], indent=2)
+
+        if section == "all":
+            return json.dumps(
+                {
+                    "skills": [s.model_dump() for s in config.skills],
+                    "bot_policy": config.bot_policy.model_dump(),
+                    "escalation": config.escalation.model_dump(),
+                    "context_assembly": config.context_assembly.model_dump(),
+                    "catalog_tools": config.catalog.allowed_tools,
+                    "channels": {
+                        cid: p.model_dump() for cid, p in config.channels.items()
+                    },
+                    "system_prompt": config.system_prompt[:200]
+                    + ("..." if len(config.system_prompt) > 200 else ""),
+                },
+                indent=2,
+            )
         if section == "skills":
             return json.dumps([s.model_dump() for s in config.skills], indent=2)
         if section == "bot_policy":
@@ -1686,6 +2008,11 @@ def manage_config(action: str, section: str, data: str | None = None) -> str:
         return "Error: unhandled section."
 
     if action == "update":
+        if not is_admin:
+            return (
+                "Error: configuration updates require the requesting Slack "
+                "user to be listed in this tenant's admin_user_ids."
+            )
         if section == "all":
             return "Error: cannot update 'all' at once. Update individual sections."
         if not data:
@@ -1695,7 +2022,6 @@ def manage_config(action: str, section: str, data: str | None = None) -> str:
         except json.JSONDecodeError as e:
             return f"Error: invalid JSON in data: {e}"
 
-        config = load_tenant_config(tenant_id)
         try:
             if section == "skills":
                 config.skills = [SkillDef.model_validate(s) for s in parsed]
@@ -1708,7 +2034,23 @@ def manage_config(action: str, section: str, data: str | None = None) -> str:
             elif section == "catalog_tools":
                 if not isinstance(parsed, list):
                     return "Error: catalog_tools must be a list of tool IDs."
-                config.catalog.allowed_tools = parsed
+                if not all(isinstance(item, str) and item.strip() for item in parsed):
+                    return (
+                        "Error: catalog_tools must contain only non-empty string "
+                        "tool IDs."
+                    )
+                normalized = [item.strip() for item in parsed]
+                if len(set(normalized)) != len(normalized):
+                    return "Error: catalog_tools must not contain duplicate tool IDs."
+                unknown = [item for item in normalized if item not in CATALOG]
+                if unknown:
+                    return f"Error: unknown catalog tool IDs: {sorted(unknown)}"
+                config.catalog = CatalogConfig.model_validate(
+                    {
+                        **config.catalog.model_dump(),
+                        "allowed_tools": normalized,
+                    }
+                )
             elif section == "channels":
                 if not isinstance(parsed, dict):
                     return "Error: channels must be a dict of channel_id -> persona object."
@@ -1733,8 +2075,431 @@ def manage_config(action: str, section: str, data: str | None = None) -> str:
 
 
 # ----------------------------------------------------------------------------
+# Ephemeral dashboards
+# ----------------------------------------------------------------------------
+#
+# `render_dashboard` creates a multi-panel dashboard (charts, tables, stats,
+# text, lists) and hosts it at a short-lived URL on the onboarding service.
+# Dashboards auto-expire via DynamoDB TTL (default 7 days).
+#
+# The spec is a JSON document stored in the `dashboards` DDB table. The
+# onboarding service reads it via the bridge at GET /internal/dashboard
+# with the bearer token in a request header
+# and renders it with React/Recharts.
+
+_DASHBOARDS_TABLE_NAME = os.getenv("DASHBOARDS_TABLE", "dashboards")
+_DASHBOARD_TTL_DAYS = 7
+_DASHBOARD_MAX_ITEM_BYTES = 256 * 1024
+_DASHBOARD_MAX_PANELS = 24
+_DASHBOARD_MAX_POINTS = 500
+_DASHBOARD_MAX_RENDER_CELLS = 10_000
+
+_dashboards_table_singleton: Any | None = None
+
+
+class _DashboardModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, str_strip_whitespace=True)
+
+
+class _ChartDataset(_DashboardModel):
+    label: str = Field(min_length=1, max_length=80)
+    data: list[int | float] = Field(min_length=1, max_length=_DASHBOARD_MAX_POINTS)
+
+    @field_validator("data")
+    @classmethod
+    def _finite_data(cls, values: list[int | float]) -> list[int | float]:
+        if any(
+            isinstance(value, float) and not math.isfinite(value) for value in values
+        ):
+            raise ValueError("chart data values must be finite")
+        return values
+
+
+class _ChartPanel(_DashboardModel):
+    type: Literal["chart"]
+    title: str | None = Field(default=None, min_length=1, max_length=160)
+    chart_type: Literal["line", "bar", "pie", "area", "scatter"]
+    labels: list[str] = Field(min_length=1, max_length=_DASHBOARD_MAX_POINTS)
+    datasets: list[_ChartDataset] = Field(min_length=1, max_length=8)
+    x_label: str | None = Field(default=None, min_length=1, max_length=80)
+    y_label: str | None = Field(default=None, min_length=1, max_length=80)
+
+    @field_validator("labels")
+    @classmethod
+    def _valid_labels(cls, values: list[str]) -> list[str]:
+        if any(not value.strip() or len(value) > 160 for value in values):
+            raise ValueError("chart labels must be 1-160 non-whitespace characters")
+        return [value.strip() for value in values]
+
+    @model_validator(mode="after")
+    def _matching_series(self) -> "_ChartPanel":
+        if len({dataset.label for dataset in self.datasets}) != len(self.datasets):
+            raise ValueError("chart dataset labels must be unique")
+        if any(len(dataset.data) != len(self.labels) for dataset in self.datasets):
+            raise ValueError("each chart dataset must have one value per label")
+        if self.chart_type == "pie":
+            if len(self.datasets) != 1:
+                raise ValueError("pie charts support exactly one dataset")
+            pie_values = self.datasets[0].data
+            if any(value < 0 for value in pie_values):
+                raise ValueError("pie chart values must be non-negative")
+            if not any(value > 0 for value in pie_values):
+                raise ValueError("pie charts require at least one positive value")
+        return self
+
+
+_TableCell = str | int | float | bool | None
+
+
+class _TablePanel(_DashboardModel):
+    type: Literal["table"]
+    title: str | None = Field(default=None, min_length=1, max_length=160)
+    columns: list[str] = Field(min_length=1, max_length=24)
+    rows: list[list[_TableCell]] = Field(max_length=1000)
+
+    @field_validator("columns")
+    @classmethod
+    def _valid_columns(cls, values: list[str]) -> list[str]:
+        if any(not value.strip() or len(value) > 120 for value in values):
+            raise ValueError("table columns must be 1-120 non-whitespace characters")
+        if len(set(values)) != len(values):
+            raise ValueError("table column names must be unique")
+        return [value.strip() for value in values]
+
+    @field_validator("rows")
+    @classmethod
+    def _valid_rows(cls, rows: list[list[_TableCell]]) -> list[list[_TableCell]]:
+        for row in rows:
+            for value in row:
+                if isinstance(value, float) and not math.isfinite(value):
+                    raise ValueError("table numbers must be finite")
+                if isinstance(value, str) and len(value) > 1000:
+                    raise ValueError(
+                        "table cell strings must be at most 1000 characters"
+                    )
+        return rows
+
+    @model_validator(mode="after")
+    def _matching_rows(self) -> "_TablePanel":
+        if any(len(row) != len(self.columns) for row in self.rows):
+            raise ValueError("each table row must have one cell per column")
+        return self
+
+
+class _StatPanel(_DashboardModel):
+    type: Literal["stat"]
+    title: str | None = Field(default=None, min_length=1, max_length=160)
+    value: str = Field(min_length=1, max_length=160)
+    delta: str | None = Field(default=None, min_length=1, max_length=80)
+    trend: Literal["up", "down", "flat"] | None = None
+
+
+class _TextPanel(_DashboardModel):
+    type: Literal["text"]
+    title: str | None = Field(default=None, min_length=1, max_length=160)
+    content: str = Field(min_length=1, max_length=20_000)
+
+
+class _ListItem(_DashboardModel):
+    key: str = Field(min_length=1, max_length=120)
+    value: str = Field(max_length=1000)
+
+
+class _ListPanel(_DashboardModel):
+    type: Literal["list"]
+    title: str | None = Field(default=None, min_length=1, max_length=160)
+    items: list[_ListItem] = Field(min_length=1, max_length=200)
+
+
+_Panel = Annotated[
+    _ChartPanel | _TablePanel | _StatPanel | _TextPanel | _ListPanel,
+    Field(discriminator="type"),
+]
+
+
+class _DashboardInput(_DashboardModel):
+    title: str = Field(min_length=1, max_length=200)
+    panels: list[_Panel] = Field(min_length=1, max_length=_DASHBOARD_MAX_PANELS)
+
+    @model_validator(mode="after")
+    def _bounded_render_complexity(self) -> "_DashboardInput":
+        # The serialized-item limit protects DynamoDB, but compact numeric
+        # tables can remain small on disk while creating a huge browser DOM.
+        # Bound the cells/points the public renderer and its accessible data
+        # tables will materialize in one page.
+        render_cells = 0
+        for panel in self.panels:
+            if isinstance(panel, _ChartPanel):
+                render_cells += len(panel.labels) * (len(panel.datasets) + 1)
+            elif isinstance(panel, _TablePanel):
+                render_cells += len(panel.columns) * (len(panel.rows) + 1)
+            elif isinstance(panel, _ListPanel):
+                render_cells += len(panel.items) * 2
+            else:
+                render_cells += 1
+        if render_cells > _DASHBOARD_MAX_RENDER_CELLS:
+            raise ValueError(
+                "dashboard render complexity exceeds "
+                f"{_DASHBOARD_MAX_RENDER_CELLS} cells or points"
+            )
+        return self
+
+
+def _dashboard_base_url() -> str:
+    """Return a safe, portable public base URL for dashboard links."""
+    raw = os.getenv("DASHBOARD_BASE_URL", "").strip()
+    if not raw:
+        if os.getenv("AGENT_LOCAL_STORES") == "1" or os.getenv("LOCAL_DEV") == "1":
+            return "http://localhost:3000"
+        raise RuntimeError("DASHBOARD_BASE_URL is required outside local development")
+
+    parsed = urlsplit(raw)
+    is_loopback = parsed.hostname in {"localhost", "127.0.0.1", "::1"}
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValueError("DASHBOARD_BASE_URL must be an absolute http(s) URL")
+    if parsed.scheme != "https" and not is_loopback:
+        raise ValueError("DASHBOARD_BASE_URL must use HTTPS outside localhost")
+    if parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise ValueError(
+            "DASHBOARD_BASE_URL must not contain credentials, query, or fragment"
+        )
+    if parsed.path not in {"", "/"}:
+        raise ValueError("DASHBOARD_BASE_URL must be an origin without a path")
+    return raw.rstrip("/")
+
+
+def _validation_summary(exc: ValidationError) -> str:
+    details = []
+    for error in exc.errors(include_url=False, include_input=False)[:5]:
+        location = ".".join(str(part) for part in error["loc"])
+        details.append(f"{location}: {error['msg']}")
+    return "; ".join(details)
+
+
+def _validate_dashboard(title: str, panels: list[dict]) -> dict[str, Any]:
+    try:
+        validated = _DashboardInput.model_validate({"title": title, "panels": panels})
+    except ValidationError as exc:
+        raise ValueError(f"Invalid dashboard: {_validation_summary(exc)}") from exc
+    return validated.model_dump(mode="python")
+
+
+def _floats_to_decimal(obj: Any) -> Any:
+    """Convert finite floats recursively for boto3's DynamoDB serializer."""
+    if isinstance(obj, float):
+        if not math.isfinite(obj):
+            raise ValueError("dashboard numbers must be finite")
+        return Decimal(str(obj))
+    if isinstance(obj, Decimal):
+        if not obj.is_finite():
+            raise ValueError("dashboard numbers must be finite")
+        return obj
+    if isinstance(obj, dict):
+        return {key: _floats_to_decimal(value) for key, value in obj.items()}
+    if isinstance(obj, list):
+        return [_floats_to_decimal(value) for value in obj]
+    return obj
+
+
+def _local_dashboards_dir() -> Path:
+    configured = os.getenv("DASHBOARD_LOCAL_DIR")
+    if configured:
+        return Path(configured).expanduser().resolve()
+    current = Path(__file__).resolve()
+    for parent in current.parents:
+        examples = parent / "examples"
+        if examples.is_dir():
+            return examples / "dashboards"
+    raise FileNotFoundError(f"Could not find examples/ above {current}")
+
+
+def _put_dashboard_spec(spec: dict[str, Any]) -> None:
+    if os.getenv("AGENT_LOCAL_STORES") == "1":
+        directory = _local_dashboards_dir()
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        target = directory / f"{spec['token']}.json"
+        temporary = directory / f".{spec['token']}.{uuid.uuid4().hex}.tmp"
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                json.dump(spec, handle, ensure_ascii=False, indent=2)
+                handle.write("\n")
+        except BaseException:
+            temporary.unlink(missing_ok=True)
+            raise
+        temporary.replace(target)
+        return
+    _dashboards_table().put_item(Item=_floats_to_decimal(spec))
+
+
+def _dashboards_table() -> Any:
+    """Lazy boto3 DynamoDB Table handle for dashboards."""
+    global _dashboards_table_singleton
+    if _dashboards_table_singleton is None:
+        import boto3
+
+        resource = boto3.resource(
+            "dynamodb", region_name=os.getenv("AWS_REGION", "us-west-2")
+        )
+        _dashboards_table_singleton = resource.Table(_DASHBOARDS_TABLE_NAME)
+    return _dashboards_table_singleton
+
+
+def _dashboard_audit_args(args: tuple[Any, ...], kwargs: dict[str, Any]) -> str:
+    """Summarize dashboard shape without retaining panel content."""
+    title = kwargs.get("title", args[0] if args else "")
+    panels = kwargs.get("panels", args[1] if len(args) > 1 else [])
+    panel_types = (
+        sorted(
+            {
+                str(panel.get("type", "unknown"))
+                for panel in panels
+                if isinstance(panel, dict)
+            }
+        )
+        if isinstance(panels, list)
+        else []
+    )
+    return json.dumps(
+        {
+            "title": str(title)[:200],
+            "panel_count": len(panels) if isinstance(panels, list) else 0,
+            "panel_types": panel_types,
+        }
+    )
+
+
+def _dashboard_audit_result(_result: Any) -> str:
+    return "<dashboard bearer URL redacted>"
+
+
+@audited_tool(
+    "render_dashboard",
+    args_summarizer=_dashboard_audit_args,
+    result_summarizer=_dashboard_audit_result,
+)
+def render_dashboard(title: str, panels: list[dict]) -> str:
+    """Create an interactive dashboard and return a shareable URL.
+
+    Use this whenever the user would benefit from a visual display of data
+    rather than a plain-text reply — charts, tables, key metrics, timelines,
+    or any combination. The dashboard is hosted at a short-lived URL (7 days)
+    that anyone with the link can view.
+
+    Args:
+        title: Dashboard title shown at the top of the page.
+        panels: List of panel objects. Each panel has a "type" field and
+                type-specific data fields. Supported panel types:
+
+            chart — Interactive chart (line, bar, pie, area, scatter).
+              {
+                "type": "chart",
+                "title": "CPU over time",
+                "chart_type": "line",
+                "labels": ["10:00", "10:05", "10:10"],
+                "datasets": [
+                  {"label": "web-prod", "data": [42, 45, 38]},
+                  {"label": "web-staging", "data": [20, 22, 19]}
+                ],
+                "x_label": "Time",
+                "y_label": "CPU %"
+              }
+
+            table — Data table.
+              {
+                "type": "table",
+                "title": "Top endpoints by latency",
+                "columns": ["Endpoint", "P50 (ms)", "P99 (ms)", "RPM"],
+                "rows": [
+                  ["/api/users", 12, 89, 4200],
+                  ["/api/orders", 34, 210, 1800]
+                ]
+              }
+
+            stat — Big-number KPI card with optional trend.
+              {
+                "type": "stat",
+                "title": "Error rate",
+                "value": "2.3%",
+                "delta": "+0.5%",
+                "trend": "up"
+              }
+
+            text — Plain text block for context.
+              {
+                "type": "text",
+                "title": "Summary",
+                "content": "CPU spiked at 10:05 due to a deploy..."
+              }
+
+            list — Key-value pairs or simple items.
+              {
+                "type": "list",
+                "title": "On-call contacts",
+                "items": [
+                  {"key": "Primary", "value": "@alice"},
+                  {"key": "Secondary", "value": "@bob"}
+                ]
+              }
+
+    Returns:
+        The dashboard URL, e.g. "https://agent.example.com/d/f7a2c..."
+    """
+    return _render_dashboard(title, panels)
+
+
+def _render_dashboard(title: str, panels: list[dict]) -> str:
+    """Validated implementation kept separate from the Strands wrapper for tests."""
+    from datetime import datetime, timezone
+
+    validated = _validate_dashboard(title, panels)
+    base_url = _dashboard_base_url()
+    ctx = get_context()
+    token = uuid.uuid4().hex
+
+    spec = {
+        "token": token,
+        "tenant_id": ctx.get("tenant_id", "unknown"),
+        "created_by": ctx.get("user_id", ""),
+        "created_at": datetime.now(timezone.utc)
+        .isoformat(timespec="milliseconds")
+        .replace("+00:00", "Z"),
+        "ttl": int(time.time()) + _DASHBOARD_TTL_DAYS * 86400,
+        "title": validated["title"],
+        "panels": validated["panels"],
+    }
+
+    try:
+        encoded = json.dumps(
+            spec,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Invalid dashboard: spec is not JSON serializable") from exc
+    if len(encoded) > _DASHBOARD_MAX_ITEM_BYTES:
+        raise ValueError(
+            f"Invalid dashboard: serialized spec exceeds {_DASHBOARD_MAX_ITEM_BYTES} bytes"
+        )
+
+    _put_dashboard_spec(spec)
+
+    url = f"{base_url}/d/{token}"
+    # The URL is a bearer credential. Never put the token or full URL in
+    # application logs; return it only to the requesting agent invocation.
+    log.info(
+        "render_dashboard: created dashboard (%d panels, tenant=%s)",
+        len(panels),
+        spec["tenant_id"],
+    )
+    return url
+
+
+# ----------------------------------------------------------------------------
 # Selection
 # ----------------------------------------------------------------------------
+
 
 def build_catalog_tools(
     allowed: list[str],
@@ -1742,15 +2507,14 @@ def build_catalog_tools(
 ) -> list:
     """Filter the catalog by tenant whitelist.
 
-    `tool_config` is forwarded for tools that need per-tenant config (creds,
-    endpoints). v0 catalog tools don't read from it; later tools (e.g. a real
-    `jira_lookup` or `query_customer_db`) will.
+    `tool_config` is reserved for per-tenant settings consumed by registered
+    in-process tools. Credentials and endpoints for remote tools belong in the
+    Gateway/MCP configuration, not in this catalog.
     """
     missing = [name for name in allowed if name not in CATALOG]
     if missing:
         log.warning(
-            "Tenant config lists tools not registered in CATALOG "
-            "(skipped): %s",
+            "Tenant config lists tools not registered in CATALOG (skipped): %s",
             missing,
         )
     return [CATALOG[name] for name in allowed if name in CATALOG]

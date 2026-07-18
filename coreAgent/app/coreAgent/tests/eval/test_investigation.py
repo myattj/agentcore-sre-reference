@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import json
 from typing import Any
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -167,7 +166,7 @@ def _run_scenario(scenario: EvalScenario) -> EvalScore:
         tools.append(_build_mock_tool(tool_name, mock_response))
 
     model = BedrockModel(
-        model_id="us.anthropic.claude-sonnet-4-6-20250514-v1:0",
+        model_id="us.anthropic.claude-sonnet-4-6",
         region_name="us-west-2",
     )
 

@@ -18,16 +18,28 @@ Do NOT skip the 24h wait. We've tripped CloudTrail alarms twice doing that — t
 ## Step 1 — Create new key
 
 ```bash
-new_key=$(aws iam create-access-key --user-name deploy-svc)
-echo $new_key | jq -r '.AccessKey | "ID=" + .AccessKeyId + "\nSECRET=" + .SecretAccessKey'
+umask 077
+KEY_RESPONSE_FILE=$(mktemp)
+SERVICE_SECRET_FILE=$(mktemp)
+cleanup_key_rotation() {
+  rm -f "$KEY_RESPONSE_FILE" "$SERVICE_SECRET_FILE"
+}
+trap cleanup_key_rotation EXIT
+
+aws iam create-access-key --user-name deploy-svc >"$KEY_RESPONSE_FILE"
+jq '{access_key_id: .AccessKey.AccessKeyId,
+     secret_access_key: .AccessKey.SecretAccessKey}' \
+  "$KEY_RESPONSE_FILE" >"$SERVICE_SECRET_FILE"
+NEW_KEY_ID=$(jq -r '.AccessKey.AccessKeyId' "$KEY_RESPONSE_FILE")
 ```
 
-Store the credentials in AWS Secrets Manager at `agentcore/services/<service>-iam`:
+Set <code>SERVICE_NAME</code> to the workload being rotated, then store the
+credentials in its Secrets Manager entry:
 
 ```bash
 aws secretsmanager put-secret-value \
-  --secret-id agentcore/services/<service>-iam \
-  --secret-string "{\"access_key_id\":\"$ID\",\"secret_access_key\":\"$SECRET\"}"
+  --secret-id "agentcore/services/${SERVICE_NAME}-iam" \
+  --secret-string "file://$SERVICE_SECRET_FILE"
 ```
 
 ## Step 2 — Deploy service with new key
@@ -35,8 +47,8 @@ aws secretsmanager put-secret-value \
 The service reads the secret on startup. Trigger a rolling restart:
 
 ```bash
-kubectl -n prod rollout restart deployment/<service>
-kubectl -n prod rollout status deployment/<service>
+kubectl -n prod rollout restart "deployment/$SERVICE_NAME"
+kubectl -n prod rollout status "deployment/$SERVICE_NAME"
 ```
 
 ## Step 3 — Verify

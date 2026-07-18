@@ -1,61 +1,45 @@
 """Shared helpers for the scripts/testenv rig.
 
-Bot-token loading, persona registry, rate-limited Slack posting, and the
+Seeder-token loading, persona registry, rate-limited Slack posting, and the
 SeedMessage dataclass that every pack returns lists of.
 
-This module is deliberately standalone — it reads tokens directly from
-Secrets Manager instead of importing the bridge's slack_token_store so
-the scripts stay runnable from any venv that has boto3 + slack-sdk
-(which ``bridge/.venv`` does). Mirrors the pattern in scripts/smoke.py.
+This module is deliberately standalone. Test data is posted through a separate,
+disposable Slack seeder app so the customer-facing Agent app never needs the
+high-trust ``chat:write.customize`` or ``channels:join`` scopes.
 """
 from __future__ import annotations
 
 import logging
 import os
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 log = logging.getLogger(__name__)
 
 
 # ----------------------------------------------------------------------------
-# Bot-token loader
+# Seeder-token loader
 # ----------------------------------------------------------------------------
 
-def _secret_id(tenant_id: str) -> str:
-    """Secrets Manager path the bridge writes to in the OAuth callback.
-    Mirrors ``bridge/bridge/slack_oauth.py:_store_bot_token``."""
-    return f"agentcore/tenants/{tenant_id}/slack/bot_token"
+def load_seeder_bot_token() -> str:
+    """Load the disposable test seeder's bot token from the environment.
 
-
-def load_bot_token(tenant_id: str, region: str | None = None) -> str:
-    """Fetch the tenant's Slack bot token from Secrets Manager.
-
-    Raises if the secret doesn't exist — the user hasn't installed AgentCore Reference
-    to their Slack workspace yet. The error message points at the fix.
+    Never fall back to the tenant Agent token: doing so would make production
+    OAuth request test-only identity-customization and channel-join scopes.
     """
-    import boto3
-    from botocore.exceptions import ClientError
-
-    region = region or os.getenv("AWS_REGION", "us-west-2")
-    client = boto3.client("secretsmanager", region_name=region)
-    secret_id = _secret_id(tenant_id)
-    try:
-        response = client.get_secret_value(SecretId=secret_id)
-    except ClientError as e:
-        code = e.response.get("Error", {}).get("Code", "")
-        if code == "ResourceNotFoundException":
-            raise RuntimeError(
-                f"No Slack bot token at {secret_id!r}. "
-                f"Has the Slack app been installed to this workspace? "
-                f"Visit {os.getenv('BRIDGE_BASE_URL', 'https://agent.example.com')}"
-                f"/slack/install and complete the OAuth flow first."
-            ) from e
-        raise
-    token = response.get("SecretString") or ""
+    token = os.getenv("SLACK_SEEDER_BOT_TOKEN", "")
     if not token:
-        raise RuntimeError(f"Secret {secret_id!r} exists but has no value.")
+        raise RuntimeError(
+            "SLACK_SEEDER_BOT_TOKEN is required. Install the separate test "
+            "seeder app from scripts/testenv/slack_seeder_manifest.json, then "
+            "export its xoxb token in your shell."
+        )
+    if not token.startswith("xoxb-") or any(char.isspace() for char in token):
+        raise RuntimeError(
+            "SLACK_SEEDER_BOT_TOKEN must be a Slack bot token beginning with "
+            "xoxb- and containing no whitespace."
+        )
     return token
 
 

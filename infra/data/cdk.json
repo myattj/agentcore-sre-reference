@@ -9,6 +9,10 @@
     "@aws-cdk/core:target-partitions": ["aws"],
     "@aws-cdk/aws-dynamodb:retainTableReplica": true,
     "@aws-cdk/core:explicitStackTags": true,
-    "@aws-cdk/core:validateSnapshotRemovalPolicy": true
+    "@aws-cdk/core:validateSnapshotRemovalPolicy": true,
+    "availability-zones:account=000000000000:region=us-west-2": [
+      "us-west-2a",
+      "us-west-2b"
+    ]
   }
 }

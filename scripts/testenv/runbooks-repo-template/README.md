@@ -21,4 +21,4 @@ Internal operational runbooks for SRE, Data, Security, and Platform teams.
 
 ## How the bot uses these
 
-The AgentCore Reference agent has a GitHub App install on this repo. When you ask it "what's the runbook for X" in Slack, it runs `code_search` here first, then summarizes the key steps and links the file. The agent refreshes its view on every Slack invocation, so edits here are live within ~1 minute of pushing to `main`.
+The Agent bot has a GitHub App install on this repo. When you ask it "what's the runbook for X" in Slack, it runs `code_search` here first, then summarizes the key steps and links the file. The bot refreshes its view on every Slack invocation, so edits here are live within ~1 minute of pushing to `main`.

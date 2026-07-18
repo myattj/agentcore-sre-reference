@@ -1,5 +1,5 @@
 /**
- * Integrations page — all 7 connectors are live (week 5).
+ * Integrations page for the supported Gateway and GitHub connectors.
  *
  * Each integration card is an interactive client component that calls a
  * server action -> bridge -> gateway_provisioner. Per-integration
@@ -9,7 +9,7 @@ import Link from "next/link";
 
 import { getTenant } from "@/lib/bridge";
 import { getGitHubAppSlug } from "@/lib/env";
-import { requireSession } from "@/lib/session";
+import { makeGitHubInstallState, requireSession } from "@/lib/session";
 import type { CodebasesConfig } from "@/lib/types";
 
 import { ConfluenceForm } from "./ConfluenceForm";
@@ -31,6 +31,7 @@ export default async function IntegrationsPage({
     repo?: string;
     total?: string;
     reason?: string;
+    installation_id?: string;
   }>;
 }) {
   const { tenantId } = await params;
@@ -49,6 +50,7 @@ export default async function IntegrationsPage({
   }
 
   const appSlug = getGitHubAppSlug();
+  const githubInstallState = makeGitHubInstallState(token);
 
   return (
     <div>
@@ -60,8 +62,8 @@ export default async function IntegrationsPage({
           Connect your data
         </h1>
         <p className="text-sm text-[color:var(--muted)]">
-          Your bot is already running with a default prompt, shared
-          memory, and all tools on. Connecting your actual docs, alerts,
+          Your bot is already running with a default prompt, channel-scoped
+          memory, and a safe starter toolset. Connecting your actual docs, alerts,
           and tickets is what makes it useful for your team. Connect
           what you have now — you can add more later.
         </p>
@@ -88,6 +90,23 @@ export default async function IntegrationsPage({
           </span>
         </div>
       )}
+      {query.github === "pending" && (
+        <div className="mb-6 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm">
+          <strong className="font-semibold text-amber-900">
+            GitHub installation is waiting for operator approval.
+          </strong>{" "}
+          <span className="text-amber-800">
+            Send your deployment operator tenant&nbsp;
+            <code className="font-mono text-[12px]">{tenantId}</code> and
+            installation ID&nbsp;
+            <code className="font-mono text-[12px]">
+              {query.installation_id ?? "(missing)"}
+            </code>
+            , plus the expected GitHub account login. After approval, click
+            Install on GitHub again to activate repository access.
+          </span>
+        </div>
+      )}
       {query.github === "error" && (
         <div className="mb-6 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm">
           <strong className="font-semibold text-red-800">
@@ -108,7 +127,7 @@ export default async function IntegrationsPage({
         <GitHubAppCard
           codebases={codebases}
           appSlug={appSlug}
-          sessionToken={token}
+          installState={githubInstallState}
         />
       </section>
 
@@ -116,7 +135,7 @@ export default async function IntegrationsPage({
         Docs, alerts &amp; tickets
       </h2>
       <ul className="grid gap-4 sm:grid-cols-2">
-        <li><DatadogForm tenantId={tenantId} initialConnected={connected.includes("datadog")} /></li>
+        <li><DatadogForm initialConnected={connected.includes("datadog")} /></li>
         <li><PagerDutyForm tenantId={tenantId} initialConnected={connected.includes("pagerduty")} /></li>
         <li><GitHubForm tenantId={tenantId} initialConnected={connected.includes("github")} /></li>
         <li><ConfluenceForm tenantId={tenantId} initialConnected={connected.includes("confluence")} /></li>

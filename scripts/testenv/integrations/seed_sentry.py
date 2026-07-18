@@ -39,7 +39,6 @@ from typing import Any
 
 from ._common import (
     RateLimitedClient,
-    bridge_connect_integration,
     configure_logging,
     err,
     grey,
@@ -216,7 +215,7 @@ def _auth_header(dsn_parts: dict[str, str]) -> str:
     return (
         "Sentry sentry_version=7,"
         f"sentry_key={dsn_parts['public_key']},"
-        "sentry_client=agentcore-testenv/1.0"
+        "sentry_client=agent-testenv/1.0"
     )
 
 
@@ -271,14 +270,11 @@ def run_seed(
     if skip_connect:
         warn("--skip-connect: skipping bridge integration connect")
     else:
-        # NB: Sentry is NOT currently in the bridge's integration connect
-        # routes (api.py has datadog/confluence/notion/jira/linear/
-        # pagerduty/github but no sentry). Skip the connect step with a
-        # warning rather than error out — the content seeder still does
-        # the useful thing.
-        warn("no bridge connect route for Sentry yet (api.py has 6 integrations, Sentry isn't one). "
-             "Skipping the Gateway connect step. If you add a connect_sentry route in api.py later, "
-             "enable it here.")
+        # Sentry is content-only until a trusted managed connector exists.
+        warn(
+            "no bridge connect route for Sentry; skipping connection and "
+            "continuing with content seeding"
+        )
 
     if skip_seed:
         warn("--skip-seed: skipping content seed")
@@ -336,7 +332,7 @@ def run_seed(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Seed Sentry for the AgentCore Reference test env.")
+    parser = argparse.ArgumentParser(description="Seed Sentry for the Agent test env.")
     parser.add_argument("--tenant", required=True)
     parser.add_argument("--region", default=None)
     parser.add_argument("--bridge-url", default=None)

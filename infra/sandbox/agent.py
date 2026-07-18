@@ -1,9 +1,8 @@
-"""Phase B v2 sandbox agent — Claude tool-use loop for real code changes.
+"""PR sandbox agent — Claude tool-use loop for real code changes.
 
-Replaces the dummy "append a line to README" entrypoint with a real
-agent that reads the task description, explores the cloned repo, makes
+The agent reads the task description, explores the cloned repo, makes
 code changes, and returns a structured result for the entrypoint to
-commit/push/PR.
+commit, push, and turn into a pull request.
 
 The agent runs a standard Anthropic API tool-use loop:
   1. System prompt built from task_description + context_hint
@@ -35,27 +34,31 @@ import anthropic
 
 log = logging.getLogger("sandbox.agent")
 
+# Canonical Anthropic API model ID. Anthropic's Claude 4.6 aliases are
+# dateless; date-suffixed IDs for these models do not exist.
+DEFAULT_MODEL = "claude-sonnet-4-6"
+
 # ---------------------------------------------------------------------------
 # Pricing (per million tokens, USD)
 # ---------------------------------------------------------------------------
 
 PRICING: dict[str, dict[str, float]] = {
-    "claude-sonnet-4-6-20250514": {
+    DEFAULT_MODEL: {
         "input": 3.0,
         "output": 15.0,
         "cache_write": 3.75,
         "cache_read": 0.30,
     },
-    "claude-opus-4-6-20250414": {
-        "input": 15.0,
-        "output": 75.0,
-        "cache_write": 18.75,
-        "cache_read": 1.50,
+    "claude-opus-4-6": {
+        "input": 5.0,
+        "output": 25.0,
+        "cache_write": 6.25,
+        "cache_read": 0.50,
     },
 }
 
 # Fallback for unknown models — use Sonnet pricing as a conservative default.
-_DEFAULT_PRICING = PRICING["claude-sonnet-4-6-20250514"]
+_DEFAULT_PRICING = PRICING[DEFAULT_MODEL]
 
 # ---------------------------------------------------------------------------
 # Dataclasses
@@ -71,7 +74,7 @@ class TokenBudget:
     cache_creation_input_tokens: int = 0
     cache_read_input_tokens: int = 0
     budget_dollars: float = 5.0
-    model: str = "claude-sonnet-4-6-20250514"
+    model: str = DEFAULT_MODEL
 
     @property
     def cost_dollars(self) -> float:
@@ -281,8 +284,11 @@ _OUTPUT_CAP = 50 * 1024  # 50 KB cap on tool output
 
 def _safe_path(work_dir: str, path: str) -> str:
     """Resolve a relative path within work_dir. Rejects traversal."""
-    resolved = Path(work_dir).joinpath(path).resolve()
-    if not str(resolved).startswith(str(Path(work_dir).resolve())):
+    root = Path(work_dir).resolve()
+    resolved = root.joinpath(path).resolve()
+    try:
+        resolved.relative_to(root)
+    except ValueError:
         raise ValueError(f"Path escapes work directory: {path}")
     return str(resolved)
 
@@ -490,7 +496,7 @@ def run_agent_loop(
     work_dir: str,
     task_description: str,
     context_hint: str = "",
-    model: str = "claude-sonnet-4-6-20250514",
+    model: str = DEFAULT_MODEL,
     budget_dollars: float = 5.0,
     progress_callback: Callable[[str], None] | None = None,
     max_turns: int = 200,
@@ -712,7 +718,7 @@ def generate_pr_metadata(
     task_description: str,
     agent_summary: str,
     diff_stat: str,
-    model: str = "claude-sonnet-4-6-20250514",
+    model: str = DEFAULT_MODEL,
 ) -> PRMetadata:
     """Generate commit message + PR title + body from a diff.
 
@@ -734,7 +740,7 @@ def generate_pr_metadata(
     except anthropic.APIError as e:
         log.warning("PR metadata generation failed: %s", e)
         return PRMetadata(
-            title=f"AgentCore Reference: code change",
+            title="Agent: code change",
             body=f"## Summary\n{agent_summary}\n\n## Diff\n```\n{diff_stat}\n```",
             commit_message="Apply code changes",
         )
@@ -775,7 +781,7 @@ def _parse_pr_metadata(text: str, fallback_summary: str, fallback_diff: str) -> 
     if not meta.commit_message:
         meta.commit_message = "Apply code changes"
     if not meta.title:
-        meta.title = "AgentCore Reference: code change"
+        meta.title = "Agent: code change"
     if not meta.body:
         meta.body = f"## Summary\n{fallback_summary}\n\n## Diff\n```\n{fallback_diff}\n```"
 

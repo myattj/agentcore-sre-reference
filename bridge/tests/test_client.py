@@ -1,7 +1,7 @@
 """Tests for `bridge.client._parse_sse_text` and `_invoke_aws` SSE handling.
 
-Covers the BUILD_PLAN week-2 carryover fix: the agent streams responses
-as `data: ...\\n\\n` SSE frames; the bridge must parse them into clean
+Covers the AgentCore streaming contract: the agent returns responses as
+`data: ...\\n\\n` SSE frames, which the bridge parses into clean
 text for downstream consumers.
 """
 from __future__ import annotations
@@ -109,8 +109,8 @@ async def test_invoke_aws_parses_streaming_body_iterator():
     call_kwargs = fake_client.invoke_agent_runtime.call_args.kwargs
     assert call_kwargs["agentRuntimeArn"] == "arn:aws:bedrock-agentcore:us-west-2:0:runtime/test"
     payload = json.loads(call_kwargs["payload"].decode("utf-8"))
-    # ctx now carries a per-invocation Gateway JWT minted by gateway_jwt
-    # (week 4 chunk A). Asserting on its presence + tenant_id claim is
+    # ctx now carries a per-invocation Gateway JWT minted by gateway_jwt.
+    # Asserting on its presence + tenant_id claim is
     # done in test_invoke_injects_gateway_jwt below; here we just check
     # that the rest of the payload shape is unchanged.
     assert payload["tenant_id"] == "demo"
@@ -143,7 +143,7 @@ async def test_invoke_aws_parses_streaming_body_read():
 
 
 # ---------------------------------------------------------------------------
-# Gateway JWT injection (week 4 chunk A)
+# Gateway JWT injection
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio

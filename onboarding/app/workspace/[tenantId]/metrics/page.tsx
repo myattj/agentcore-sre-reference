@@ -4,7 +4,7 @@
  * Renders an at-a-glance view of the tenant's agent traffic over a
  * configurable window (1h / 24h / 7d / 30d). Data comes from the bridge
  * `/api/tenants/{id}/metrics` route which queries CloudWatch using the
- * `AgentCore Reference/Agent` namespace populated via EMF by the agent.
+ * `Agent/Runtime` namespace populated via EMF by the agent.
  *
  * This is a pure server component — no client-side state, no charts
  * library. A lightweight inline SVG sparkline gives the shape of each
@@ -65,7 +65,7 @@ export default async function TenantMetricsPage({
 
   return (
     <div>
-      <header className="mb-8 flex items-start justify-between gap-6">
+      <header className="mb-8 flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between sm:gap-6">
         <div>
           <h1 className="mb-2 text-2xl font-semibold tracking-tight">Metrics</h1>
           <p className="text-sm text-[color:var(--muted)]">

@@ -27,20 +27,101 @@ signature unchanged so callers don't care which backend is live.
   - the onboarding UI (week 3)
 all of which need consistent `if_not_exists(created_at, :now)` semantics.
 """
+
 from __future__ import annotations
 
-import json
 import os
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Protocol
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+from pydantic_core import SchemaError, SchemaValidator, core_schema
+
+
+# Tenant skill triggers are evaluated on every message, so their regex
+# contract is deliberately narrower than Python's backtracking ``re`` engine.
+# Pydantic Core's Rust regex engine guarantees linear-time matching and rejects
+# unsupported constructs such as look-around and backreferences.  We also
+# reject repeated groups as a conservative readability/safety rule: patterns
+# such as ``(a+)+`` are the classic source of catastrophic backtracking when a
+# trigger is copied into another regex implementation.
+MAX_SKILL_TRIGGER_LENGTH = 512
+MAX_SKILL_MATCH_TEXT_LENGTH = 8_192
+
+
+def _has_repeated_group(pattern: str) -> bool:
+    """Return whether a group is followed by ``*``, ``+``, or ``{...}``.
+
+    Escaped closing parentheses and parentheses inside character classes are
+    literals, not group boundaries. Optional groups (``(...)?``) remain
+    allowed because they can match at most once.
+    """
+    escaped = False
+    in_character_class = False
+    for index, char in enumerate(pattern):
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\":
+            escaped = True
+            continue
+        if char == "[":
+            in_character_class = True
+            continue
+        if char == "]" and in_character_class:
+            in_character_class = False
+            continue
+        if char != ")" or in_character_class or index + 1 >= len(pattern):
+            continue
+        next_char = pattern[index + 1]
+        if next_char in {"*", "+", "{"}:
+            return True
+    return False
+
+
+def compile_skill_trigger(trigger: str) -> SchemaValidator:
+    """Validate and compile one non-slash skill trigger.
+
+    Matching remains case-insensitive, preserving the previous ``re.IGNORECASE``
+    behavior even when a trigger omits the optional inline ``(?i)`` flag.
+    """
+    if not trigger:
+        raise ValueError("skill trigger must not be empty")
+    if len(trigger) > MAX_SKILL_TRIGGER_LENGTH:
+        raise ValueError(
+            f"skill trigger must be at most {MAX_SKILL_TRIGGER_LENGTH} characters"
+        )
+    if _has_repeated_group(trigger):
+        raise ValueError("skill trigger regex must not repeat a group")
+
+    try:
+        return SchemaValidator(
+            core_schema.str_schema(
+                pattern=f"(?i:{trigger})",
+                regex_engine="rust-regex",
+            )
+        )
+    except SchemaError as exc:
+        raise ValueError("skill trigger must use the safe regex subset") from exc
+
+
+def validate_skill_trigger(trigger: str) -> str:
+    """Pydantic validator shared by tenant configuration models."""
+    if trigger.startswith("/"):
+        if len(trigger) > MAX_SKILL_TRIGGER_LENGTH:
+            raise ValueError(
+                f"skill trigger must be at most {MAX_SKILL_TRIGGER_LENGTH} characters"
+            )
+        return trigger
+    compile_skill_trigger(trigger)
+    return trigger
 
 
 class CatalogConfig(BaseModel):
     """Which platform-shipped tools the tenant can use, and per-tool config."""
+
     allowed_tools: list[str] = Field(default_factory=list)
     tool_config: dict[str, dict[str, Any]] = Field(default_factory=dict)
 
@@ -49,6 +130,7 @@ class ByoConfig(BaseModel):
     """BYO tools via AgentCore Gateway (MCP). When enabled, the agent connects
     to the tenant's Gateway endpoint as an MCP client at invocation time and
     exposes the remote tools alongside the catalog tools."""
+
     enabled: bool = False
     gateway_endpoint: str | None = None
     gateway_auth: dict[str, Any] | None = None
@@ -58,6 +140,7 @@ class ByoConfig(BaseModel):
 class MemoryTriggers(BaseModel):
     """Triggers that fire AgentCore Memory's self-managed extraction pipeline.
     These map directly to AgentCore Memory selfManagedConfiguration triggers."""
+
     message_count: int = 6
     token_count: int = 1000
     idle_timeout_seconds: int = 1800
@@ -72,6 +155,10 @@ class MemoryConfig(BaseModel):
     triggers: MemoryTriggers = Field(default_factory=MemoryTriggers)
     namespace: str = ""
     extraction: MemoryExtraction = Field(default_factory=MemoryExtraction)
+    # False is the safe default: conversations in one Slack channel must not
+    # influence another channel unless an operator explicitly opts in.
+    shared_across_channels: bool = False
+    # When shared mode is enabled, these channels remain private silos.
     isolated_channels: list[str] = Field(default_factory=list)
 
 
@@ -82,6 +169,7 @@ class HeartbeatConfig(BaseModel):
         HealthyBusy. >0 means the agent stays alive while work is pending.
     max_background_seconds: soft cap on how long any single background task
         is expected to run; tools should respect this when sizing work."""
+
     busy_threshold: int = 1
     max_background_seconds: int = 3600
 
@@ -98,6 +186,7 @@ class CostCapConfig(BaseModel):
     top-level attributes (``monthly_spend_cents``, ``spend_month``),
     NOT inside the config blob. See ``spend_tracker.py``.
     """
+
     monthly_limit_dollars: float = 50.0
     enabled: bool = True
 
@@ -112,6 +201,7 @@ class ChannelPersona(BaseModel):
     ``config.channels[channel_id]`` and overrides ``system_prompt``,
     ``allowed_tools``, and ``memory_rules`` if set.
     """
+
     system_prompt: str | None = None
     allowed_tools: list[str] | None = None
     memory_rules: list[str] | None = None
@@ -122,14 +212,15 @@ class BotPolicyConfig(BaseModel):
     to prevent Bedrock spend on bot loops.
 
     Four tiers (evaluated in order):
-      1. allow_all_bots — if True, ANY bot can trigger the agent (the
-         "magical default" for new tenants: PagerDuty/Datadog alerts
-         auto-triage without configuration)
+      1. allow_all_bots — if True, ANY bot can trigger the agent. This is
+         deliberately opt-in because bot messages can drive model spend
+         and tool calls.
       2. trusted_bot_ids — always allowed (explicit whitelist)
       3. open_channels — any bot can trigger in these channels
       4. default — humans only (bot messages are dropped)
     """
-    allow_all_bots: bool = True
+
+    allow_all_bots: bool = False
     trusted_bot_ids: list[str] = Field(default_factory=list)
     open_channels: list[str] = Field(default_factory=list)
 
@@ -141,6 +232,7 @@ class ContextAssemblyConfig(BaseModel):
     much context to fetch. All steps run in the agent before the Strands
     Agent is constructed.
     """
+
     resolve_permalinks: bool = True
     inject_thread_history: bool = True
     thread_history_depth: int = 25
@@ -160,15 +252,22 @@ class SkillDef(BaseModel):
     required_tools: tools that MUST be available for this skill. Merged
         with the channel's effective tool list at runtime.
     """
-    trigger: str
+
+    trigger: str = Field(min_length=1, max_length=MAX_SKILL_TRIGGER_LENGTH)
     name: str
     prompt_template: str
     required_tools: list[str] = Field(default_factory=list)
     channels: list[str] = Field(default_factory=list)
 
+    @field_validator("trigger")
+    @classmethod
+    def _validate_trigger(cls, value: str) -> str:
+        return validate_skill_trigger(value)
+
 
 class EscalationRoute(BaseModel):
     """A single escalation routing entry."""
+
     team_name: str
     channel_id: str
     description: str = ""
@@ -177,6 +276,7 @@ class EscalationRoute(BaseModel):
 
 class EscalationConfig(BaseModel):
     """Escalation routing table. Used by the ``escalate`` catalog tool."""
+
     routes: list[EscalationRoute] = Field(default_factory=list)
 
 
@@ -197,6 +297,7 @@ class CodebaseBinding(BaseModel):
         learned ``codebase_affinity`` memory records being promoted
         to config.
     """
+
     repo: str
     default_branch: str = "main"
     aliases: list[str] = Field(default_factory=list)
@@ -229,6 +330,7 @@ class CodebasesConfig(BaseModel):
         semantic-retrieval hint path in the resolver (the agent still
         reads explicit ``bindings.channels``).
     """
+
     enabled: bool = False
     github_installation_id: str | None = None
     default_repo: str | None = None
@@ -240,7 +342,7 @@ class CodebasesConfig(BaseModel):
 # Default system prompt for new tenants
 # ----------------------------------------------------------------------------
 #
-# This prompt is the "magical default" for AgentCore Reference: a new tenant gets a bot
+# This prompt is the "magical default" for Agent: a new tenant gets a bot
 # that's useful from minute one without any skill definitions, channel
 # personas, or tool configuration. It bakes in the three core workflows
 # (triage, Q&A, handoffs) as natural-language instructions so the agent
@@ -251,7 +353,7 @@ class CodebasesConfig(BaseModel):
 # agent have separate venvs and can't share constants. A divergence here
 # surfaces as "OAuth-created tenants behave differently from seed-script
 # tenants," which is subtle and hard to debug.
-DEFAULT_SYSTEM_PROMPT = """You are a Slack-based operations assistant for your team. You handle three things: triaging alerts and incidents, answering questions about how systems work, and automating workflow handoffs. Your memory is shared across channels in this workspace.
+DEFAULT_SYSTEM_PROMPT = """You are a Slack-based operations assistant for your team. You handle three things: triaging alerts and incidents, answering questions about how systems work, and automating workflow handoffs. Your memory is scoped to the current channel unless a workspace administrator explicitly enables sharing.
 
 ## How to respond
 
@@ -263,20 +365,19 @@ DEFAULT_SYSTEM_PROMPT = """You are a Slack-based operations assistant for your t
 ## How to work
 
 - Act, don't narrate. Use tools instead of describing what you would do. Don't narrate each tool call step-by-step.
-- Read before you write. Never modify or answer about something you haven't looked at first. Search history and docs before answering from general knowledge. Read the thread before summarizing it.
-- Run independent calls in parallel. "Search history AND search docs" is one turn with two calls, not two sequential turns.
+- Read before you write. Never modify or answer about something you haven't looked at first. Search team history and any connected document sources before answering from general knowledge. Read the thread before summarizing it.
+- Run independent calls in parallel. When both history and document-search tools are available, call them in the same turn.
 - Diagnose, don't thrash. When a tool fails, read the error and fix the cause. Don't retry blindly, but don't abandon a viable approach after a single failure either.
 
 ## Tools
 
 - `read_thread_context` — user references "this thread" or "this conversation"
 - `search_team_history` — past discussions in the current channel
-- `search_docs` — search connected doc sources (returns an error if none are connected)
 - `escalate` — hand off to another team via your routing table
 - `post_to_channel` — cross-channel actions (tell the user where you posted)
-- `manage_config` — change your own settings (see below)
+- `manage_config` — view your settings; updates require an authorized admin
 
-Only reference tools you actually have in your tool list. If a tool isn't there, tell the user it's not connected — don't claim you have it or hide the gap.
+Connected Gateway or MCP integrations may add document-search and other tools. Only reference tools you actually have in your tool list. If a tool isn't there, tell the user it's not connected — don't claim you have it or hide the gap.
 
 When a bot posts an alert (PagerDuty, Datadog, etc.), triage it like a user-reported issue.
 
@@ -286,7 +387,7 @@ Read-only work (search, fetch, summarize): act freely. Externally-visible work (
 
 ## Self-configuration
 
-You know your own config. When a user asks to change a setting — "trust B_PAGERDUTY", "only fire /triage in #sre-alerts", "isolate memory for #secret-project" — use `manage_config` to persist it immediately. Don't send them to a portal.
+You know your own config. Use `manage_config` to inspect settings when asked. Configuration changes are read-only by default and may only be persisted when the requesting Slack user is explicitly listed as a workspace admin; the tool enforces this authorization in code.
 
 ## Learning from feedback
 
@@ -300,25 +401,25 @@ Don't call `record_feedback` on routine acknowledgments ("ok", "got it") or when
 # Default catalog tools for new tenants
 # ----------------------------------------------------------------------------
 #
-# Every new tenant gets the full set of catalog tools enabled out of the
-# box. The old default of just ``["echo"]`` forced users to manually enable
-# each tool before the bot was useful, which contradicted the
-# "zero-config magic" goal. Users can still disable individual tools from
-# the onboarding UI or via ``manage_config``.
+# Every new tenant gets the safe catalog tools enabled out of the box. The
+# old default of just ``["echo"]`` forced users to manually enable each tool
+# before the bot was useful, which contradicted the "zero-config magic"
+# goal. Higher-risk tools remain available for explicit opt-in.
 #
 # **KEEP IN SYNC** with ``bridge/bridge/tenant_write.py:DEFAULT_CATALOG_TOOLS``.
 #
-# The ``code_*`` tools are in the default whitelist so tenants that
-# install the GitHub App get them automatically. ``main.py`` filters
+# The read-only ``code_*`` tools are in the default whitelist so tenants
+# that install the GitHub App get them automatically. ``main.py`` filters
 # them out of the runtime effective_tools list when
-# ``codebases.enabled=False`` so tenants without the App don't see
-# tools they can't use.
+# ``codebases.enabled=False`` so tenants without the App don't see tools
+# they can't use. ``propose_pr`` is deliberately NOT a new-tenant default:
+# it runs model-authored code and must be enabled explicitly after an
+# operator reviews the sandbox and GitHub write-permission boundary.
 DEFAULT_CATALOG_TOOLS = [
     "echo",
     "start_background_task",
     "search_team_history",
     "read_thread_context",
-    "search_docs",
     "post_to_channel",
     "escalate",
     "record_feedback",
@@ -328,8 +429,8 @@ DEFAULT_CATALOG_TOOLS = [
     "code_read_file",
     "code_find_symbol",
     "code_list_commits",
-    "propose_pr",
     "check_task_status",
+    "render_dashboard",
 ]
 
 
@@ -343,13 +444,18 @@ class TenantConfig(BaseModel):
     heartbeat: HeartbeatConfig = Field(default_factory=HeartbeatConfig)
     cost_cap: CostCapConfig = Field(default_factory=CostCapConfig)
     channels: dict[str, ChannelPersona] = Field(default_factory=dict)
+    # Exact Slack user IDs allowed to mutate configuration through the
+    # in-agent ``manage_config`` tool. An empty list makes it read-only.
+    admin_user_ids: list[str] = Field(default_factory=list)
     bot_policy: BotPolicyConfig = Field(default_factory=BotPolicyConfig)
-    context_assembly: ContextAssemblyConfig = Field(default_factory=ContextAssemblyConfig)
+    context_assembly: ContextAssemblyConfig = Field(
+        default_factory=ContextAssemblyConfig
+    )
     skills: list[SkillDef] = Field(default_factory=list)
     escalation: EscalationConfig = Field(default_factory=EscalationConfig)
     codebases: CodebasesConfig = Field(default_factory=CodebasesConfig)
     # Marks a tenant as an internal test/demo environment (e.g. the
-    # agentcore-testenv manual-testing rig). The ops dashboard filters
+    # agent-testenv manual-testing rig). The ops dashboard filters
     # these out of cross-tenant leaderboards by default so they don't
     # pollute real-customer metrics. Purely a presentation flag — the
     # agent itself ignores it.
@@ -357,7 +463,11 @@ class TenantConfig(BaseModel):
 
 
 def _iso_now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    return (
+        datetime.now(timezone.utc)
+        .isoformat(timespec="milliseconds")
+        .replace("+00:00", "Z")
+    )
 
 
 def build_default_config(tenant_id: str) -> TenantConfig:
@@ -367,9 +477,9 @@ def build_default_config(tenant_id: str) -> TenantConfig:
     connects. Customers customize their config from the onboarding UI
     after this initial row exists.
 
-    The defaults are intentionally permissive: a new tenant should feel
-    magical out of the box, not like a blank canvas waiting to be
-    configured. Everything that can reasonably be on by default IS on.
+    The defaults make the human-driven investigation path useful without
+    silently widening trust boundaries. External bots and integrations are
+    explicit opt-ins.
 
     Defaults:
       - Model: the platform default (Claude Sonnet 4.6)
@@ -379,11 +489,13 @@ def build_default_config(tenant_id: str) -> TenantConfig:
         prompt.
       - Catalog: all catalog tools enabled so the bot can search, read
         threads, escalate, and post cross-channel from minute one.
-      - Bot policy: ``allow_all_bots=True`` so PagerDuty / Datadog
-        alerts get auto-triaged.
-      - Memory: shared-by-default (empty ``isolated_channels``);
-        extraction enabled with default rules; namespace scoped to
-        the tenant.
+      - Bot policy: humans only. Operators explicitly trust alert bots or
+        open specific channels after reviewing the spend and tool boundary.
+      - Memory: channel-scoped by default. Workspace-wide sharing is an
+        explicit opt-in, with ``isolated_channels`` available as exceptions;
+        extraction enabled with default rules; namespace scoped to the tenant.
+      - Runtime config mutation: disabled until exact Slack admin user IDs
+        are configured in ``admin_user_ids``.
       - Context assembly: permalink resolution and thread history
         injection both on (already the BaseModel defaults).
       - BYO: disabled (users opt in via the integrations page).
@@ -395,7 +507,9 @@ def build_default_config(tenant_id: str) -> TenantConfig:
         catalog=CatalogConfig(allowed_tools=list(DEFAULT_CATALOG_TOOLS)),
         memory=MemoryConfig(
             namespace=f"tenants/{tenant_id}",
-            extraction=MemoryExtraction(enabled=True, rules=["user_preferences", "facts"]),
+            extraction=MemoryExtraction(
+                enabled=True, rules=["user_preferences", "facts"]
+            ),
         ),
     )
 
@@ -403,6 +517,7 @@ def build_default_config(tenant_id: str) -> TenantConfig:
 # ----------------------------------------------------------------------------
 # Storage contract
 # ----------------------------------------------------------------------------
+
 
 class TenantStore(Protocol):
     """Storage contract for tenant rows.
@@ -448,9 +563,7 @@ class JsonFileTenantStore:
             if candidate.is_dir():
                 self._root = candidate
                 return self._root
-        raise FileNotFoundError(
-            f"Could not find examples/tenants/ above {current}"
-        )
+        raise FileNotFoundError(f"Could not find examples/tenants/ above {current}")
 
     def get(self, tenant_id: str) -> TenantConfig:
         path = self._find_root() / f"{tenant_id}.json"
@@ -537,8 +650,9 @@ class DynamoTenantStore:
         if "config" in item and isinstance(item["config"], dict):
             config_data = item["config"]
         else:
-            config_data = {k: v for k, v in item.items()
-                           if k not in {"created_at", "updated_at"}}
+            config_data = {
+                k: v for k, v in item.items() if k not in {"created_at", "updated_at"}
+            }
         return TenantConfig.model_validate(config_data)
 
     def upsert(self, config: TenantConfig) -> None:
@@ -614,8 +728,8 @@ def load_tenant_config(tenant_id: str) -> TenantConfig:
 def save_tenant_config(config: TenantConfig) -> None:
     """Save a modified tenant config. Read-modify-write callers should
     ``load_tenant_config()``, modify the returned object, then call this
-    to persist. Used by the ``manage_config`` catalog tool to let the bot
-    update its own configuration at runtime."""
+    to persist. Used by the ``manage_config`` catalog tool after it verifies
+    the requesting Slack user against the tenant's explicit admin allowlist."""
     _store().upsert(config)
 
 

@@ -5,23 +5,45 @@ HealthyBusy keeps the session alive past the 15-minute idle timeout, which
 is critical for long-running tool calls (e.g. "research X for 10 minutes").
 
 Tools that spawn background work should:
-  1. Add their task_id to `_inflight_tasks` (so this handler reports busy)
+  1. Call `register_task` (so this handler reports busy)
   2. Call `app.add_async_task(task_id)` (the AgentCore SDK side)
-  3. On completion, call `_inflight_tasks.discard(task_id)` and
-     `app.complete_async_task(task_id)`
-
-The threshold (>0 in-flight = busy) is intentionally hardcoded for v0.
-Phase 7+ will read it from the per-invocation tenant config.
+  3. On completion, call `complete_task` and `app.complete_async_task(task_id)`
 """
+from __future__ import annotations
+
+import threading
+
 from bedrock_agentcore.runtime.models import PingStatus
 
 from runtime import app
 
-_inflight_tasks: set[str] = set()
+_inflight_tasks: dict[str, int] = {}
+_tasks_lock = threading.Lock()
+
+
+def register_task(task_id: str, busy_threshold: int = 1) -> None:
+    """Track a task and the tenant threshold active when it was launched."""
+    threshold = max(1, int(busy_threshold))
+    with _tasks_lock:
+        _inflight_tasks[task_id] = threshold
+
+
+def complete_task(task_id: str) -> None:
+    """Remove a task from heartbeat accounting. Safe to call repeatedly."""
+    with _tasks_lock:
+        _inflight_tasks.pop(task_id, None)
+
+
+def reset_tasks_for_tests() -> None:
+    with _tasks_lock:
+        _inflight_tasks.clear()
 
 
 @app.ping
 def custom_ping() -> PingStatus:
-    if len(_inflight_tasks) > 0:
+    with _tasks_lock:
+        task_count = len(_inflight_tasks)
+        thresholds = tuple(_inflight_tasks.values())
+    if any(task_count >= threshold for threshold in thresholds):
         return PingStatus.HEALTHY_BUSY
     return PingStatus.HEALTHY

@@ -9,7 +9,7 @@ App identity: same ``GITHUB_APP_ID`` env var, same Secrets Manager path
 ## Why the bridge needs this
 
 The install-time warm-start (``github_install.py``) runs in the bridge's
-OAuth callback flow after a tenant installs the AgentCore Reference GitHub App on their
+OAuth callback flow after a tenant installs the Agent GitHub App on their
 org. The warm-start needs to call GitHub APIs as the installation (list
 repos, read ``pushed_at``, rank them, pick a default), which requires an
 installation access token.
@@ -34,7 +34,7 @@ installation access token.
 
 The bridge's ``AgentCoreBridgeDataAccess`` IAM policy (see
 ``infra/data/lib/data-stack.ts``) grants ``secretsmanager:GetSecretValue``
-on ``agentcore/platform/*`` as of the step-3 work.
+on ``agentcore/platform/*``.
 
 ## Caching
 
@@ -94,6 +94,32 @@ class InstallationToken:
         return now.timestamp() + safety_buffer_seconds >= self.expires_at.timestamp()
 
 
+@dataclass(frozen=True)
+class InstallationMetadata:
+    """App-authenticated identity for one GitHub App installation."""
+
+    installation_id: str
+    account_login: str
+
+
+def normalize_installation_id(value: str | int) -> str:
+    """Return a canonical positive 64-bit GitHub installation ID.
+
+    Canonicalization prevents equivalent spellings (for example ``00123``)
+    from bypassing tenant-binding equality and uniqueness checks.
+    """
+
+    if isinstance(value, bool):
+        raise ValueError("installation_id must be a positive integer")
+    raw = str(value).strip()
+    if not raw.isascii() or not raw.isdecimal():
+        raise ValueError("installation_id must be a positive integer")
+    number = int(raw, 10)
+    if number <= 0 or number > 2**63 - 1:
+        raise ValueError("installation_id must be a positive 64-bit integer")
+    return str(number)
+
+
 # ---------------------------------------------------------------------------
 # Per-process cache
 # ---------------------------------------------------------------------------
@@ -116,7 +142,7 @@ def _get_app_id() -> str:
     if not app_id:
         raise RuntimeError(
             "GITHUB_APP_ID env var is not set. Set it to the numeric ID of "
-            "the AgentCore Reference GitHub App (visible on the App's settings page)."
+            "the Agent GitHub App (visible on the App's settings page)."
         )
     return app_id
 
@@ -129,7 +155,7 @@ def _get_private_key_pem() -> str:
 
     Production: fetch from Secrets Manager at
     ``agentcore/platform/github_app/private_key``. The bridge's IAM
-    policy grants read on ``agentcore/platform/*`` as of step 3.
+    policy grants read on ``agentcore/platform/*``.
     """
     if os.getenv("LOCAL_DEV") == "1":
         inline = os.getenv("GITHUB_APP_PRIVATE_KEY_PEM")
@@ -212,7 +238,7 @@ def _exchange_jwt_for_installation_token(
             "Authorization": f"Bearer {app_jwt}",
             "Accept": "application/vnd.github+json",
             "X-GitHub-Api-Version": "2022-11-28",
-            "User-Agent": "AgentCore Reference-Bridge/1.0",
+            "User-Agent": "Agent-Bridge/1.0",
         },
     )
     try:
@@ -225,7 +251,7 @@ def _exchange_jwt_for_installation_token(
             f"GitHub installation-token exchange failed: HTTP {e.code} for "
             f"installation_id={installation_id}: {body}"
         ) from e
-    except urllib.error.URLError as e:
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
         raise RuntimeError(
             f"GitHub installation-token exchange failed: network error for "
             f"installation_id={installation_id}: {e}"
@@ -235,19 +261,74 @@ def _exchange_jwt_for_installation_token(
     expires_at_raw = data.get("expires_at")
     if not token or not expires_at_raw:
         raise RuntimeError(
-            f"GitHub returned an unexpected payload shape "
-            f"(missing token or expires_at): {data!r}"
+            "GitHub returned an unexpected installation-token payload "
+            "(missing token or expires_at)"
         )
     # GitHub uses the trailing-Z form; normalize to +00:00 for fromisoformat.
     expires_at = datetime.fromisoformat(expires_at_raw.replace("Z", "+00:00"))
     return InstallationToken(token=token, expires_at=expires_at)
 
 
+def get_installation_metadata(installation_id: str | int) -> InstallationMetadata:
+    """Verify an installation using App credentials and return its owner.
+
+    This deliberately uses an app-level JWT, not tenant-supplied data or an
+    installation token. Operators use the returned account login as a second
+    binding factor before approving an installation for a tenant.
+    """
+
+    canonical_id = normalize_installation_id(installation_id)
+    app_jwt = _mint_app_jwt()
+    url = f"{_GITHUB_API_BASE}/app/installations/{canonical_id}"
+    req = urllib.request.Request(
+        url,
+        headers={
+            "Authorization": f"Bearer {app_jwt}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+            "User-Agent": "Agent-Bridge/1.0",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(
+            "GitHub installation lookup failed "
+            f"(HTTP {e.code}, installation_id={canonical_id})"
+        ) from e
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
+        raise RuntimeError(
+            "GitHub installation lookup failed due to a network error "
+            f"(installation_id={canonical_id})"
+        ) from e
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        raise RuntimeError("GitHub installation lookup returned invalid JSON") from e
+
+    if not isinstance(data, dict):
+        raise RuntimeError("GitHub installation lookup returned an invalid payload")
+    try:
+        returned_id = normalize_installation_id(data.get("id", ""))
+    except (TypeError, ValueError) as e:
+        raise RuntimeError("GitHub installation lookup omitted a valid ID") from e
+    account = data.get("account")
+    account_login = account.get("login") if isinstance(account, dict) else None
+    if returned_id != canonical_id or not isinstance(account_login, str):
+        raise RuntimeError("GitHub installation lookup returned mismatched metadata")
+    account_login = account_login.strip()
+    if not account_login:
+        raise RuntimeError("GitHub installation lookup omitted the account login")
+    return InstallationMetadata(
+        installation_id=canonical_id,
+        account_login=account_login,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
-def get_installation_token(installation_id: str) -> str:
+def get_installation_token(installation_id: str | int) -> str:
     """Return a valid access token for ``installation_id``.
 
     Caches per installation with a 5-minute safety buffer. First call for
@@ -259,11 +340,13 @@ def get_installation_token(installation_id: str) -> str:
     as "the bridge cannot access GitHub for this installation right now"
     and surface a friendly message to the user.
     """
-    if not installation_id:
-        raise RuntimeError("installation_id is required")
+    try:
+        canonical_id = normalize_installation_id(installation_id)
+    except (TypeError, ValueError) as e:
+        raise RuntimeError(str(e)) from e
 
     with _cache_lock:
-        cached = _cache.get(installation_id)
+        cached = _cache.get(canonical_id)
         if cached and not cached.is_expired(
             safety_buffer_seconds=_TOKEN_SAFETY_BUFFER_SECONDS
         ):
@@ -274,28 +357,32 @@ def get_installation_token(installation_id: str) -> str:
     # behind a single mutex. Cost of a race: two concurrent mints for the
     # same installation, one overwrites the other in the cache. Benign.
     app_jwt = _mint_app_jwt()
-    token_obj = _exchange_jwt_for_installation_token(app_jwt, installation_id)
+    token_obj = _exchange_jwt_for_installation_token(app_jwt, canonical_id)
 
     with _cache_lock:
-        _cache[installation_id] = token_obj
+        _cache[canonical_id] = token_obj
     log.info(
         "github_app: minted installation token for installation_id=%s, "
         "expires_at=%s",
-        installation_id,
+        canonical_id,
         token_obj.expires_at.isoformat(),
     )
     return token_obj.token
 
 
-def invalidate_installation_token(installation_id: str) -> None:
+def invalidate_installation_token(installation_id: str | int) -> None:
     """Drop the cached token for an installation.
 
     Call this on 401/403 responses from downstream code that used a token
     minted here, so the next call re-mints fresh credentials. Cheaper
     than waiting for the 55-minute TTL to expire.
     """
+    try:
+        canonical_id = normalize_installation_id(installation_id)
+    except (TypeError, ValueError):
+        return
     with _cache_lock:
-        _cache.pop(installation_id, None)
+        _cache.pop(canonical_id, None)
 
 
 def reset_github_app_cache_for_tests() -> None:

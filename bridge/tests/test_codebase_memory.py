@@ -10,6 +10,7 @@ The module reads ``AGENTCORE_MEMORY_ID`` and
 ``AGENTCORE_SEMANTIC_STRATEGY_ID`` at import time. We monkeypatch
 those module attributes in tests that need them set.
 """
+
 from __future__ import annotations
 
 import sys
@@ -24,8 +25,8 @@ _AGENT_CODE = str(
 if _AGENT_CODE not in sys.path:
     sys.path.insert(0, _AGENT_CODE)
 
-import codebase_memory  # type: ignore[import-not-found]
-from codebase_memory import (  # type: ignore[import-not-found]
+import codebase_memory  # type: ignore[import-not-found]  # noqa: E402
+from codebase_memory import (  # type: ignore[import-not-found]  # noqa: E402
     _actor_id_for,
     _build_query,
     _extract_content,
@@ -40,44 +41,63 @@ from codebase_memory import (  # type: ignore[import-not-found]
 # Pure helpers
 # ---------------------------------------------------------------------------
 
+
 class TestFirstKnownRepoMentioned:
     def test_full_slug_match(self) -> None:
-        assert _first_known_repo_mentioned(
-            "we need to fix acme/platform today",
-            {"acme/platform", "acme/billing"},
-        ) == "acme/platform"
+        assert (
+            _first_known_repo_mentioned(
+                "we need to fix acme/platform today",
+                {"acme/platform", "acme/billing"},
+            )
+            == "acme/platform"
+        )
 
     def test_bare_name_match(self) -> None:
-        assert _first_known_repo_mentioned(
-            "platform is broken",
-            {"acme/platform"},
-        ) == "acme/platform"
+        assert (
+            _first_known_repo_mentioned(
+                "platform is broken",
+                {"acme/platform"},
+            )
+            == "acme/platform"
+        )
 
     def test_word_boundary_prevents_substring_match(self) -> None:
         """A bare-name match on "platform" must not hit "platforms"."""
-        assert _first_known_repo_mentioned(
-            "platforms are cool",
-            {"acme/platform"},
-        ) is None
+        assert (
+            _first_known_repo_mentioned(
+                "platforms are cool",
+                {"acme/platform"},
+            )
+            is None
+        )
 
     def test_word_boundary_prevents_embedded_match(self) -> None:
-        """"api" must not match "rapid"."""
-        assert _first_known_repo_mentioned(
-            "rapid response team",
-            {"acme/api"},
-        ) is None
+        """ "api" must not match "rapid"."""
+        assert (
+            _first_known_repo_mentioned(
+                "rapid response team",
+                {"acme/api"},
+            )
+            is None
+        )
 
     def test_case_insensitive(self) -> None:
-        assert _first_known_repo_mentioned(
-            "PLATFORM is broken",
-            {"acme/platform"},
-        ) == "acme/platform"
+        assert (
+            _first_known_repo_mentioned(
+                "PLATFORM is broken",
+                {"acme/platform"},
+            )
+            == "acme/platform"
+        )
 
     def test_no_match_returns_none(self) -> None:
-        assert _first_known_repo_mentioned(
-            "nothing relevant here",
-            {"acme/platform", "acme/billing"},
-        ) is None
+        assert (
+            _first_known_repo_mentioned(
+                "nothing relevant here",
+                {"acme/platform", "acme/billing"},
+            )
+            is None
+        )
 
     def test_empty_content_returns_none(self) -> None:
         assert _first_known_repo_mentioned("", {"a/b"}) is None
@@ -140,11 +160,22 @@ class TestExtractContent:
 
 
 class TestActorIdFor:
-    def test_shared_channel_uses_tenant_id(self) -> None:
-        assert _actor_id_for("acme", "C123") == "acme"
+    def test_channel_is_scoped_by_default(self) -> None:
+        assert _actor_id_for("acme", "C123") == "acme_C123"
 
-    def test_isolated_channel_combines_tenant_and_channel(self) -> None:
-        assert _actor_id_for("acme", "C123", isolated=True) == "acme_C123"
+    def test_explicit_shared_mode_uses_tenant_id(self) -> None:
+        assert _actor_id_for("acme", "C123", shared_across_channels=True) == "acme"
+
+    def test_isolated_channel_overrides_shared_mode(self) -> None:
+        assert (
+            _actor_id_for(
+                "acme",
+                "C123",
+                isolated=True,
+                shared_across_channels=True,
+            )
+            == "acme_C123"
+        )
 
     def test_dm_without_channel_uses_user(self) -> None:
         assert _actor_id_for("acme", "", user_id="U999") == "acme_U999"
@@ -158,16 +189,12 @@ class TestActorIdFor:
 
 
 class TestNamespaceFor:
-    def test_uses_semantic_strategy_env(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_uses_semantic_strategy_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(codebase_memory, "_SEMANTIC_STRATEGY_ID", "strat_abc")
         ns = _namespace_for("acme")
         assert ns == "/strategies/strat_abc/actors/acme/"
 
-    def test_trailing_slash_required(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_trailing_slash_required(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(codebase_memory, "_SEMANTIC_STRATEGY_ID", "s")
         assert _namespace_for("a").endswith("/")
 
@@ -191,6 +218,7 @@ class TestBuildQuery:
 # ---------------------------------------------------------------------------
 # retrieve_codebase_affinity_hint — integration-ish with a mock client
 # ---------------------------------------------------------------------------
+
 
 class _MockMemoryClient:
     """Stub ``MemoryClient`` with a ``retrieve_memories`` method.
@@ -232,9 +260,7 @@ class _MockMemoryClient:
 def env_configured(monkeypatch: pytest.MonkeyPatch) -> None:
     """Set the module-level memory env vars for tests that need them."""
     monkeypatch.setattr(codebase_memory, "_MEMORY_ID", "mem_test")
-    monkeypatch.setattr(
-        codebase_memory, "_SEMANTIC_STRATEGY_ID", "strat_test"
-    )
+    monkeypatch.setattr(codebase_memory, "_SEMANTIC_STRATEGY_ID", "strat_test")
 
 
 class TestRetrieveCodebaseAffinityHint:
@@ -249,9 +275,7 @@ class TestRetrieveCodebaseAffinityHint:
         )
         assert result is None
 
-    def test_returns_none_when_known_repos_empty(
-        self, env_configured: None
-    ) -> None:
+    def test_returns_none_when_known_repos_empty(self, env_configured: None) -> None:
         """Empty binding list → skip retrieval entirely."""
         mock = _MockMemoryClient(results=[{"content": "acme/platform", "score": 1.0}])
         result = retrieve_codebase_affinity_hint(
@@ -264,9 +288,7 @@ class TestRetrieveCodebaseAffinityHint:
         # Must not have even called the client
         assert mock.last_call is None
 
-    def test_returns_known_repo_on_high_score_match(
-        self, env_configured: None
-    ) -> None:
+    def test_returns_known_repo_on_high_score_match(self, env_configured: None) -> None:
         mock = _MockMemoryClient(
             results=[
                 {
@@ -283,9 +305,7 @@ class TestRetrieveCodebaseAffinityHint:
         )
         assert result == "acme/platform"
 
-    def test_rejects_low_score_match(
-        self, env_configured: None
-    ) -> None:
+    def test_rejects_low_score_match(self, env_configured: None) -> None:
         """A record below min_score should NOT be trusted."""
         mock = _MockMemoryClient(
             results=[
@@ -346,9 +366,7 @@ class TestRetrieveCodebaseAffinityHint:
         )
         assert result == "acme/billing"
 
-    def test_swallows_client_exception(
-        self, env_configured: None
-    ) -> None:
+    def test_swallows_client_exception(self, env_configured: None) -> None:
         """Any boto3/network error is logged and returns None —
         never blocks the invocation."""
         mock = _MockMemoryClient(raise_on_call=RuntimeError("boto went boom"))
@@ -360,9 +378,7 @@ class TestRetrieveCodebaseAffinityHint:
         )
         assert result is None
 
-    def test_empty_results_returns_none(
-        self, env_configured: None
-    ) -> None:
+    def test_empty_results_returns_none(self, env_configured: None) -> None:
         mock = _MockMemoryClient(results=[])
         result = retrieve_codebase_affinity_hint(
             tenant_id="acme",
@@ -372,9 +388,7 @@ class TestRetrieveCodebaseAffinityHint:
         )
         assert result is None
 
-    def test_record_without_score_still_considered(
-        self, env_configured: None
-    ) -> None:
+    def test_record_without_score_still_considered(self, env_configured: None) -> None:
         """Records missing a score field fall through the score filter
         (the SDK may not always populate it). Content check still applies."""
         mock = _MockMemoryClient(
@@ -391,7 +405,7 @@ class TestRetrieveCodebaseAffinityHint:
     def test_namespace_passed_to_client_matches_actor_format(
         self, env_configured: None
     ) -> None:
-        """Shared channel → actor_id == tenant_id → namespace uses tenant_id."""
+        """Default channel scope includes the channel ID in the namespace."""
         mock = _MockMemoryClient(results=[])
         retrieve_codebase_affinity_hint(
             tenant_id="acme",
@@ -400,8 +414,22 @@ class TestRetrieveCodebaseAffinityHint:
             memory_client=mock,
         )
         assert mock.last_call is not None
-        assert mock.last_call["namespace"] == "/strategies/strat_test/actors/acme/"
+        assert mock.last_call["namespace"] == "/strategies/strat_test/actors/acme_C123/"
         assert mock.last_call["memory_id"] == "mem_test"
+
+    def test_explicit_shared_mode_uses_tenant_namespace(
+        self, env_configured: None
+    ) -> None:
+        mock = _MockMemoryClient(results=[])
+        retrieve_codebase_affinity_hint(
+            tenant_id="acme",
+            channel_id="C123",
+            known_repos=["a/b"],
+            shared_across_channels=True,
+            memory_client=mock,
+        )
+        assert mock.last_call is not None
+        assert mock.last_call["namespace"] == "/strategies/strat_test/actors/acme/"
 
     def test_isolated_channel_namespace_includes_channel_id(
         self, env_configured: None
@@ -412,6 +440,7 @@ class TestRetrieveCodebaseAffinityHint:
             channel_id="C_SECRET",
             known_repos=["a/b"],
             isolated=True,
+            shared_across_channels=True,
             memory_client=mock,
         )
         assert mock.last_call is not None

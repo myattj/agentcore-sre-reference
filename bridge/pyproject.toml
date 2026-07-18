@@ -7,7 +7,7 @@ name = "bridge"
 version = "0.1.0"
 description = "FastAPI bridge from client transports (Slack, etc.) to coreAgent on AgentCore Runtime"
 readme = "README.md"
-requires-python = ">=3.10,<3.14"
+requires-python = ">=3.13,<3.14"
 dependencies = [
     "fastapi >= 0.110",
     "uvicorn[standard] >= 0.27",
@@ -21,7 +21,7 @@ dependencies = [
     "aiohttp >= 3.9",
     # PyJWT with the [crypto] extra pulls in `cryptography` for RS256
     # signing. Used by bridge/bridge/gateway_jwt.py to mint per-invocation
-    # JWTs for AgentCore Gateway's CUSTOM_JWT authorizer (week 4 chunk A).
+    # JWTs for AgentCore Gateway's CUSTOM_JWT authorizer.
     "pyjwt[crypto] >= 2.8",
 ]
 

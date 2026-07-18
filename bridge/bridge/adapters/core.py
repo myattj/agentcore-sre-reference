@@ -17,8 +17,8 @@ class InboundMessage:
 
     `channel_id` is the client's room/channel identifier (Slack channel ID,
     Discord channel ID, Teams thread, etc.). Used by tools that need to
-    know "where" the conversation is happening (e.g. `read_thread_context`,
-    channel-aware personas in week 4) and by the audit log for traceability.
+    know "where" the conversation is happening (e.g. `read_thread_context`
+    and channel-aware personas) and by the audit log for traceability.
     """
     workspace_id: str
     user_id: str

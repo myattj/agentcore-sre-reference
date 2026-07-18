@@ -2,8 +2,7 @@
 .pytest_cache/
 __pycache__/
 *.pyc
-.env.local
-.env
+.env*
 tests/
 .git/
 .smoke-logs/

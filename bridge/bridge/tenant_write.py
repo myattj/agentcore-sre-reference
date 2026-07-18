@@ -1,9 +1,8 @@
 """Tenant-row read/write primitives (bridge side).
 
 This module is the bridge's canonical write path for the `tenants`
-DynamoDB table. It was extracted from `slack_oauth.py` in week 3 when the
-onboarding UI started needing a PATCH code path alongside the existing
-"create default row after OAuth" code path.
+DynamoDB table. Both Slack OAuth provisioning and the onboarding UI use
+these primitives so tenant creation and configuration updates stay aligned.
 
 The shape of the tenant row mirrors the authoritative definition in
 `coreAgent/app/coreAgent/tenant.py:TenantConfig` (lines 41-93). The bridge
@@ -30,18 +29,16 @@ Public API:
     create of a `workspace_to_tenant` row with the same semantics.
   - `get_tenant_row(tenant_id, region) -> dict` — returns the `config`
     sub-dict. Raises `KeyError` for unknown tenants.
-  - `update_tenant_row(tenant_id, region, full_config_dict)` — blob
-    overwrite of the `config` attribute with a `ConditionExpression` that
-    refuses to create (PATCH must not create — only OAuth can). Uses the
-    same UpdateExpression as the default-row upsert.
+  - `update_tenant_row(tenant_id, region, full_config_dict, expected_config)`
+    — blob overwrite of the `config` attribute with a condition that refuses
+    to create and, when supplied, rejects stale read-modify-write cycles.
   - `deep_merge(base, patch)` — first-level deep merge helper for PATCH
     semantics. Used by the `/api/tenants/{id}` PATCH route.
 
-Concurrency: DynamoDB `update_item` is strongly consistent for the same
-partition key, so a GET-modify-PUT cycle sees its own write on read-back.
-There's no optimistic-concurrency guard this week (single user per tenant,
-single config page). Add an `updated_at` conditional expression if/when
-a multi-user admin UI arrives.
+Concurrency: tenant-session PATCH passes the config it read as
+`expected_config`. DynamoDB compares that map in the write condition, so a
+concurrent operator update cannot be replaced by a stale full-blob write. The
+route re-reads and retries a bounded number of times.
 """
 from __future__ import annotations
 
@@ -49,12 +46,26 @@ import copy
 import json
 import logging
 import os
+import tempfile
+import threading
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
 log = logging.getLogger(__name__)
+
+
+class GitHubInstallationBindingConflict(RuntimeError):
+    """An installation is already bound, or a tenant already has another."""
+
+
+class TenantConfigConflictError(RuntimeError):
+    """The tenant config changed after a caller read it."""
+
+
+_local_github_binding_lock = threading.Lock()
+_local_config_update_lock = threading.Lock()
 
 
 def _floats_to_decimals(obj: Any) -> Any:
@@ -86,7 +97,7 @@ def _iso_now() -> str:
 # so the agent acts on natural language without needing explicit skill
 # definitions. This is the "magical default" — a new tenant gets a
 # useful bot with zero configuration.
-DEFAULT_SYSTEM_PROMPT = """You are a Slack-based operations assistant for your team. You handle three things: triaging alerts and incidents, answering questions about how systems work, and automating workflow handoffs. Your memory is shared across channels in this workspace.
+DEFAULT_SYSTEM_PROMPT = """You are a Slack-based operations assistant for your team. You handle three things: triaging alerts and incidents, answering questions about how systems work, and automating workflow handoffs. Your memory is scoped to the current channel unless a workspace administrator explicitly enables sharing.
 
 ## How to respond
 
@@ -98,20 +109,19 @@ DEFAULT_SYSTEM_PROMPT = """You are a Slack-based operations assistant for your t
 ## How to work
 
 - Act, don't narrate. Use tools instead of describing what you would do. Don't narrate each tool call step-by-step.
-- Read before you write. Never modify or answer about something you haven't looked at first. Search history and docs before answering from general knowledge. Read the thread before summarizing it.
-- Run independent calls in parallel. "Search history AND search docs" is one turn with two calls, not two sequential turns.
+- Read before you write. Never modify or answer about something you haven't looked at first. Search team history and any connected document sources before answering from general knowledge. Read the thread before summarizing it.
+- Run independent calls in parallel. When both history and document-search tools are available, call them in the same turn.
 - Diagnose, don't thrash. When a tool fails, read the error and fix the cause. Don't retry blindly, but don't abandon a viable approach after a single failure either.
 
 ## Tools
 
 - `read_thread_context` — user references "this thread" or "this conversation"
 - `search_team_history` — past discussions in the current channel
-- `search_docs` — search connected doc sources (returns an error if none are connected)
 - `escalate` — hand off to another team via your routing table
 - `post_to_channel` — cross-channel actions (tell the user where you posted)
-- `manage_config` — change your own settings (see below)
+- `manage_config` — view your settings; updates require an authorized admin
 
-Only reference tools you actually have in your tool list. If a tool isn't there, tell the user it's not connected — don't claim you have it or hide the gap.
+Connected Gateway or MCP integrations may add document-search and other tools. Only reference tools you actually have in your tool list. If a tool isn't there, tell the user it's not connected — don't claim you have it or hide the gap.
 
 When a bot posts an alert (PagerDuty, Datadog, etc.), triage it like a user-reported issue.
 
@@ -121,7 +131,7 @@ Read-only work (search, fetch, summarize): act freely. Externally-visible work (
 
 ## Self-configuration
 
-You know your own config. When a user asks to change a setting — "trust B_PAGERDUTY", "only fire /triage in #sre-alerts", "isolate memory for #secret-project" — use `manage_config` to persist it immediately. Don't send them to a portal.
+You know your own config. Use `manage_config` to inspect settings when asked. Configuration changes are read-only by default and may only be persisted when the requesting Slack user is explicitly listed as a workspace admin; the tool enforces this authorization in code.
 
 ## Learning from feedback
 
@@ -132,19 +142,22 @@ Don't call `record_feedback` on routine acknowledgments ("ok", "got it") or when
 
 
 # **KEEP IN SYNC** with ``coreAgent/app/coreAgent/tenant.py:DEFAULT_CATALOG_TOOLS``.
-# Every new tenant gets the full set enabled — the old "echo only"
-# default forced users to manually enable each tool before the bot was
-# useful, which contradicted the zero-config magic goal.
+# Every new tenant gets the safe set enabled — the old "echo only" default
+# forced users to manually enable each tool before the bot was useful,
+# which contradicted the zero-config magic goal. Higher-risk tools remain
+# available for explicit opt-in.
 #
-# The ``code_*`` tools ship in the whitelist but are filtered out of
-# the runtime effective_tools list in ``coreAgent/main.py`` when the
-# tenant hasn't installed the GitHub App (``codebases.enabled=False``).
+# The read-only ``code_*`` tools ship in the whitelist but are filtered
+# out of the runtime effective_tools list in ``coreAgent/main.py`` when
+# the tenant hasn't installed the GitHub App
+# (``codebases.enabled=False``). ``propose_pr`` remains available in the
+# catalog, but is deliberately excluded here so GitHub write access and
+# model-authored sandbox execution require an explicit operator opt-in.
 DEFAULT_CATALOG_TOOLS = [
     "echo",
     "start_background_task",
     "search_team_history",
     "read_thread_context",
-    "search_docs",
     "post_to_channel",
     "escalate",
     "record_feedback",
@@ -154,8 +167,8 @@ DEFAULT_CATALOG_TOOLS = [
     "code_read_file",
     "code_find_symbol",
     "code_list_commits",
-    "propose_pr",
     "check_task_status",
+    "render_dashboard",
 ]
 
 
@@ -168,10 +181,10 @@ def build_default_config_dict(tenant_id: str) -> dict[str, Any]:
     bridge. If you change the agent's default config shape, mirror it
     here and in `bridge/bridge/api_models.py:TenantConfigOut`.
 
-    Defaults are intentionally permissive: a new tenant should feel
-    magical out of the box. All catalog tools on, bot policy open,
-    memory shared, context assembly on. The only thing users typically
-    need to do is connect integrations.
+    Defaults make the human-driven path useful without widening trust:
+    safe catalog tools are available, bot triggers are human-only, memory is
+    channel-scoped, and runtime config mutation has no admins until an
+    operator provisions exact Slack user IDs.
     """
     return {
         "tenant_id": tenant_id,
@@ -198,6 +211,7 @@ def build_default_config_dict(tenant_id: str) -> dict[str, Any]:
                 "enabled": True,
                 "rules": ["user_preferences", "facts"],
             },
+            "shared_across_channels": False,
             "isolated_channels": [],
         },
         "heartbeat": {
@@ -209,8 +223,9 @@ def build_default_config_dict(tenant_id: str) -> dict[str, Any]:
             "enabled": True,
         },
         "channels": {},
+        "admin_user_ids": [],
         "bot_policy": {
-            "allow_all_bots": True,
+            "allow_all_bots": False,
             "trusted_bot_ids": [],
             "open_channels": [],
         },
@@ -319,13 +334,39 @@ def _local_upsert_default(tenant_id: str) -> None:
     path.write_text(json.dumps(build_default_config_dict(tenant_id), indent=2) + "\n")
 
 
-def _local_update(tenant_id: str, full_config: dict[str, Any]) -> None:
-    """Full-blob write. Raises KeyError if the file doesn't exist
-    (matches DDB's ConditionExpression="attribute_exists(tenant_id)")."""
+def _local_update(
+    tenant_id: str,
+    full_config: dict[str, Any],
+    expected_config: dict[str, Any] | None = None,
+) -> None:
+    """Atomically replace a local config, optionally rejecting a stale read."""
     path = _local_tenant_path(tenant_id)
-    if not path.exists():
-        raise KeyError(f"No tenant config at {path}")
-    path.write_text(json.dumps(full_config, indent=2) + "\n")
+    with _local_config_update_lock:
+        if not path.exists():
+            raise KeyError(f"No tenant config at {path}")
+        if expected_config is not None and json.loads(path.read_text()) != expected_config:
+            raise TenantConfigConflictError(
+                f"Tenant config changed for tenant_id={tenant_id!r}"
+            )
+
+        temporary_name: str | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                "w",
+                encoding="utf-8",
+                dir=path.parent,
+                prefix=f".{path.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as temporary:
+                temporary.write(json.dumps(full_config, indent=2) + "\n")
+                temporary.flush()
+                os.fsync(temporary.fileno())
+                temporary_name = temporary.name
+            os.replace(temporary_name, path)
+        finally:
+            if temporary_name and os.path.exists(temporary_name):
+                os.unlink(temporary_name)
 
 
 def _local_upsert_workspace_mapping(workspace_id: str, tenant_id: str) -> None:
@@ -384,11 +425,9 @@ def upsert_default_tenant_row(tenant_id: str, region: str) -> None:
     """Write the default tenant row.
 
     Idempotent: re-running for an existing tenant_id refreshes the
-    config blob and `updated_at` but preserves `created_at`. Matches
-    the week-2 behavior exactly (moved verbatim from
-    `slack_oauth.py:_upsert_tenant_row`). A future behavior change
-    to preserve custom config on re-install is deferred — for now,
-    re-installing a workspace resets customizations.
+    config blob and `updated_at` but preserves `created_at`. This retains
+    the original OAuth provisioning behavior: re-installing a workspace
+    resets its customizations.
 
     Used by the OAuth callback on fresh install.
     """
@@ -462,40 +501,334 @@ def update_tenant_row(
     tenant_id: str,
     region: str,
     full_config: dict[str, Any],
+    expected_config: dict[str, Any] | None = None,
 ) -> None:
     """Overwrite the tenant's `config` attribute with the given dict.
 
-    Uses `ConditionExpression="attribute_exists(tenant_id)"` so PATCH
-    refuses to create — only the OAuth callback is allowed to bring a
-    tenant into existence. Refreshes `updated_at`.
+    Always refuses to create. When `expected_config` is supplied, the write
+    also requires the stored map to equal the caller's prior read. This keeps
+    stale tenant-session writes from reverting concurrent operator changes.
+    Refreshes `updated_at`.
 
-    Raises `KeyError` if the row doesn't exist (translated from
-    `ConditionalCheckFailedException`).
+    Raises `KeyError` if the row doesn't exist and `TenantConfigConflictError`
+    if an optimistic-concurrency comparison fails.
     """
     if _is_local_dev():
-        _local_update(tenant_id, full_config)
+        _local_update(tenant_id, full_config, expected_config)
         return
 
     from botocore.exceptions import ClientError
 
     table = _get_table(region, _tenants_table_name())
     now = _iso_now()
+    condition = "attribute_exists(tenant_id)"
+    expression_values = {
+        ":config": _floats_to_decimals(full_config),
+        ":now": now,
+    }
+    if expected_config is not None:
+        condition += " AND #config = :expected_config"
+        expression_values[":expected_config"] = _floats_to_decimals(expected_config)
     try:
         table.update_item(
             Key={"tenant_id": tenant_id},
             UpdateExpression="SET #config = :config, updated_at = :now",
-            ConditionExpression="attribute_exists(tenant_id)",
+            ConditionExpression=condition,
             ExpressionAttributeNames={"#config": "config"},
-            ExpressionAttributeValues={
-                ":config": _floats_to_decimals(full_config),
-                ":now": now,
-            },
+            ExpressionAttributeValues=expression_values,
         )
     except ClientError as e:
         code = e.response.get("Error", {}).get("Code")
         if code == "ConditionalCheckFailedException":
-            raise KeyError(f"No tenant row for tenant_id={tenant_id!r}") from e
+            existing = table.get_item(
+                Key={"tenant_id": tenant_id},
+                ConsistentRead=True,
+            ).get("Item")
+            if not existing:
+                raise KeyError(f"No tenant row for tenant_id={tenant_id!r}") from e
+            raise TenantConfigConflictError(
+                f"Tenant config changed for tenant_id={tenant_id!r}"
+            ) from e
         raise
+
+
+def _local_tenants_with_github_installation(installation_id: str) -> set[str]:
+    matches: set[str] = set()
+    for path in _find_local_tenants_dir().glob("*.json"):
+        try:
+            config = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError) as e:
+            raise RuntimeError(
+                f"Cannot safely inspect local tenant config {path.name}"
+            ) from e
+        if not isinstance(config, dict):
+            raise RuntimeError(
+                f"Cannot safely inspect local tenant config {path.name}"
+            )
+        configured = str(
+            (config.get("codebases") or {}).get("github_installation_id") or ""
+        )
+        if configured == installation_id:
+            matches.add(str(config.get("tenant_id") or path.stem))
+    return matches
+
+
+def _ddb_tenants_with_github_installation(
+    installation_id: str,
+    region: str,
+) -> set[str]:
+    table = _get_table(region, _tenants_table_name())
+    matches: set[str] = set()
+    scan_args: dict[str, Any] = {
+        "ConsistentRead": True,
+        "ProjectionExpression": (
+            "tenant_id, #cfg.#codebases.#installation"
+        ),
+        "ExpressionAttributeNames": {
+            "#cfg": "config",
+            "#codebases": "codebases",
+            "#installation": "github_installation_id",
+        },
+    }
+    while True:
+        response = table.scan(**scan_args)
+        for item in response.get("Items", []):
+            tenant_id = item.get("tenant_id")
+            configured = str(
+                (item.get("config") or {})
+                .get("codebases", {})
+                .get("github_installation_id")
+                or ""
+            )
+            if isinstance(tenant_id, str) and configured == installation_id:
+                matches.add(tenant_id)
+        last_key = response.get("LastEvaluatedKey")
+        if not last_key:
+            return matches
+        scan_args["ExclusiveStartKey"] = last_key
+
+
+def _github_installation_lock_id(installation_id: str) -> str:
+    return f"__github_installation__#{installation_id}"
+
+
+def _ddb_github_installation_lock_owner(
+    installation_id: str,
+    region: str,
+) -> str | None:
+    """Read the authoritative O(1) binding created by new approvals."""
+    table = _get_table(region, _tenants_table_name())
+    item = table.get_item(
+        Key={"tenant_id": _github_installation_lock_id(installation_id)},
+        ConsistentRead=True,
+    ).get("Item")
+    if not item:
+        return None
+    owner = item.get("bound_tenant_id")
+    if not isinstance(owner, str) or not owner:
+        raise GitHubInstallationBindingConflict(
+            "GitHub installation lock row is malformed"
+        )
+    return owner
+
+
+def find_tenant_by_github_installation(
+    installation_id: str,
+    region: str,
+) -> str | None:
+    """Return the tenant bound to an installation, enforcing uniqueness.
+
+    A strongly consistent scan also detects legacy duplicate bindings that
+    predate the atomic lock row used by new operator approvals.
+    """
+
+    if _is_local_dev():
+        matches = _local_tenants_with_github_installation(installation_id)
+    else:
+        lock_owner = _ddb_github_installation_lock_owner(installation_id, region)
+        if lock_owner:
+            return lock_owner
+        # Pre-lock releases stored the installation only inside the config
+        # map. Scan solely as a compatibility guard for those legacy rows;
+        # once an approval writes its lock, every subsequent lookup is O(1).
+        matches = _ddb_tenants_with_github_installation(installation_id, region)
+    if len(matches) > 1:
+        raise GitHubInstallationBindingConflict(
+            "GitHub installation is bound to multiple legacy tenant rows"
+        )
+    return next(iter(matches), None)
+
+
+def _local_approve_github_installation(
+    tenant_id: str,
+    installation_id: str,
+) -> None:
+    with _local_github_binding_lock:
+        owner = find_tenant_by_github_installation(installation_id, "local")
+        if owner and owner != tenant_id:
+            raise GitHubInstallationBindingConflict(
+                "GitHub installation is already bound to another tenant"
+            )
+
+        current = _local_get(tenant_id)
+        prior = str(
+            (current.get("codebases") or {}).get("github_installation_id") or ""
+        )
+        if prior and prior != installation_id:
+            raise GitHubInstallationBindingConflict(
+                "Tenant already has a different GitHub installation binding"
+            )
+
+        merged = deep_merge(
+            current,
+            {"codebases": {"github_installation_id": installation_id}},
+        )
+        path = _local_tenant_path(tenant_id)
+        temporary_name: str | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                "w",
+                encoding="utf-8",
+                dir=path.parent,
+                prefix=f".{path.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as temporary:
+                temporary.write(json.dumps(merged, indent=2) + "\n")
+                temporary.flush()
+                os.fsync(temporary.fileno())
+                temporary_name = temporary.name
+            os.replace(temporary_name, path)
+        finally:
+            if temporary_name and os.path.exists(temporary_name):
+                os.unlink(temporary_name)
+
+
+def _ddb_approve_github_installation(
+    tenant_id: str,
+    installation_id: str,
+    region: str,
+) -> None:
+    from boto3.dynamodb.types import TypeSerializer
+    from botocore.exceptions import ClientError
+
+    owner = find_tenant_by_github_installation(installation_id, region)
+    if owner and owner != tenant_id:
+        raise GitHubInstallationBindingConflict(
+            "GitHub installation is already bound to another tenant"
+        )
+
+    current = get_tenant_row(tenant_id, region)
+    prior = str(
+        (current.get("codebases") or {}).get("github_installation_id") or ""
+    )
+    if prior and prior != installation_id:
+        raise GitHubInstallationBindingConflict(
+            "Tenant already has a different GitHub installation binding"
+        )
+    merged = deep_merge(
+        current,
+        {"codebases": {"github_installation_id": installation_id}},
+    )
+
+    serializer = TypeSerializer()
+
+    def value(item: Any) -> dict[str, Any]:
+        return serializer.serialize(_floats_to_decimals(item))
+
+    table = _get_table(region, _tenants_table_name())
+    now = _iso_now()
+    lock_id = _github_installation_lock_id(installation_id)
+    try:
+        table.meta.client.transact_write_items(
+            TransactItems=[
+                {
+                    "Update": {
+                        "TableName": table.name,
+                        "Key": {"tenant_id": value(lock_id)},
+                        "UpdateExpression": (
+                            "SET bound_tenant_id = if_not_exists("
+                            "bound_tenant_id, :tenant), "
+                            "created_at = if_not_exists(created_at, :now), "
+                            "updated_at = :now"
+                        ),
+                        "ConditionExpression": (
+                            "attribute_not_exists(bound_tenant_id) OR "
+                            "bound_tenant_id = :tenant"
+                        ),
+                        "ExpressionAttributeValues": {
+                            ":tenant": value(tenant_id),
+                            ":now": value(now),
+                        },
+                    }
+                },
+                {
+                    "Update": {
+                        "TableName": table.name,
+                        "Key": {"tenant_id": value(tenant_id)},
+                        "UpdateExpression": (
+                            "SET #config = :config, updated_at = :now"
+                        ),
+                        "ConditionExpression": (
+                            "attribute_exists(tenant_id) AND ("
+                            "attribute_not_exists(#config.#codebases.#installation) "
+                            "OR attribute_type(#config.#codebases.#installation, "
+                            ":null_type) OR "
+                            "#config.#codebases.#installation = :installation)"
+                        ),
+                        "ExpressionAttributeNames": {
+                            "#config": "config",
+                            "#codebases": "codebases",
+                            "#installation": "github_installation_id",
+                        },
+                        "ExpressionAttributeValues": {
+                            ":config": value(merged),
+                            ":now": value(now),
+                            ":null_type": value("NULL"),
+                            ":installation": value(installation_id),
+                        },
+                    }
+                },
+            ]
+        )
+    except ClientError as e:
+        if e.response.get("Error", {}).get("Code") != "TransactionCanceledException":
+            raise
+        # Classify the fail-closed transaction error without revealing the
+        # other tenant's identifier to an operator API caller.
+        try:
+            get_tenant_row(tenant_id, region)
+        except KeyError:
+            raise
+        lock = table.get_item(
+            Key={"tenant_id": lock_id},
+            ConsistentRead=True,
+        ).get("Item", {})
+        if lock.get("bound_tenant_id") not in (None, tenant_id):
+            raise GitHubInstallationBindingConflict(
+                "GitHub installation is already bound to another tenant"
+            ) from e
+        raise GitHubInstallationBindingConflict(
+            "GitHub installation approval could not be committed safely"
+        ) from e
+
+
+def approve_github_installation_binding(
+    tenant_id: str,
+    installation_id: str,
+    region: str,
+) -> None:
+    """Atomically bind one verified GitHub installation to one tenant.
+
+    Existing bindings are idempotent. Rebinding either side to a different
+    identity fails closed; a future explicit revocation workflow can handle
+    that destructive operation with its own audit trail.
+    """
+
+    if _is_local_dev():
+        _local_approve_github_installation(tenant_id, installation_id)
+        return
+    _ddb_approve_github_installation(tenant_id, installation_id, region)
 
 
 def list_internal_testenv_tenants(

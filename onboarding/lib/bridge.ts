@@ -35,6 +35,37 @@ type BridgeFetchOptions = {
   body?: unknown;
 };
 
+function normalizedErrorDetail(detail: unknown): string | null {
+  if (typeof detail === "string") {
+    const message = detail.trim();
+    return message.length > 0 ? message : null;
+  }
+  if (!Array.isArray(detail)) return null;
+
+  const messages: string[] = [];
+  for (const item of detail) {
+    if (typeof item !== "object" || item === null || !("msg" in item)) continue;
+    const message = (item as { msg?: unknown }).msg;
+    if (typeof message === "string" && message.trim().length > 0) {
+      messages.push(message.trim());
+    }
+  }
+  return messages.length > 0 ? messages.join("; ") : null;
+}
+
+async function responseErrorDetail(response: Response): Promise<string> {
+  const fallback = response.statusText || "request failed";
+  try {
+    const payload = (await response.json()) as unknown;
+    if (typeof payload !== "object" || payload === null || !("detail" in payload)) {
+      return fallback;
+    }
+    return normalizedErrorDetail((payload as { detail?: unknown }).detail) ?? fallback;
+  } catch {
+    return fallback;
+  }
+}
+
 async function bridgeFetch<T>(path: string, opts: BridgeFetchOptions): Promise<T> {
   const url = `${getBridgeUrl()}${path}`;
   const headers: Record<string, string> = {
@@ -51,13 +82,7 @@ async function bridgeFetch<T>(path: string, opts: BridgeFetchOptions): Promise<T
     cache: "no-store",
   });
   if (!response.ok) {
-    let detail = response.statusText;
-    try {
-      const data = (await response.json()) as { detail?: string };
-      if (data?.detail) detail = data.detail;
-    } catch {
-      // Body wasn't JSON; keep the status text.
-    }
+    const detail = await responseErrorDetail(response);
     throw new BridgeApiError(response.status, detail);
   }
   return (await response.json()) as T;
@@ -85,17 +110,6 @@ export function listChannels(tenantId: string, token: string): Promise<ChannelsR
   return bridgeFetch<ChannelsResponse>(
     `/api/tenants/${encodeURIComponent(tenantId)}/channels`,
     { token, method: "GET" },
-  );
-}
-
-export function connectDatadog(
-  tenantId: string,
-  token: string,
-  body: { api_key: string; app_key: string; site?: string },
-): Promise<IntegrationConnectResponse> {
-  return bridgeFetch<IntegrationConnectResponse>(
-    `/api/tenants/${encodeURIComponent(tenantId)}/integrations/datadog`,
-    { token, method: "POST", body },
   );
 }
 
@@ -171,7 +185,8 @@ export function connectGitHub(
  * Called from the /github/installed route handler after the user
  * completes the App install on github.com and is redirected back with
  * an `installation_id`. The bridge mints an installation token, lists
- * repos, ranks them, and writes a `codebases` block to the tenant row.
+ * repos, ranks them, and writes a `codebases` block to the tenant row after
+ * an operator has verified and bound the installation identity.
  *
  * Returns a full response (never throws on warm-start failures — the
  * bridge wraps GitHub/network errors into `{ok: false, error: ...}`).
@@ -270,13 +285,7 @@ async function adminFetch<T>(path: string, adminSecret: string): Promise<T> {
     cache: "no-store",
   });
   if (!response.ok) {
-    let detail = response.statusText;
-    try {
-      const data = (await response.json()) as { detail?: string };
-      if (data?.detail) detail = data.detail;
-    } catch {
-      // Body wasn't JSON; keep the status text.
-    }
+    const detail = await responseErrorDetail(response);
     throw new BridgeApiError(response.status, detail);
   }
   return (await response.json()) as T;

@@ -8,9 +8,9 @@
       "start_background_task",
       "search_team_history",
       "read_thread_context",
-      "search_docs",
       "post_to_channel",
-      "escalate"
+      "escalate",
+      "render_dashboard"
     ],
     "tool_config": {}
   },
@@ -33,7 +33,9 @@
         "user_preferences",
         "facts"
       ]
-    }
+    },
+    "shared_across_channels": false,
+    "isolated_channels": []
   },
   "heartbeat": {
     "busy_threshold": 1,
@@ -45,20 +47,18 @@
   },
   "channels": {
     "C_ASK_DATA": {
-      "system_prompt": "You are a data team Q&A bot. Answer questions about data pipelines, schemas, and dashboards. Search docs and team history before answering.",
+      "system_prompt": "You are a data team Q&A bot. Answer questions about data pipelines, schemas, and dashboards. Search team history and any connected documentation sources before answering.",
       "allowed_tools": [
-        "search_team_history",
-        "search_docs"
+        "search_team_history"
       ],
       "memory_rules": [
         "faq_in_channel"
       ]
     },
     "C_ASK_PLATFORM": {
-      "system_prompt": "You are a platform engineering Q&A bot. Answer questions about infrastructure, deployments, and internal tools. Search docs and read threads for context.",
+      "system_prompt": "You are a platform engineering Q&A bot. Answer questions about infrastructure, deployments, and internal tools. Search connected documentation sources when available and read threads for context.",
       "allowed_tools": [
         "search_team_history",
-        "search_docs",
         "read_thread_context"
       ],
       "memory_rules": [
@@ -74,7 +74,9 @@
       "memory_rules": []
     }
   },
+  "admin_user_ids": [],
   "bot_policy": {
+    "allow_all_bots": false,
     "trusted_bot_ids": [],
     "open_channels": []
   },
@@ -88,9 +90,8 @@
     {
       "trigger": "(?i)\\b(schema|dbt|pipeline|warehouse)\\b",
       "name": "data-qa",
-      "prompt_template": "The user is asking a data-platform question. Before answering, call search_docs (data namespace first) and search_team_history for prior answers. Cite your sources inline and prefer short, direct answers.",
+      "prompt_template": "The user is asking a data-platform question. Before answering, call search_team_history for prior answers. If your tools include search_docs, call it too (data namespace first); otherwise use any connected document-search tool by its advertised name. Cite your sources inline and prefer short, direct answers.",
       "required_tools": [
-        "search_docs",
         "search_team_history"
       ],
       "channels": [

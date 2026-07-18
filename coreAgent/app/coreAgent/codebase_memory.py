@@ -38,6 +38,7 @@ both True. ~200-500ms added to the pre-LLM hot path. We accept this
 trade-off because it's the difference between "ask every new
 conversation" and "ask once, remember."
 """
+
 from __future__ import annotations
 
 import logging
@@ -98,26 +99,28 @@ def reset_memory_client_for_tests() -> None:
 # Actor/namespace construction (mirrors main.py:_build_memory_session_manager)
 # ---------------------------------------------------------------------------
 
+
 def _actor_id_for(
     tenant_id: str,
     channel_id: str,
     *,
     isolated: bool = False,
+    shared_across_channels: bool = False,
     user_id: str = "",
 ) -> str:
     """Build the actor_id that main.py's session_manager uses for this scope.
 
     Must stay in sync with ``_build_memory_session_manager``:
 
-      - isolated channels: ``{tenant_id}_{channel_id}``
-      - shared (channel present, not isolated): ``{tenant_id}``
+      - channels: ``{tenant_id}_{channel_id}`` by default
+      - explicit shared mode: ``{tenant_id}``, unless ``isolated=True``
       - DMs (no channel): ``{tenant_id}_{user_id or "anon"}``
 
     If this diverges from main.py we'd be querying a different namespace
     than the session manager is writing to, which would silently return
     empty results.
     """
-    if isolated and channel_id:
+    if channel_id and (not shared_across_channels or isolated):
         return f"{tenant_id}_{channel_id}"
     if channel_id:
         return tenant_id
@@ -138,12 +141,14 @@ def _namespace_for(actor_id: str) -> str:
 # Public API
 # ---------------------------------------------------------------------------
 
+
 def retrieve_codebase_affinity_hint(
     tenant_id: str,
     channel_id: str,
     known_repos: Iterable[str],
     *,
     isolated: bool = False,
+    shared_across_channels: bool = False,
     user_id: str = "",
     memory_client: Any | None = None,
     min_score: float = _MIN_RELEVANCE_SCORE,
@@ -172,12 +177,21 @@ def retrieve_codebase_affinity_hint(
     if not _MEMORY_ID or not _SEMANTIC_STRATEGY_ID:
         return None
 
+    # Without either a channel or user scope there is no safe stable actor to
+    # query. Do not fall back to a tenant-wide anonymous memory bucket.
+    if not channel_id and not user_id:
+        return None
+
     known = {r for r in known_repos if r}
     if not known:
         return None
 
     actor_id = _actor_id_for(
-        tenant_id, channel_id, isolated=isolated, user_id=user_id
+        tenant_id,
+        channel_id,
+        isolated=isolated,
+        shared_across_channels=shared_across_channels,
+        user_id=user_id,
     )
     namespace = _namespace_for(actor_id)
     query = _build_query(channel_id, user_id)
@@ -214,8 +228,7 @@ def retrieve_codebase_affinity_hint(
         hit = _first_known_repo_mentioned(content, known)
         if hit is not None:
             log.info(
-                "codebase_memory: hint for tenant=%s channel=%s → %s "
-                "(score=%s)",
+                "codebase_memory: hint for tenant=%s channel=%s → %s (score=%s)",
                 tenant_id,
                 channel_id,
                 hit,
@@ -229,6 +242,7 @@ def retrieve_codebase_affinity_hint(
 # ---------------------------------------------------------------------------
 # Result parsing (defensive against SDK field-name drift)
 # ---------------------------------------------------------------------------
+
 
 def _extract_score(record: dict[str, Any]) -> float | None:
     """Pull the relevance score from a memory record summary.
@@ -269,9 +283,7 @@ def _extract_content(record: dict[str, Any]) -> str:
     return ""
 
 
-def _first_known_repo_mentioned(
-    content: str, known_repos: set[str]
-) -> str | None:
+def _first_known_repo_mentioned(content: str, known_repos: set[str]) -> str | None:
     """Return the first repo from ``known_repos`` that appears in ``content``.
 
     Matching is case-insensitive and prefers the full ``owner/name``

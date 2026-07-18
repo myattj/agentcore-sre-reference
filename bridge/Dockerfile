@@ -4,7 +4,7 @@
 # ---- Stage 1: install dependencies with uv ----
 FROM python:3.13-slim AS builder
 
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+COPY --from=ghcr.io/astral-sh/uv:0.11.24 /uv /usr/local/bin/uv
 
 WORKDIR /app
 
@@ -24,14 +24,20 @@ COPY bridge/ ./bridge/
 # ---- Stage 2: slim runtime image ----
 FROM python:3.13-slim
 
+RUN groupadd --gid 10001 app \
+    && useradd --uid 10001 --gid app --home-dir /app --create-home \
+      --shell /usr/sbin/nologin app
+
 WORKDIR /app
 
-COPY --from=builder /app/.venv /app/.venv
-COPY --from=builder /app/bridge /app/bridge
+COPY --from=builder --chown=app:app /app/.venv /app/.venv
+COPY --from=builder --chown=app:app /app/bridge /app/bridge
 
 ENV PATH="/app/.venv/bin:$PATH"
 
 EXPOSE 8000
+
+USER 10001:10001
 
 # Two workers: enough for concurrent Slack webhook + OAuth without
 # over-provisioning the 0.25 vCPU Fargate task.

@@ -2,7 +2,8 @@
  * Session token verification + cookie helpers.
  *
  * The bridge mints session tokens in `bridge/bridge/slack_oauth.py`
- * (`make_session_token`) at the end of the OAuth callback. Format:
+ * (`make_session_token`) at the end of the OAuth callback and writes the
+ * HttpOnly cookie directly before redirecting to the onboarding UI. Format:
  *
  *     {tenant_id}.{nonce}.{ts}.{hmac_hex}
  *
@@ -18,7 +19,7 @@
  * KEEP IN SYNC with `bridge/bridge/slack_oauth.py:_sign_session` and
  * `verify_session_token`. If you change the format, change both sides.
  */
-import { createHmac, timingSafeEqual } from "node:crypto";
+import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 
@@ -29,6 +30,10 @@ export const SESSION_TTL_SECONDS = 3600;
 
 /** Cookie name for the onboarding session. */
 export const SESSION_COOKIE_NAME = "tenant_session";
+
+/** Short-lived CSRF state for the GitHub App redirect. */
+const GITHUB_INSTALL_STATE_TTL_SECONDS = 600;
+const MAX_CLOCK_SKEW_SECONDS = 30;
 
 /** Cookie attributes — see CLAUDE.md gotcha #25. */
 export const SESSION_COOKIE_OPTIONS = {
@@ -53,11 +58,14 @@ export function verifySessionToken(token: string | undefined | null): string | n
   const [tenantId, nonce, tsStr, sig] = parts;
   if (!tenantId || !nonce || !sig) return null;
 
+  if (!/^\d+$/.test(tsStr)) return null;
   const ts = Number.parseInt(tsStr, 10);
-  if (!Number.isFinite(ts)) return null;
+  if (!Number.isSafeInteger(ts)) return null;
 
   const now = Math.floor(Date.now() / 1000);
-  if (Math.abs(now - ts) > SESSION_TTL_SECONDS) return null;
+  if (ts > now + MAX_CLOCK_SKEW_SECONDS || now - ts > SESSION_TTL_SECONDS) {
+    return null;
+  }
 
   const secret = getStateSecret();
   const expected = createHmac("sha256", secret)
@@ -80,6 +88,56 @@ export function verifySessionToken(token: string | undefined | null): string | n
   if (!timingSafeEqual(expectedBuf, sigBuf)) return null;
 
   return tenantId;
+}
+
+/**
+ * Mint a purpose-specific GitHub install state without disclosing the session
+ * bearer to GitHub or putting it in URL logs. The HMAC is bound to the exact
+ * current session token and uses a domain-separation prefix.
+ */
+export function makeGitHubInstallState(sessionToken: string): string {
+  if (!verifySessionToken(sessionToken)) {
+    throw new Error("Cannot mint GitHub install state for an invalid session");
+  }
+  const nonce = randomBytes(16).toString("hex");
+  const ts = Math.floor(Date.now() / 1000);
+  const signature = createHmac("sha256", getStateSecret())
+    .update(`github-install.${sessionToken}.${nonce}.${ts}`)
+    .digest("hex");
+  return `${nonce}.${ts}.${signature}`;
+}
+
+/** Verify that GitHub returned the state minted for this exact session. */
+export function verifyGitHubInstallState(
+  state: string | undefined | null,
+  sessionToken: string,
+): boolean {
+  if (!state || !verifySessionToken(sessionToken)) return false;
+  const parts = state.split(".");
+  if (parts.length !== 3) return false;
+  const [nonce, tsRaw, signature] = parts;
+  if (!nonce || !signature) return false;
+  if (!/^\d+$/.test(tsRaw)) return false;
+  const ts = Number.parseInt(tsRaw, 10);
+  if (!Number.isSafeInteger(ts)) return false;
+  const now = Math.floor(Date.now() / 1000);
+  if (
+    ts > now + MAX_CLOCK_SKEW_SECONDS ||
+    now - ts > GITHUB_INSTALL_STATE_TTL_SECONDS
+  ) {
+    return false;
+  }
+
+  const expected = createHmac("sha256", getStateSecret())
+    .update(`github-install.${sessionToken}.${nonce}.${ts}`)
+    .digest("hex");
+  const expectedBuffer = Buffer.from(expected, "hex");
+  const signatureBuffer = Buffer.from(signature, "hex");
+  return (
+    expectedBuffer.length > 0 &&
+    expectedBuffer.length === signatureBuffer.length &&
+    timingSafeEqual(expectedBuffer, signatureBuffer)
+  );
 }
 
 /**

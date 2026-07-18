@@ -1,16 +1,15 @@
 /**
  * GitHub App post-install redirect handler.
  *
- * GitHub redirects here after a user completes the AgentCore Reference GitHub App
+ * GitHub redirects here after a user completes the Agent GitHub App
  * install on their org:
  *
- *   GET /github/installed?installation_id=XYZ&setup_action=install&state=<session>
+ *   GET /github/installed?installation_id=XYZ&setup_action=install&state=<nonce>
  *
  * This handler:
  *   1. Verifies the session cookie is present and valid
- *   2. Verifies the `state` query param matches the session cookie
- *      (CSRF guard — prevents cross-site attacks where someone tricks a
- *      logged-in user into hitting this URL with an attacker's installation_id)
+ *   2. Verifies the purpose-specific `state` is signed and bound to the
+ *      current session (the bearer itself is never sent to GitHub)
  *   3. POSTs {installation_id} to the bridge's warm-start endpoint
  *   4. Redirects back to /onboarding/{tenantId}/integrations with a
  *      ?github=connected|error query param for the UI to render a banner
@@ -33,6 +32,7 @@ import type { NextRequest } from "next/server";
 import { BridgeApiError, installGitHubApp } from "@/lib/bridge";
 import {
   SESSION_COOKIE_NAME,
+  verifyGitHubInstallState,
   verifySessionToken,
 } from "@/lib/session";
 
@@ -42,7 +42,9 @@ export async function GET(request: NextRequest): Promise<Response> {
   const state = searchParams.get("state");
   const setupAction = searchParams.get("setup_action");
 
-  if (!installationId) {
+  // GitHub installation IDs are positive integers. Reject non-canonical
+  // callback input so the bridge trust-binding comparison is unambiguous.
+  if (!installationId || !/^[1-9]\d{0,18}$/.test(installationId)) {
     redirect("/onboarding/error?reason=github_missing_installation_id");
   }
 
@@ -71,10 +73,9 @@ export async function GET(request: NextRequest): Promise<Response> {
     redirect("/onboarding/error?reason=bad_session");
   }
 
-  // CSRF guard: the state param must equal the session cookie. We
-  // passed the cookie as `state` when building the install URL, so if
-  // they don't match, someone tampered with the redirect mid-flight.
-  if (!state || state !== sessionCookie.value) {
+  // CSRF guard: verify the dedicated short-lived state is bound to this
+  // exact session. Never compare or transmit the bearer as URL state.
+  if (!verifyGitHubInstallState(state, sessionCookie.value)) {
     redirect(
       `/onboarding/${encodeURIComponent(tenantId)}/integrations?github=error&reason=state_mismatch`,
     );
@@ -87,6 +88,11 @@ export async function GET(request: NextRequest): Promise<Response> {
       sessionCookie.value,
       installationId,
     );
+    if (result.pending_approval) {
+      redirect(
+        `/onboarding/${encodeURIComponent(tenantId)}/integrations?github=pending&installation_id=${encodeURIComponent(installationId)}`,
+      );
+    }
     if (!result.ok) {
       const errCode = encodeURIComponent(result.error ?? "unknown_error");
       redirect(

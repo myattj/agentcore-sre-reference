@@ -35,7 +35,6 @@ import unittest
 from contextlib import redirect_stdout
 from unittest.mock import patch
 
-import metrics
 from metrics import (
     DEFAULT_NAMESPACE,
     EMFMetricsEmitter,
@@ -147,13 +146,13 @@ class EMFEmitterInvocationTest(unittest.TestCase):
         self.assertEqual(records[0]["Invocations"], 1)
 
     def test_default_namespace(self) -> None:
-        emitter = EMFMetricsEmitter()  # no namespace → reads env or default
+        emitter = EMFMetricsEmitter()
         self.assertEqual(emitter.namespace, DEFAULT_NAMESPACE)
 
-    def test_env_var_namespace_override(self) -> None:
+    def test_env_var_cannot_disconnect_namespace_contract(self) -> None:
         with patch.dict(os.environ, {"METRICS_NAMESPACE": "Override/NS"}):
             emitter = EMFMetricsEmitter()
-            self.assertEqual(emitter.namespace, "Override/NS")
+            self.assertEqual(emitter.namespace, DEFAULT_NAMESPACE)
 
 
 class EMFEmitterToolCallTest(unittest.TestCase):

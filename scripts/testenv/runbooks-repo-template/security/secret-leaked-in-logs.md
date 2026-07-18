@@ -23,8 +23,8 @@ Where was the secret logged? Pull the CloudWatch log events:
 
 ```bash
 aws logs filter-log-events \
-  --log-group-name /aws/ecs/<service> \
-  --filter-pattern '"<secret-or-fragment>"' \
+  --log-group-name "/aws/ecs/$SERVICE_NAME" \
+  --filter-pattern "\"$SECRET_FRAGMENT\"" \
   --start-time $(date -v-24H +%s)000
 ```
 

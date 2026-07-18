@@ -1,4 +1,4 @@
-"""Phase B sandbox container entrypoint — real Claude agent loop (v2).
+"""PR sandbox container entrypoint — real Claude agent loop.
 
 Runs a Claude tool-use agent that reads a task description, explores
 the cloned repository, makes code changes, and opens a pull request.
@@ -14,9 +14,9 @@ Lifecycle (driven by `propose_pr` in coreAgent/tools.py):
        task_description, context_hint.
     3. Mark the row `running`.
     4. Mint a GitHub App installation token via `scm_github`.
-    5. git clone the repo over HTTPS using the installation token
-       as basic-auth password (`x-access-token:<token>` form).
-    6. Create a branch `agentcore/<task_id>`.
+    5. git clone the repo over HTTPS using a process-scoped authorization
+       header derived from the installation token.
+    6. Create a branch `agent/<task_id>`.
     7. Phase 1 (agentic): run the Claude agent loop (agent.py) which
        reads files, plans changes, edits code, and calls submit_changes.
     8. Phase 2 (single call): generate commit message + PR title + body
@@ -49,17 +49,22 @@ Dockerfile). Has access to ONLY:
 No tenant secrets, no audit log, no tenants table. The Claude agent
 runs inside this sandbox so the blast radius holds.
 """
+
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
+import re
+import shutil
 import subprocess
 import sys
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 
 import boto3
@@ -85,18 +90,69 @@ TASK_ID = os.environ.get("TASK_ID", "")
 CLONE_DIR = "/tmp/repo"
 
 GITHUB_API = "https://api.github.com"
+DEFAULT_GIT_USER_NAME = "Agent Bot"
+DEFAULT_GIT_USER_EMAIL = "agent-bot@users.noreply.github.com"
+_GITHUB_REPO_SLUG_RE = re.compile(
+    r"(?P<owner>[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?)/"
+    r"(?P<name>[A-Za-z0-9._-]{1,100})"
+)
+
+
+def validate_github_repo(repo: str) -> str:
+    """Return a normalized, exact GitHub ``owner/name`` slug.
+
+    This is duplicated in ``coreAgent/app/coreAgent/tools.py`` because the
+    sandbox and agent ship in separate runtimes. Keep both validators in sync.
+    """
+    if not isinstance(repo, str):
+        raise ValueError("repo must be an exact GitHub owner/name slug")
+    normalized = repo.strip()
+    match = _GITHUB_REPO_SLUG_RE.fullmatch(normalized)
+    if (
+        match is None
+        or "--" in match.group("owner")
+        or match.group("name") in {".", ".."}
+    ):
+        raise ValueError("repo must be an exact GitHub owner/name slug")
+    return normalized
+
+
+def github_repo_url(repo: str) -> str:
+    """Build the only Git remote URL the sandbox is allowed to use."""
+    return f"https://github.com/{validate_github_repo(repo)}.git"
+
+
+def get_sandbox_model() -> str:
+    """Return the configured direct-Anthropic model ID."""
+    from agent import DEFAULT_MODEL
+
+    return os.environ.get("SANDBOX_MODEL", DEFAULT_MODEL)
+
+
+def get_git_identity() -> tuple[str, str]:
+    """Return the repository-local commit identity for sandbox PRs."""
+    name = os.environ.get("SANDBOX_GIT_USER_NAME", "").strip() or DEFAULT_GIT_USER_NAME
+    email = (
+        os.environ.get("SANDBOX_GIT_USER_EMAIL", "").strip() or DEFAULT_GIT_USER_EMAIL
+    )
+    return name, email
 
 
 # ---------------------------------------------------------------------------
 # DDB helpers
 # ---------------------------------------------------------------------------
 
+
 def _table() -> Any:
     return boto3.resource("dynamodb", region_name=REGION).Table(SANDBOX_JOBS_TABLE)
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    return (
+        datetime.now(timezone.utc)
+        .isoformat(timespec="milliseconds")
+        .replace("+00:00", "Z")
+    )
 
 
 def get_job(task_id: str) -> dict[str, Any]:
@@ -126,7 +182,9 @@ def update_status(task_id: str, **fields: Any) -> None:
         expr_parts.append(f"{placeholder} = {value_placeholder}")
         expr_names[placeholder] = key
         # DynamoDB rejects Python floats — convert to Decimal.
-        expr_values[value_placeholder] = Decimal(str(value)) if isinstance(value, float) else value
+        expr_values[value_placeholder] = (
+            Decimal(str(value)) if isinstance(value, float) else value
+        )
     _table().update_item(
         Key={"task_id": task_id},
         UpdateExpression="SET " + ", ".join(expr_parts),
@@ -139,7 +197,12 @@ def update_status(task_id: str, **fields: Any) -> None:
 # Git helpers
 # ---------------------------------------------------------------------------
 
-def run_git(args: list[str], cwd: str | None = None) -> None:
+
+def run_git(
+    args: list[str],
+    cwd: str | None = None,
+    env: dict[str, str] | None = None,
+) -> None:
     """Run a git command and raise on non-zero exit. Captures stderr in
     the exception so failures land in CloudWatch with diagnostic context."""
     log.info("git %s", " ".join(args))
@@ -150,6 +213,7 @@ def run_git(args: list[str], cwd: str | None = None) -> None:
             check=True,
             capture_output=True,
             text=True,
+            env=env,
         )
     except subprocess.CalledProcessError as e:
         raise RuntimeError(
@@ -157,28 +221,71 @@ def run_git(args: list[str], cwd: str | None = None) -> None:
         ) from e
 
 
+def github_auth_env(token: str) -> dict[str, str]:
+    """Build a process-only Git environment for GitHub HTTPS operations.
+
+    The credential stays out of argv, logs, the remote URL, and repository
+    configuration. Callers must pass this environment to every networked Git
+    command because the header is deliberately not persisted after the
+    process exits.
+    """
+    basic_auth = base64.b64encode(f"x-access-token:{token}".encode()).decode()
+    auth_env = os.environ.copy()
+    auth_env.update(
+        {
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "http.https://github.com/.extraHeader",
+            "GIT_CONFIG_VALUE_0": f"Authorization: Basic {basic_auth}",
+        }
+    )
+    return auth_env
+
+
 def clone_repo(repo: str, token: str, target_dir: str) -> None:
     """Shallow-clone a repo via HTTPS using the installation token as basic-auth."""
-    if os.path.exists(target_dir):
+    url = github_repo_url(repo)
+    target = Path(target_dir).resolve()
+    temporary_root = Path(CLONE_DIR).parent.resolve()
+    if target == temporary_root or not target.is_relative_to(temporary_root):
+        raise ValueError(
+            "clone target must be a dedicated directory beneath the system temp root"
+        )
+    if target.exists():
         # Stale workspace from a prior run in the same container. Shouldn't
         # happen for one-shot Fargate tasks but cheap to handle.
-        subprocess.run(["rm", "-rf", target_dir], check=True)
-    url = f"https://x-access-token:{token}@github.com/{repo}.git"
-    run_git(["clone", "--depth", "50", url, target_dir])
+        shutil.rmtree(target)
+    # Pass credentials through Git's per-process config environment. Keeping
+    # the token out of argv prevents it from appearing in process listings,
+    # command logs, and git error messages.
+    run_git(["clone", "--depth", "50", url, str(target)], env=github_auth_env(token))
     # Identify the bot for the commit.
-    run_git(["config", "user.name", "AgentCore Reference"], cwd=target_dir)
-    run_git(["config", "user.email", "bot@example.com"], cwd=target_dir)
+    git_user_name, git_user_email = get_git_identity()
+    run_git(["config", "user.name", git_user_name], cwd=str(target))
+    run_git(["config", "user.email", git_user_email], cwd=str(target))
+
+
+def push_branch(
+    repo: str, branch: str, token: str, target_dir: str = CLONE_DIR
+) -> None:
+    """Push to the validated GitHub URL, ignoring mutable repository remotes."""
+    url = github_repo_url(repo)
+    run_git(
+        ["push", url, f"{branch}:{branch}"],
+        cwd=target_dir,
+        env=github_auth_env(token),
+    )
 
 
 def get_default_branch(repo: str, token: str) -> str:
     """GET /repos/<repo> → default_branch. Used as the PR base."""
+    repo = validate_github_repo(repo)
     req = urllib.request.Request(
         f"{GITHUB_API}/repos/{repo}",
         headers={
             "Authorization": f"Bearer {token}",
             "Accept": "application/vnd.github+json",
             "X-GitHub-Api-Version": "2022-11-28",
-            "User-Agent": "AgentCore Reference-Sandbox/1.0",
+            "User-Agent": "Agent-Sandbox/1.0",
         },
     )
     with urllib.request.urlopen(req, timeout=15) as resp:
@@ -191,6 +298,7 @@ def get_default_branch(repo: str, token: str) -> str:
 # PR creation
 # ---------------------------------------------------------------------------
 
+
 def open_pull_request(
     repo: str,
     token: str,
@@ -200,12 +308,15 @@ def open_pull_request(
     body: str,
 ) -> str:
     """POST /repos/<repo>/pulls. Returns the html_url of the new PR."""
-    payload = json.dumps({
-        "title": title,
-        "body": body,
-        "head": head,
-        "base": base,
-    }).encode("utf-8")
+    repo = validate_github_repo(repo)
+    payload = json.dumps(
+        {
+            "title": title,
+            "body": body,
+            "head": head,
+            "base": base,
+        }
+    ).encode("utf-8")
     req = urllib.request.Request(
         f"{GITHUB_API}/repos/{repo}/pulls",
         data=payload,
@@ -215,7 +326,7 @@ def open_pull_request(
             "Accept": "application/vnd.github+json",
             "X-GitHub-Api-Version": "2022-11-28",
             "Content-Type": "application/json",
-            "User-Agent": "AgentCore Reference-Sandbox/1.0",
+            "User-Agent": "Agent-Sandbox/1.0",
         },
     )
     try:
@@ -236,12 +347,13 @@ def open_pull_request(
 # Callback to bridge
 # ---------------------------------------------------------------------------
 
+
 def _progress_url() -> str:
     """Derive the progress endpoint URL from the completion callback URL.
 
-    The callback URL is e.g. ``https://bridge.example.com/internal/sandbox_complete``.
+    The callback URL is e.g. ``https://agent.example.com/internal/sandbox_complete``.
     The progress URL replaces the last path component:
-    ``https://bridge.example.com/internal/sandbox_progress``.
+    ``https://agent.example.com/internal/sandbox_progress``.
     """
     if not SANDBOX_CALLBACK_URL:
         return ""
@@ -265,7 +377,7 @@ def post_progress(task_id: str, step: str) -> None:
         headers={
             "Authorization": f"Bearer {SANDBOX_CALLBACK_SECRET}",
             "Content-Type": "application/json",
-            "User-Agent": "AgentCore Reference-Sandbox/1.0",
+            "User-Agent": "Agent-Sandbox/1.0",
         },
     )
     try:
@@ -281,16 +393,16 @@ def post_callback(task_id: str, status: str, pr_url: str = "", error: str = "") 
     loop will still observe the terminal status and clear HealthyBusy.
     The Slack post would just be missing."""
     if not SANDBOX_CALLBACK_URL or not SANDBOX_CALLBACK_SECRET:
-        log.warning(
-            "SANDBOX_CALLBACK_URL/SECRET not set — skipping bridge callback"
-        )
+        log.warning("SANDBOX_CALLBACK_URL/SECRET not set — skipping bridge callback")
         return
-    payload = json.dumps({
-        "task_id": task_id,
-        "status": status,
-        "pr_url": pr_url,
-        "error": error,
-    }).encode("utf-8")
+    payload = json.dumps(
+        {
+            "task_id": task_id,
+            "status": status,
+            "pr_url": pr_url,
+            "error": error,
+        }
+    ).encode("utf-8")
     req = urllib.request.Request(
         SANDBOX_CALLBACK_URL,
         data=payload,
@@ -298,7 +410,7 @@ def post_callback(task_id: str, status: str, pr_url: str = "", error: str = "") 
         headers={
             "Authorization": f"Bearer {SANDBOX_CALLBACK_SECRET}",
             "Content-Type": "application/json",
-            "User-Agent": "AgentCore Reference-Sandbox/1.0",
+            "User-Agent": "Agent-Sandbox/1.0",
         },
     )
     try:
@@ -312,6 +424,7 @@ def post_callback(task_id: str, status: str, pr_url: str = "", error: str = "") 
 # Main flow
 # ---------------------------------------------------------------------------
 
+
 def main() -> int:
     if not TASK_ID:
         log.error("TASK_ID env var is required")
@@ -319,10 +432,10 @@ def main() -> int:
 
     log.info("starting sandbox task task_id=%s", TASK_ID)
 
-    # Step 1 — fetch job row
+    # Fetch the job row.
     try:
         job = get_job(TASK_ID)
-    except Exception as e:  # noqa: BLE001
+    except Exception:  # noqa: BLE001
         log.exception("failed to fetch job row")
         # Can't update DDB if we can't read it; just bail and let the
         # agent's poll loop hit the orphan ceiling.
@@ -336,8 +449,16 @@ def main() -> int:
         update_status(TASK_ID, status="error", error=msg, completed_at=_now_iso())
         post_callback(TASK_ID, status="error", error=msg)
         return 4
+    try:
+        repo = validate_github_repo(repo)
+    except ValueError as exc:
+        msg = str(exc)
+        log.error(msg)
+        update_status(TASK_ID, status="error", error=msg, completed_at=_now_iso())
+        post_callback(TASK_ID, status="error", error=msg)
+        return 4
 
-    # Step 2 — mark running + post first progress update
+    # Mark the job running and post the first progress update.
     try:
         update_status(TASK_ID, status="running", started_at=_now_iso())
     except Exception:  # noqa: BLE001
@@ -348,8 +469,8 @@ def main() -> int:
 
     post_progress(TASK_ID, "started")
 
-    # Step 3+ — the actual PR work, all wrapped so a failure at any
-    # step still writes a clean error state and posts the callback.
+    # Run the PR workflow inside one error boundary so any failure still
+    # writes a clean error state and posts the callback.
     error_msg = ""
     pr_url = ""
     try:
@@ -363,7 +484,7 @@ def main() -> int:
 
         # Clone + branch.
         clone_repo(repo, token, CLONE_DIR)
-        branch = f"agentcore/{TASK_ID}"
+        branch = f"agent/{TASK_ID}"
         run_git(["checkout", "-b", branch], cwd=CLONE_DIR)
 
         post_progress(TASK_ID, "cloning")
@@ -374,7 +495,7 @@ def main() -> int:
         # changed and a summary of the work done.
         from agent import run_agent_loop, generate_pr_metadata
 
-        sandbox_model = os.environ.get("SANDBOX_MODEL", "claude-sonnet-4-6-20250514")
+        sandbox_model = get_sandbox_model()
         sandbox_budget = float(os.environ.get("SANDBOX_PR_BUDGET", "5.0"))
 
         agent_result = run_agent_loop(
@@ -441,7 +562,7 @@ def main() -> int:
             cwd=CLONE_DIR,
         )
 
-        run_git(["push", "origin", branch], cwd=CLONE_DIR)
+        push_branch(repo, branch, token)
 
         post_progress(TASK_ID, "pushing")
 

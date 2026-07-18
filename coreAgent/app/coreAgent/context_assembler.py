@@ -29,14 +29,16 @@ Each step is independently toggleable via ``TenantConfig.context_assembly``.
 All Slack API calls are best-effort: failures are logged and skipped so the
 agent still processes the message (just with less context).
 """
+
 from __future__ import annotations
 
 import logging
-import re
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Any
+
+from pydantic_core import SchemaValidator, ValidationError as CoreValidationError
 
 # Absolute imports — main.py and every other module here are loaded as
 # top-level scripts by the AgentCore Runtime, not as a package. Relative
@@ -44,7 +46,14 @@ from typing import Any
 import slack_api
 from codebase_memory import retrieve_codebase_affinity_hint
 from codebase_resolver import CodebaseContext, resolve_codebase_context
-from tenant import ByoConfig, CodebasesConfig, ContextAssemblyConfig, SkillDef
+from tenant import (
+    MAX_SKILL_MATCH_TEXT_LENGTH,
+    ByoConfig,
+    CodebasesConfig,
+    ContextAssemblyConfig,
+    SkillDef,
+    compile_skill_trigger,
+)
 
 log = logging.getLogger(__name__)
 
@@ -58,6 +67,7 @@ _MAX_MSG_CHARS = 500
 @dataclass
 class SkillMatch:
     """Result of a successful skill trigger match."""
+
     name: str
     prompt_addition: str
     required_tools: list[str] = field(default_factory=list)
@@ -66,6 +76,7 @@ class SkillMatch:
 @dataclass
 class AssembledContext:
     """Output of the context assembly pipeline."""
+
     enriched_message: str
     system_prompt: str
     extra_tools: list[str] = field(default_factory=list)
@@ -81,6 +92,7 @@ def assemble_context(
     effective_prompt: str,
     tenant_id: str,
     codebases: CodebasesConfig | None = None,
+    memory_shared_across_channels: bool = False,
     memory_isolated_channels: list[str] | None = None,
     byo: ByoConfig | None = None,
 ) -> AssembledContext:
@@ -96,11 +108,10 @@ def assemble_context(
     signature yet). When provided and ``codebases.enabled=True``, the
     resolver appends a codebase-context block to the system prompt.
 
-    ``memory_isolated_channels`` mirrors the tenant's
-    ``memory.isolated_channels`` list. Needed by the codebase-affinity
-    semantic lookup to pick the same actor_id that the session manager
-    uses for writes — otherwise the retrieve and write sides query
-    different namespaces and the hint never returns anything.
+    ``memory_shared_across_channels`` and ``memory_isolated_channels`` mirror
+    the tenant memory policy. The codebase-affinity lookup uses them to pick
+    the same actor_id as the session manager: channel-scoped by default,
+    workspace-shared only after explicit opt-in, with optional channel silos.
 
     ``byo`` is optional (defaults to None for backward compatibility).
     When provided and ``byo.enabled=True``, connected integrations are
@@ -125,8 +136,7 @@ def assemble_context(
     skill_match = _match_skill(user_message, skills, ctx)
     if skill_match:
         effective_prompt += (
-            f"\n\n## Active Skill: {skill_match.name}\n\n"
-            f"{skill_match.prompt_addition}"
+            f"\n\n## Active Skill: {skill_match.name}\n\n{skill_match.prompt_addition}"
         )
 
     # Step 4: Codebase context. Two sub-steps:
@@ -160,6 +170,7 @@ def assemble_context(
                 channel_id=channel_id,
                 known_repos=known_repos,
                 isolated=is_isolated,
+                shared_across_channels=memory_shared_across_channels,
                 user_id=ctx.get("user_id", "") or "",
             )
         codebase_ctx = resolve_codebase_context(
@@ -196,6 +207,7 @@ def assemble_context(
 # Step 1: Permalink resolution
 # ---------------------------------------------------------------------------
 
+
 def _resolve_permalinks(
     ctx: dict[str, Any],
     config: ContextAssemblyConfig,
@@ -213,12 +225,45 @@ def _resolve_permalinks(
     # Cap the number of permalinks to resolve.
     permalinks = permalinks[: config.max_permalinks]
 
-    # Parse permalink URLs into (channel_id, thread_ts) pairs.
+    # Parse permalink URLs into (channel_id, thread_ts) pairs, then enforce
+    # the same channel boundary as the explicit Slack tools. The current
+    # channel is already authorized by the signed event. Any other channel
+    # requires a positive membership lookup for the exact requester.
     targets: list[tuple[str, str, str]] = []  # (url, channel_id, thread_ts)
+    current_channel_id = str(ctx.get("channel_id") or "").strip()
+    requester_user_id = str(ctx.get("user_id") or "").strip()
+    membership_cache: dict[str, bool] = {}
     for url in permalinks:
         parsed = slack_api.parse_permalink(url)
-        if parsed:
-            targets.append((url, parsed[0], parsed[1]))
+        if not parsed:
+            continue
+
+        target_channel_id, thread_ts = parsed
+        if target_channel_id == current_channel_id:
+            targets.append((url, target_channel_id, thread_ts))
+            continue
+
+        if not requester_user_id:
+            continue
+        if target_channel_id not in membership_cache:
+            try:
+                membership_cache[target_channel_id] = (
+                    slack_api.is_user_member_of_channel(
+                        token,
+                        target_channel_id,
+                        requester_user_id,
+                    )
+                    is True
+                )
+            except Exception:
+                membership_cache[target_channel_id] = False
+                log.warning(
+                    "Failed to verify permalink channel membership for %s",
+                    target_channel_id,
+                    exc_info=True,
+                )
+        if membership_cache[target_channel_id]:
+            targets.append((url, target_channel_id, thread_ts))
 
     if not targets:
         return ""
@@ -249,6 +294,7 @@ def _resolve_permalinks(
 # Step 2: Thread history injection
 # ---------------------------------------------------------------------------
 
+
 def _inject_thread_history(
     ctx: dict[str, Any],
     config: ContextAssemblyConfig,
@@ -266,7 +312,9 @@ def _inject_thread_history(
 
     try:
         messages = slack_api.fetch_thread_replies_raw(
-            token, channel_id, thread_id,
+            token,
+            channel_id,
+            thread_id,
             limit=config.thread_history_depth,
         )
     except Exception:
@@ -290,9 +338,8 @@ def _inject_thread_history(
     if not lines:
         return ""
 
-    return (
-        f"## Current Thread History ({len(lines)} prior messages)\n\n"
-        + "\n\n".join(lines)
+    return f"## Current Thread History ({len(lines)} prior messages)\n\n" + "\n\n".join(
+        lines
     )
 
 
@@ -300,8 +347,8 @@ def _inject_thread_history(
 # Step 3: Skill matching
 # ---------------------------------------------------------------------------
 
-# Cache compiled regex patterns to avoid recompiling on every invocation.
-_compiled_triggers: dict[str, re.Pattern[str]] = {}
+# Cache linear-time regex validators to avoid recompiling on every invocation.
+_compiled_triggers: dict[str, SchemaValidator] = {}
 
 
 def _match_skill(
@@ -317,6 +364,7 @@ def _match_skill(
     text = user_message.strip()
     if not text or not skills:
         return None
+    match_text = text[:MAX_SKILL_MATCH_TEXT_LENGTH]
 
     channel_id = ctx.get("channel_id", "")
 
@@ -329,19 +377,25 @@ def _match_skill(
         trigger = skill.trigger
         if trigger.startswith("/"):
             # Slash-command: exact prefix match
-            if text.lower().startswith(trigger.lower()):
+            if match_text.lower().startswith(trigger.lower()):
                 return _build_skill_match(skill, ctx)
         else:
-            # Regex match
-            pattern = _compiled_triggers.get(trigger)
-            if pattern is None:
+            # Safe-regex match. Pydantic Core's Rust engine is linear-time;
+            # tenant validation also rejects repeated groups and oversized
+            # patterns before they reach this point.
+            matcher = _compiled_triggers.get(trigger)
+            if matcher is None:
                 try:
-                    pattern = re.compile(trigger, re.IGNORECASE)
-                except re.error:
-                    log.warning("Invalid skill trigger regex: %s", trigger)
+                    matcher = compile_skill_trigger(trigger)
+                except ValueError:
+                    log.warning("Invalid or unsafe skill trigger regex")
                     continue
-                _compiled_triggers[trigger] = pattern
-            if pattern.search(text):
+                _compiled_triggers[trigger] = matcher
+            try:
+                matcher.validate_python(match_text)
+            except CoreValidationError:
+                continue
+            else:
                 return _build_skill_match(skill, ctx)
 
     return None
@@ -378,9 +432,11 @@ def _build_skill_match(skill: SkillDef, ctx: dict[str, Any]) -> SkillMatch:
 # Maps integration name (as stored in byo.connected_integrations) to the
 # tools it exposes via the Gateway MCP target. Used to build a prompt hint
 # so the model knows which monitoring/observability tools are available.
-# Only integrations that provide tools relevant to investigation are listed
-# here — doc sources (Confluence, Notion) and issue trackers (Jira, Linear)
-# are already covered by search_docs and don't need explicit hints.
+# Only integrations that need an extra investigation hint are listed here.
+# Document sources (Confluence, Notion) already advertise their operation-
+# specific search tools through Gateway/MCP; there is no built-in aggregate
+# ``search_docs`` catalog tool. Issue trackers similarly advertise their own
+# operations directly.
 _INTEGRATION_TOOLS: dict[str, tuple[str, list[str]]] = {
     "datadog": (
         "Datadog",
@@ -409,9 +465,7 @@ def _build_integration_block(byo: ByoConfig | None) -> str:
         entry = _INTEGRATION_TOOLS.get(integration)
         if entry:
             display_name, tools = entry
-            lines.append(
-                f"- **{display_name}**: {', '.join(f'`{t}`' for t in tools)}"
-            )
+            lines.append(f"- **{display_name}**: {', '.join(f'`{t}`' for t in tools)}")
 
     if not lines:
         return ""
@@ -420,6 +474,5 @@ def _build_integration_block(byo: ByoConfig | None) -> str:
         "## Connected Monitoring Integrations\n\n"
         "The following monitoring tools are available via connected integrations. "
         "Use them when investigating incidents, triaging alerts, or answering "
-        "questions about production health.\n\n"
-        + "\n".join(lines)
+        "questions about production health.\n\n" + "\n".join(lines)
     )

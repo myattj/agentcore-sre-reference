@@ -20,9 +20,10 @@ Token usage is pulled from the final Strands stream event when available.
 The extraction is defensive — if the event shape changes or the key isn't
 present, tokens default to 0 and the audit row still writes.
 """
+
 from __future__ import annotations
 
-import logging
+import asyncio
 import os
 import time
 import uuid
@@ -41,7 +42,12 @@ from pricing import compute_cost_cents
 from runtime import app
 from spend_tracker import build_spend_tracker
 from tenant import TenantConfig, load_tenant_config
-from tools import CATALOG, build_catalog_tools
+from tools import (
+    CATALOG,
+    build_catalog_tools,
+    filter_runtime_available_tools,
+    normalize_github_repo_slug,
+)
 
 # Side-effect import: registers @app.ping handler. Keep this so the runtime
 # uses our HealthyBusy logic for the heartbeat lifecycle.
@@ -78,7 +84,11 @@ _metrics = build_metrics_emitter()
 
 
 def _iso_now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    return (
+        datetime.now(timezone.utc)
+        .isoformat(timespec="milliseconds")
+        .replace("+00:00", "Z")
+    )
 
 
 def _truncate(value: str, max_bytes: int = 1024) -> str:
@@ -86,6 +96,56 @@ def _truncate(value: str, max_bytes: int = 1024) -> str:
     if len(encoded) <= max_bytes:
         return value
     return encoded[: max_bytes - 3].decode("utf-8", errors="ignore") + "..."
+
+
+def _normalized_allowed_github_repos(config: TenantConfig) -> list[str]:
+    """Build the fail-closed repo authorization set for one invocation."""
+    if not config.codebases.enabled:
+        return []
+
+    allowed: set[str] = set()
+    for binding in config.codebases.bindings:
+        try:
+            allowed.add(normalize_github_repo_slug(binding.repo))
+        except ValueError:
+            log.warning(
+                "Ignoring malformed codebase binding for tenant=%s: %r",
+                config.tenant_id,
+                binding.repo,
+            )
+    return sorted(allowed)
+
+
+def _memory_is_channel_scoped(config: TenantConfig, channel_id: str) -> bool:
+    """Return whether memory for ``channel_id`` must use its own silo."""
+    return bool(
+        channel_id
+        and (
+            not config.memory.shared_across_channels
+            or channel_id in config.memory.isolated_channels
+        )
+    )
+
+
+def _local_memory_namespace(
+    tenant_id: str,
+    ctx: dict[str, Any],
+    config: TenantConfig,
+    fallback_scope_id: str = "",
+) -> str:
+    """Build the local-store namespace with the same isolation as production."""
+    base = config.memory.namespace or f"tenants/{tenant_id}"
+    channel_id = str(ctx.get("channel_id") or "")
+    if _memory_is_channel_scoped(config, channel_id):
+        return f"{base}/channels/{channel_id}"
+    if channel_id:
+        return base
+    user_id = str(ctx.get("user_id") or "")
+    if user_id:
+        return f"{base}/users/{user_id}"
+    # Missing Slack scope gets an invocation-local silo, never a shared
+    # tenant-wide or anonymous bucket.
+    return f"{base}/invocations/{fallback_scope_id or 'unscoped'}"
 
 
 def _build_byo_auth(
@@ -134,9 +194,12 @@ def _extract_usage_from_event(event: Any) -> tuple[int, int] | None:
 
     candidates = [
         event.get("usage"),
-        (event.get("metadata") or {}).get("usage") if isinstance(event.get("metadata"), dict) else None,
+        (event.get("metadata") or {}).get("usage")
+        if isinstance(event.get("metadata"), dict)
+        else None,
         ((event.get("event") or {}).get("metadata") or {}).get("usage")
-            if isinstance(event.get("event"), dict) else None,
+        if isinstance(event.get("event"), dict)
+        else None,
     ]
     for usage in candidates:
         if not isinstance(usage, dict):
@@ -171,31 +234,40 @@ def _build_memory_session_manager(
     of AGENT_LOCAL_STORES — that flag only controls tenant config + audit
     stores, not memory.
 
-    Namespace mapping (shared-by-default):
-      - Channels: actorId = {tenant_id} (shared brain across all channels)
-      - Isolated channels: actorId = {tenant_id}_{channel_id} (opt-in silo)
-      - DMs:      actorId = {tenant_id}_{user_id}    (per-user)
+    Namespace mapping (channel-scoped by default):
+      - Channels: actorId = {tenant_id}_{channel_id}
+      - Explicit shared mode: actorId = {tenant_id}, except channels listed
+        in ``isolated_channels`` remain channel-scoped
+      - DMs: actorId = {tenant_id}_{user_id} (per-user)
       - sessionId = thread_id (groups a conversation thread) or invocation_id
     """
     if not _MEMORY_ID:
         return None
 
-    from bedrock_agentcore.memory.integrations.strands.session_manager import AgentCoreMemorySessionManager
-    from bedrock_agentcore.memory.integrations.strands.config import AgentCoreMemoryConfig
-
-    channel_id = ctx.get("channel_id", "")
-    isolated = (
-        config is not None
-        and channel_id
-        and channel_id in config.memory.isolated_channels
+    from bedrock_agentcore.memory.integrations.strands.session_manager import (
+        AgentCoreMemorySessionManager,
+    )
+    from bedrock_agentcore.memory.integrations.strands.config import (
+        AgentCoreMemoryConfig,
     )
 
-    if isolated:
+    channel_id = ctx.get("channel_id", "")
+    # Missing policy fails closed to a channel silo; it must never silently
+    # restore the legacy workspace-wide actor.
+    channel_scoped = bool(
+        channel_id
+        and (
+            config is None
+            or _memory_is_channel_scoped(config, channel_id)
+        )
+    )
+
+    if channel_scoped:
         actor_id = f"{tenant_id}_{channel_id}"
     elif channel_id:
         actor_id = tenant_id
     else:
-        actor_id = f"{tenant_id}_{ctx.get('user_id', 'anon')}"
+        actor_id = f"{tenant_id}_{ctx.get('user_id') or invocation_id}"
 
     from bedrock_agentcore.memory.integrations.strands.config import RetrievalConfig
 
@@ -241,23 +313,25 @@ def _write_feedback_audit(
 ) -> None:
     """Write a feedback audit row. Best-effort — never throws."""
     try:
-        _audit.write({
-            "row_type": "feedback",
-            "tenant_id": tenant_id,
-            "sk": f"FB#{_iso_now()}#{invocation_id}",
-            "invocation_id": invocation_id,
-            "timestamp": _iso_now(),
-            "created_at": _iso_now(),
-            "user_id": feedback.get("reactor_user_id", ""),
-            "channel_id": ctx.get("channel_id", ""),
-            "thread_id": ctx.get("thread_id", ""),
-            "workspace_id": ctx.get("workspace_id", ""),
-            "reaction": feedback.get("reaction", ""),
-            "sentiment": feedback.get("sentiment", ""),
-            "bot_message_ts": feedback.get("bot_message_ts", ""),
-            "question_summary": _truncate(feedback.get("user_question", "")),
-            "answer_summary": _truncate(feedback.get("bot_answer", "")),
-        })
+        _audit.write(
+            {
+                "row_type": "feedback",
+                "tenant_id": tenant_id,
+                "sk": f"FB#{_iso_now()}#{invocation_id}",
+                "invocation_id": invocation_id,
+                "timestamp": _iso_now(),
+                "created_at": _iso_now(),
+                "user_id": feedback.get("reactor_user_id", ""),
+                "channel_id": ctx.get("channel_id", ""),
+                "thread_id": ctx.get("thread_id", ""),
+                "workspace_id": ctx.get("workspace_id", ""),
+                "reaction": feedback.get("reaction", ""),
+                "sentiment": feedback.get("sentiment", ""),
+                "bot_message_ts": feedback.get("bot_message_ts", ""),
+                "question_summary": _truncate(feedback.get("user_question", "")),
+                "answer_summary": _truncate(feedback.get("bot_answer", "")),
+            }
+        )
     except Exception as e:
         log.warning("feedback audit write dropped: %s", e)
 
@@ -291,7 +365,12 @@ def _write_feedback_memory(
 
     if not _MEMORY_ID:
         # Local dev: write to InMemoryStore
-        namespace = config.memory.namespace or f"tenants/{tenant_id}"
+        namespace = _local_memory_namespace(
+            tenant_id,
+            ctx,
+            config,
+            invocation_id,
+        )
         _memory.write_records(namespace, [record])
         log.info("Wrote feedback memory record to namespace=%s", namespace)
         return
@@ -301,7 +380,10 @@ def _write_feedback_memory(
     # strategy extracts and indexes the feedback asynchronously.
     try:
         session_mgr = _build_memory_session_manager(
-            tenant_id, ctx, invocation_id, config,
+            tenant_id,
+            ctx,
+            invocation_id,
+            config,
         )
         if session_mgr is None:
             return
@@ -331,7 +413,8 @@ def _write_feedback_memory(
         # Production memory write is best-effort. The audit row is the
         # durable record; memory enhances it for future conversations.
         log.warning(
-            "feedback memory write failed for tenant=%s", tenant_id,
+            "feedback memory write failed for tenant=%s",
+            tenant_id,
             exc_info=True,
         )
 
@@ -346,11 +429,12 @@ def _build_self_awareness_block(
     stands alone and the LLM reasons about the defaults from the tool schemas
     it already sees. The block only fires when there's something the LLM
     can't infer from its tools: custom skills, a non-default bot policy
-    (allow_all_bots is True by default), configured escalation routes, or
+    (humans-only is the default), configured escalation routes, or
     disconnected integrations the bot should be transparent about.
 
     When any of those are present, we also append the ``manage_config``
-    guidance so the LLM knows it can modify these settings at user request.
+    guidance so the LLM knows it can inspect these settings and that runtime
+    mutations are guarded by the tenant's exact Slack-admin allowlist.
     Enabled tools and context assembly flags are deliberately omitted — the
     former is duplicative with the tool schemas the LLM already has, and the
     latter is bridge-side plumbing the LLM can't act on.
@@ -368,9 +452,7 @@ def _build_self_awareness_block(
             "GitHub (code tools: `code_search`, `code_read_file`, etc.)"
         )
     if not config.byo.connected_integrations:
-        not_connected.append(
-            "Documentation sources (Confluence, Notion, etc.)"
-        )
+        not_connected.append("Documentation sources (Confluence, Notion, etc.)")
     if not_connected:
         sections.append(
             "**Not Connected:** The following integrations are not set up "
@@ -392,20 +474,17 @@ def _build_self_awareness_block(
                 line += f" [only in: {', '.join(s.channels)}]"
             skill_lines.append(line)
         sections.append(
-            f"**Skills:** {len(skills)} available\n"
-            + "\n".join(skill_lines)
+            f"**Skills:** {len(skills)} available\n" + "\n".join(skill_lines)
         )
 
     # Bot policy: only surface when it diverges from the zero-config default
-    # (allow_all_bots=True, empty trusted_bot_ids, empty open_channels).
+    # (humans only: allow_all_bots=False and both allowlists empty).
     # When surfaced, accurately reflects the four-tier evaluation from
     # ``BotPolicyConfig`` — the old implementation incorrectly said
     # "humans only" whenever the lists were empty, ignoring ``allow_all_bots``.
     bp = config.bot_policy
     is_default_policy = (
-        bp.allow_all_bots is True
-        and not bp.trusted_bot_ids
-        and not bp.open_channels
+        bp.allow_all_bots is False and not bp.trusted_bot_ids and not bp.open_channels
     )
     if not is_default_policy:
         descriptors: list[str] = []
@@ -422,20 +501,24 @@ def _build_self_awareness_block(
 
     if config.escalation.routes:
         route_lines = [
-            f"- {r.team_name} -> {r.channel_id}"
-            for r in config.escalation.routes
+            f"- {r.team_name} -> {r.channel_id}" for r in config.escalation.routes
         ]
         sections.append("**Escalation Routes:**\n" + "\n".join(route_lines))
 
     if not sections:
         return ""
 
-    sections.append(
-        "**Updating Settings:** Users can ask you to add skills, change "
-        "bot policy, update escalation routes, or modify other settings at "
-        "any time. Use the `manage_config` tool to view or update your "
-        "configuration. Changes persist and take effect on the next message."
-    )
+    if config.admin_user_ids:
+        sections.append(
+            "**Configuration Access:** Use `manage_config` to inspect settings. "
+            "Updates are permitted only for Slack users on the workspace's "
+            "explicit admin allowlist; the tool verifies the requester in code."
+        )
+    else:
+        sections.append(
+            "**Configuration Access:** `manage_config` is read-only because no "
+            "workspace admin Slack user IDs are configured."
+        )
 
     return "\n\n## Your Configuration\n\n" + "\n\n".join(sections)
 
@@ -455,7 +538,9 @@ async def invoke(payload, context):
     invocation_id = uuid.uuid4().hex
     start = time.time()
 
-    log.info(f"Invoking tenant={tenant_id} invocation_id={invocation_id} prompt_len={len(user_message)}")
+    log.info(
+        f"Invoking tenant={tenant_id} invocation_id={invocation_id} prompt_len={len(user_message)}"
+    )
 
     # Reaction feedback short-circuit: no LLM call, no Strands Agent.
     # The bridge sends event_type="reaction_feedback" when a user reacts
@@ -465,7 +550,9 @@ async def invoke(payload, context):
         feedback = ctx.get("feedback", {})
         log.info(
             "Feedback event: tenant=%s reaction=%s sentiment=%s invocation_id=%s",
-            tenant_id, feedback.get("reaction"), feedback.get("sentiment"),
+            tenant_id,
+            feedback.get("reaction"),
+            feedback.get("sentiment"),
             invocation_id,
         )
         try:
@@ -501,6 +588,23 @@ async def invoke(payload, context):
             thread_id=ctx.get("thread_id", ""),
             workspace_id=ctx.get("workspace_id", ""),
             escalation_routes=[r.model_dump() for r in config.escalation.routes],
+            heartbeat_busy_threshold=config.heartbeat.busy_threshold,
+            heartbeat_max_background_seconds=config.heartbeat.max_background_seconds,
+            github_installation_id=(
+                config.codebases.github_installation_id or ""
+                if config.codebases.enabled
+                else ""
+            ),
+            allowed_github_repos=_normalized_allowed_github_repos(config),
+            memory_namespace=_local_memory_namespace(
+                tenant_id,
+                ctx,
+                config,
+                invocation_id,
+            ),
+            # Immutable per-invocation authorization snapshot. The model
+            # cannot supply or modify this tool-internal context field.
+            config_admin_user_ids=tuple(config.admin_user_ids),
         )
 
         # Cost-cap pre-flight check: reject the invocation before any
@@ -517,7 +621,9 @@ async def invoke(payload, context):
                 )
                 log.info(
                     "Cost cap exceeded for tenant=%s spend=%d cap=%d",
-                    tenant_id, current_spend, cap_cents,
+                    tenant_id,
+                    current_spend,
+                    cap_cents,
                 )
                 yield cap_msg
                 success = True  # not an error — deliberate block
@@ -544,6 +650,7 @@ async def invoke(payload, context):
         # name replace the built-in version. Computed once and used by
         # both the self-awareness block and the context assembler.
         from builtin_skills import merge_skills
+
         effective_skills = merge_skills(config.skills)
 
         # Context assembly: resolve permalinks, inject thread history,
@@ -554,7 +661,11 @@ async def invoke(payload, context):
         # as a package module — relative imports raise ImportError.
         from context_assembler import assemble_context
 
-        assembled = assemble_context(
+        # Context assembly performs synchronous Slack, Secrets Manager, and
+        # memory lookups. Keep those calls off the AgentCore event loop so a
+        # slow external API cannot stall the runtime's /ping handler.
+        assembled = await asyncio.to_thread(
+            assemble_context,
             user_message=user_message,
             ctx=ctx,
             assembly_config=config.context_assembly,
@@ -562,6 +673,7 @@ async def invoke(payload, context):
             effective_prompt=effective_prompt,
             tenant_id=tenant_id,
             codebases=config.codebases,
+            memory_shared_across_channels=config.memory.shared_across_channels,
             memory_isolated_channels=config.memory.isolated_channels,
             byo=config.byo,
         )
@@ -569,11 +681,12 @@ async def invoke(payload, context):
         user_message = assembled.enriched_message
         effective_tools = list(set(effective_tools) | set(assembled.extra_tools))
         if assembled.matched_skill:
-            log.info("Skill matched: %s for tenant=%s", assembled.matched_skill, tenant_id)
+            log.info(
+                "Skill matched: %s for tenant=%s", assembled.matched_skill, tenant_id
+            )
         if assembled.codebase is not None:
             log.info(
-                "Codebase resolution for tenant=%s channel=%s: "
-                "disabled=%s bindings=%d",
+                "Codebase resolution for tenant=%s channel=%s: disabled=%s bindings=%d",
                 tenant_id,
                 ctx.get("channel_id", ""),
                 assembled.codebase.disabled,
@@ -583,10 +696,9 @@ async def invoke(payload, context):
             # fallback — the model must pass ``repo='owner/name'``
             # explicitly on every code_* call, picking from the list
             # of connected repos in the prompt block. We still stash
-            # ``github_installation_id`` so the tools can mint tokens.
-            request_context.merge_context(
-                github_installation_id=config.codebases.github_installation_id or "",
-            )
+            # GitHub authorization data was placed in the request context
+            # immediately after config load. Tool paths enforce the normalized
+            # binding allowlist independently of this discovery/prompt layer.
 
         # Drop code_* tools from the effective list when codebases are
         # disabled for this tenant. The resolver already emits a DISABLED
@@ -608,12 +720,28 @@ async def invoke(payload, context):
                 log.info(
                     "Filtered %d code tools for tenant=%s "
                     "(codebases.enabled=False): %s",
-                    len(removed), tenant_id, removed,
+                    len(removed),
+                    tenant_id,
+                    removed,
                 )
             effective_tools = [t for t in effective_tools if t not in _CODE_TOOLS]
 
+        # Deployment-level gates are independent of tenant configuration.
+        # Dashboard publishing needs a configured origin; the experimental
+        # PR sandbox stays unavailable unless an operator explicitly enables
+        # its unresolved hostile-code credential boundary.
+        before_runtime_gates = effective_tools
+        effective_tools = filter_runtime_available_tools(effective_tools)
+        gated_tools = sorted(set(before_runtime_gates) - set(effective_tools))
+        if gated_tools:
+            log.info(
+                "Filtered deployment-disabled tools for tenant=%s: %s",
+                tenant_id,
+                gated_tools,
+            )
+
         # Self-awareness: the bot knows its own config so it can explain
-        # itself and help users modify settings via manage_config. Returns
+        # itself and direct authorized updates through manage_config. Returns
         # an empty string for zero-config tenants — the base prompt stands
         # alone when there's nothing non-default to announce.
         effective_prompt += _build_self_awareness_block(config, effective_skills)
@@ -638,8 +766,9 @@ async def invoke(payload, context):
         )
 
         tools = list(catalog_tools)
-        # manage_config is a system tool — always available so the bot can
-        # explain and modify its own settings at the user's request.
+        # manage_config is a system tool — always available for safe reads.
+        # Its mutation path independently verifies the requesting Slack user
+        # against config.admin_user_ids and is read-only by default.
         _manage_config = CATALOG.get("manage_config")
         if _manage_config:
             tools.append(_manage_config)
@@ -650,7 +779,9 @@ async def invoke(payload, context):
 
         # Build the memory session manager (real AgentCore Memory when
         # AGENTCORE_MEMORY_ID is set, None for local dev).
-        session_mgr = _build_memory_session_manager(tenant_id, ctx, invocation_id, config)
+        session_mgr = _build_memory_session_manager(
+            tenant_id, ctx, invocation_id, config
+        )
 
         # FAQ injection: local dev only (when session_mgr is None).
         # With real memory, channel-scoped FAQ is handled automatically
@@ -704,18 +835,30 @@ async def invoke(payload, context):
                 rules=effective_rules,
             )
             if records:
-                base_ns = config.memory.namespace or f"tenants/{tenant_id}"
+                base_ns = _local_memory_namespace(
+                    tenant_id,
+                    ctx,
+                    config,
+                    invocation_id,
+                )
                 if "faq_in_channel" in effective_rules and channel_id:
-                    namespace = f"{base_ns}/channels/{channel_id}/faq"
+                    # FAQ records are always channel-specific, including when
+                    # generic memory sharing is explicitly enabled.
+                    root_ns = config.memory.namespace or f"tenants/{tenant_id}"
+                    namespace = f"{root_ns}/channels/{channel_id}/faq"
                 else:
                     namespace = base_ns
                 _memory.write_records(namespace, records)
-                log.info(f"Wrote {len(records)} memory records to namespace={namespace}")
+                log.info(
+                    f"Wrote {len(records)} memory records to namespace={namespace}"
+                )
 
     except Exception as e:  # noqa: BLE001 — audit, re-raise below
         success = False
         error_text = f"{type(e).__name__}: {e}"
-        log.exception("invoke failed for tenant=%s invocation_id=%s", tenant_id, invocation_id)
+        log.exception(
+            "invoke failed for tenant=%s invocation_id=%s", tenant_id, invocation_id
+        )
         raise
     finally:
         # Compute shared values once so both the audit write and the
@@ -727,27 +870,35 @@ async def invoke(payload, context):
         # Write the invocation-level audit row. Best-effort — the audit
         # store swallows exceptions, but wrap in try anyway.
         try:
-            _audit.write({
-                "row_type": "invocation",
-                "tenant_id": tenant_id,
-                "sk": f"INV#{_iso_now()}#{invocation_id}",
-                "invocation_id": invocation_id,
-                "timestamp": _iso_now(),
-                "created_at": _iso_now(),
-                "user_id": ctx.get("user_id", ""),
-                "channel_id": ctx.get("channel_id", ""),
-                "thread_id": ctx.get("thread_id", ""),
-                "workspace_id": ctx.get("workspace_id", ""),
-                "model_id": model_id,
-                "input_summary": _truncate(user_message),
-                "output_summary": _truncate(full_response if success else (error_text or "")),
-                "input_tokens": input_tokens,
-                "output_tokens": output_tokens,
-                "duration_ms": duration_ms,
-                "success": success,
-            })
+            _audit.write(
+                {
+                    "row_type": "invocation",
+                    "tenant_id": tenant_id,
+                    "sk": f"INV#{_iso_now()}#{invocation_id}",
+                    "invocation_id": invocation_id,
+                    "timestamp": _iso_now(),
+                    "created_at": _iso_now(),
+                    "user_id": ctx.get("user_id", ""),
+                    "channel_id": ctx.get("channel_id", ""),
+                    "thread_id": ctx.get("thread_id", ""),
+                    "workspace_id": ctx.get("workspace_id", ""),
+                    "model_id": model_id,
+                    "input_summary": _truncate(user_message),
+                    "output_summary": _truncate(
+                        full_response if success else (error_text or "")
+                    ),
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                    "duration_ms": duration_ms,
+                    "success": success,
+                }
+            )
         except Exception as audit_exc:  # pragma: no cover
-            log.warning("invoke: audit write dropped for invocation_id=%s: %s", invocation_id, audit_exc)
+            log.warning(
+                "invoke: audit write dropped for invocation_id=%s: %s",
+                invocation_id,
+                audit_exc,
+            )
 
         # CloudWatch metrics via EMF. Separate try/except so a metrics
         # failure doesn't suppress the audit row above or the spend record
@@ -766,7 +917,11 @@ async def invoke(payload, context):
                 workspace_id=ctx.get("workspace_id", ""),
             )
         except Exception as metrics_exc:  # pragma: no cover
-            log.warning("invoke: metrics emit dropped for invocation_id=%s: %s", invocation_id, metrics_exc)
+            log.warning(
+                "invoke: metrics emit dropped for invocation_id=%s: %s",
+                invocation_id,
+                metrics_exc,
+            )
 
         # Record spend for cost-cap tracking (post-invocation).
         # Only records when tokens were actually consumed. Best-effort —
@@ -783,7 +938,11 @@ async def invoke(payload, context):
                 cost_cents = compute_cost_cents(model_id, input_tokens, output_tokens)
                 _spend.record_spend(tenant_id, cost_cents)
         except Exception as spend_exc:  # pragma: no cover
-            log.warning("invoke: spend recording failed for invocation_id=%s: %s", invocation_id, spend_exc)
+            log.warning(
+                "invoke: spend recording failed for invocation_id=%s: %s",
+                invocation_id,
+                spend_exc,
+            )
 
         request_context.clear_context()
 

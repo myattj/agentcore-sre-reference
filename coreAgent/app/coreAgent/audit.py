@@ -88,10 +88,12 @@ feedback:
       answer_summary:  truncated bot answer that was reacted to
     }
 """
+
 from __future__ import annotations
 
 import logging
 import os
+import re
 from collections import defaultdict
 from typing import Any, Protocol
 
@@ -102,6 +104,19 @@ log = logging.getLogger(__name__)
 # fields, but we truncate to keep scans cheap and prevent accidental PII
 # bloat.
 _MAX_FIELD_BYTES = 1024
+_DASHBOARD_BEARER_RE = re.compile(r"(?i)(/d/)[0-9a-f]{32}\b")
+_UNBOUNDED_FIELDS = (
+    "input_summary",
+    "output_summary",
+    "tool_args_summary",
+    "tool_result_summary",
+)
+
+
+def redact_audit_text(value: Any) -> str:
+    """Remove bearer dashboard tokens before text reaches any audit backend."""
+    text = value if isinstance(value, str) else str(value)
+    return _DASHBOARD_BEARER_RE.sub(r"\1[REDACTED]", text)
 
 
 def _truncate(value: Any, max_bytes: int = _MAX_FIELD_BYTES) -> str:
@@ -109,12 +124,21 @@ def _truncate(value: Any, max_bytes: int = _MAX_FIELD_BYTES) -> str:
     when truncation happens so downstream readers can tell."""
     if value is None:
         return ""
-    s = value if isinstance(value, str) else str(value)
+    s = redact_audit_text(value)
     encoded = s.encode("utf-8")
     if len(encoded) <= max_bytes:
         return s
     # Truncate on byte boundary, then decode ignoring any split multibyte char.
     return encoded[: max_bytes - 3].decode("utf-8", errors="ignore") + "..."
+
+
+def _clean_row(row: dict[str, Any]) -> dict[str, Any]:
+    """Return a defensive copy with unbounded audit text scrubbed and capped."""
+    cleaned = dict(row)
+    for field in _UNBOUNDED_FIELDS:
+        if field in cleaned:
+            cleaned[field] = _truncate(cleaned[field])
+    return cleaned
 
 
 class AuditStore(Protocol):
@@ -145,7 +169,7 @@ class InMemoryAuditStore:
 
     def write(self, row: dict[str, Any]) -> None:
         tenant_id = row.get("tenant_id", "unknown")
-        self._rows[tenant_id].append(dict(row))  # defensive copy
+        self._rows[tenant_id].append(_clean_row(row))
 
     def rows_for(self, tenant_id: str) -> list[dict[str, Any]]:
         return list(self._rows.get(tenant_id, []))
@@ -185,19 +209,7 @@ class DynamoAuditStore:
 
     def write(self, row: dict[str, Any]) -> None:
         try:
-            # Truncate known-unbounded string fields. Numeric/bool fields
-            # pass through untouched.
-            cleaned = dict(row)
-            for field in (
-                "input_summary",
-                "output_summary",
-                "tool_args_summary",
-                "tool_result_summary",
-            ):
-                if field in cleaned:
-                    cleaned[field] = _truncate(cleaned[field])
-
-            self._get_table().put_item(Item=cleaned)
+            self._get_table().put_item(Item=_clean_row(row))
         except Exception as e:  # pragma: no cover - safety net
             # Audit failures must never break the caller. Log and drop.
             log.warning(

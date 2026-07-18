@@ -50,8 +50,8 @@ export default async function ChannelsPage({
       <header className="mb-8">
         <h1 className="mb-2 text-2xl font-semibold tracking-tight">Channels</h1>
         <p className="text-sm text-[color:var(--muted)]">
-          By default the bot works in any channel it&apos;s invited to,
-          with one shared memory across all of them. Use this page to
+          By default the bot works in any channel it&apos;s invited to and keeps
+          each channel&apos;s memory separate. Use this page to
           override the prompt, tools, or what gets remembered for a
           specific channel — e.g. a strict persona for #sre-alerts, or
           a narrower toolset for #ask-data. Most teams don&apos;t need
@@ -87,12 +87,12 @@ export default async function ChannelsPage({
 
       {!errorMessage && !needsReinstall && channels.length === 0 ? (
         <div className="rounded-lg border border-[color:var(--border)] bg-[color:var(--card)] p-8 text-center">
-          <h3 className="mb-2 text-base font-semibold">No channels yet</h3>
+          <h2 className="mb-2 text-base font-semibold">No channels yet</h2>
           <p className="mx-auto max-w-md text-sm text-[color:var(--muted)]">
             The bot hasn&apos;t been invited to any channels in your Slack
             workspace. Open Slack, type{" "}
             <code className="rounded bg-white px-1.5 py-0.5 font-mono text-xs">
-              /invite @agent-core
+              /invite @Agent
             </code>{" "}
             in any channel, then come back and refresh.
           </p>

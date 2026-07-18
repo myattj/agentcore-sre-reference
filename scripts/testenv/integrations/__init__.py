@@ -1,15 +1,18 @@
-"""External integration seeders for the AgentCore Reference test env.
+"""External integration seeders for the Agent test env.
 
-Each ``seed_<integration>.py`` module in this package:
+Every ``seed_<integration>.py`` module in this package:
 
   1. Loads credentials from Secrets Manager at
      ``agentcore/testenv/<integration>``
-  2. Calls the bridge's ``POST /api/tenants/{id}/integrations/<integration>``
-     route to provision a Gateway target + credential provider
-     (unless ``--no-connect`` is passed)
-  3. Calls the integration's own API to populate realistic Acme Data Co
+  2. Calls the integration's own API to populate realistic Acme Data Co
      content that matches the Slack seed: same services, same incidents,
      same teams
+
+PagerDuty, Jira, and Linear can also call the bridge's managed connector
+route before seeding. Sentry is content-only because it has no bridge route.
+Datadog is content-only because its two-secret authentication shape cannot be
+represented safely by a direct one-credential-provider Gateway target; its
+CLI therefore requires an explicit ``--skip-connect`` acknowledgement.
 
 The content in each integration intentionally references the same
 fictional events as the Slack seed (Feb checkout retry storm, ingest

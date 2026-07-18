@@ -43,10 +43,10 @@ The product separates **transport** (bridge) from **AI logic** (coreAgent) so th
                               ┌───────────┼────────────┐
                               ▼           ▼            ▼
                        Claude Sonnet  AgentCore     AgentCore
-                       4.6 (Bedrock)  Memory       Gateway (per tenant)
-                                      (per tenant   • Lambda targets
-                                       namespace)   • OpenAPI targets
-                                                    • MCP server targets
+                       4.6 (Bedrock)  Memory       Gateway (shared reference)
+                                      (tenant and   • Lambda targets
+                                       channel      • OpenAPI targets
+                                       namespaces)  • MCP server targets
 ```
 
 **Anti-pattern:** putting tool execution in the bridge. Tools are agent code. The bridge is transport-only.
@@ -58,7 +58,7 @@ The product separates **transport** (bridge) from **AI logic** (coreAgent) so th
 Walk through this before changing anything multi-tenant.
 
 1. **Customer signs up** → tenant config created in DynamoDB (or `examples/tenants/<id>.json` locally). Workspace ID mapped to tenant ID.
-2. **They configure their agent** via `TenantConfig` (see `coreAgent/app/coreAgent/tenant.py` for the authoritative dataclass). Ten sections: model, system_prompt, catalog, byo, memory, heartbeat, bot_policy, context_assembly, skills, escalation.
+2. **They configure their agent** via `TenantConfig` (see `coreAgent/app/coreAgent/tenant.py` for the authoritative model): model and persona, catalog and Gateway tools, memory, heartbeat and cost policy, channels and bot policy, context assembly, skills, escalation, and codebases.
 3. **Slack workspace connects** → OAuth install → bridge resolves `team_id` → `tenant_id`, acks within 3s, dispatches async.
 4. **User sends a message** → full runtime path in `.claude/docs/architecture-deep-dive.md`.
 5. **Tools + memory accumulate** — catalog tools per their whitelist, BYO tools via Gateway, memory records isolated by namespace.
@@ -80,12 +80,12 @@ Walk through this before changing anything multi-tenant.
 | Change heartbeat behavior globally | `coreAgent/app/coreAgent/ping.py` |
 | Change DDB table schemas or IAM policy scope | `infra/data/lib/data-stack.ts` — then `npm run deploy` in `infra/data/` |
 | Add a new audit row type or field | `coreAgent/app/coreAgent/audit.py` + the writer call-site in `main.py` or `tools.py` |
-| Add an editable TenantConfig field to the onboarding form | THREE-place edit: (1) `coreAgent/app/coreAgent/tenant.py`, (2) `bridge/bridge/api_models.py` + `bridge/bridge/tenant_write.py:build_default_config_dict`, (3) `onboarding/lib/types.ts` + `ConfigForm.tsx` |
+| Add an editable TenantConfig field to the UI | THREE-place schema edit: (1) `coreAgent/app/coreAgent/tenant.py`, (2) `bridge/bridge/api_models.py` + `bridge/bridge/tenant_write.py:build_default_config_dict`, (3) `onboarding/lib/types.ts`; then update the relevant workspace component |
 | Add a tenant skill/runbook | their tenant config: add to `skills[]` with trigger, name, prompt_template, required_tools |
 | Configure bot-to-bot interaction | their tenant config: set `bot_policy.trusted_bot_ids` and/or `bot_policy.open_channels` |
 | Add an escalation route | their tenant config: add to `escalation.routes[]` with team_name, channel_id, contacts |
 | Tune context assembly (permalinks, thread depth) | their tenant config: modify `context_assembly.*` |
-| Change the form labels / styling | `onboarding/app/onboarding/[tenantId]/config/ConfigForm.tsx` |
+| Change the prompt form labels / styling | `onboarding/app/workspace/[tenantId]/prompt/ConfigForm.tsx` |
 | Change the session token TTL | `bridge/bridge/slack_oauth.py:_SESSION_TTL_SECONDS` AND `onboarding/lib/session.ts:SESSION_TTL_SECONDS` (must match) |
 | Change what happens after OAuth install | `bridge/bridge/slack_oauth.py:handle_oauth_callback` |
 | Change the "Coming soon" integration list | `onboarding/app/onboarding/[tenantId]/integrations/page.tsx` |
@@ -112,7 +112,7 @@ These prevent bugs. Full detail + 14 more situational gotchas in `.claude/docs/g
 12. **Data CDK lives at `infra/data/`, not `coreAgent/agentcore/cdk/`.** The latter is CLI-regenerated.
 13. **Bridge and coreAgent have separate venvs.** Don't cross-import. Duplicate shared shapes with cross-reference comments.
 14. **Tenant config shape lives in THREE places.** (1) `coreAgent/app/coreAgent/tenant.py` (authoritative), (2) `bridge/bridge/api_models.py` + `tenant_write.py:build_default_config_dict`, (3) `onboarding/lib/types.ts`. Update all three in one commit.
-15. **Default config dict is duplicated** in `bridge/bridge/slack_oauth.py` (can't import from coreAgent). Mirror changes from `tenant.py`.
+15. **Bridge default config mirrors the agent schema** in `bridge/bridge/tenant_write.py:build_default_config_dict`; Slack OAuth calls that helper. Mirror changes from `tenant.py` without cross-importing services.
 16. **Next.js 16 tripwires:** `cookies()` is async; can't set cookies in Server Components (use Route Handlers); `fetch()` is aggressively cached (use `cache: "no-store"`); `params`/`searchParams` are `Promise<...>`; `redirect()` throws `NEXT_REDIRECT` — don't swallow it.
 
 ---
@@ -128,14 +128,13 @@ These prevent bugs. Full detail + 14 more situational gotchas in `.claude/docs/g
 
 | Doc | Contents |
 |---|---|
-| `.claude/docs/architecture-deep-dive.md` | Runtime path (end-to-end message flow), six pillars of customization, file tree |
+| `.claude/docs/architecture-deep-dive.md` | Runtime path (end-to-end message flow), customization surfaces, file tree |
 | `.claude/docs/dev-guide.md` | Local dev setup (3 terminals), production dev loop, full env var table |
 | `.claude/docs/gotchas-full.md` | All 30 gotchas with complete detail (Slack HMAC, session tokens, memory provisioning, bot policy, etc.) |
 
 ## Reference files
 
-- **Forward-looking roadmap**: `BUILD_PLAN.md` (post-week-7 pillar roadmap) + `NORTH_STAR.md` (product vision)
-- **Phase B sandbox v2 plan**: `~/.claude/plans/cached-pondering-feather.md` (Claude Agent SDK inner loop for `propose_pr`)
+- **Product vision**: `NORTH_STAR.md` (six archived exploration pillars)
 - **AgentCore CLI conventions**: `coreAgent/AGENTS.md` (auto-generated; schema-first authority rule)
 - **AgentCore CLI schema types**: `coreAgent/agentcore/.llm-context/*.ts`
 - **Strands docs**: https://strandsagents.com/

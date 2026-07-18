@@ -1,7 +1,7 @@
 """Install-time warm-start for GitHub App onboarding.
 
-After a tenant installs the AgentCore Reference GitHub App on their org and we store
-the ``installation_id`` on their tenant row, this module seeds the
+After an operator approves a GitHub App ``installation_id`` on the tenant row,
+this module verifies that exact binding and seeds the
 ``codebases`` config so the first Slack message already has a good
 shortlist instead of a cold start.
 
@@ -43,6 +43,7 @@ and exercise the rest against JSON-file fixtures.
 """
 from __future__ import annotations
 
+import hmac
 import json
 import logging
 import urllib.error
@@ -51,8 +52,14 @@ import urllib.request
 from dataclasses import dataclass, field
 from typing import Any
 
-from .github_app import get_installation_token
-from .tenant_write import deep_merge, get_tenant_row, update_tenant_row
+from .github_app import get_installation_token, normalize_installation_id
+from .tenant_write import (
+    GitHubInstallationBindingConflict,
+    deep_merge,
+    find_tenant_by_github_installation,
+    get_tenant_row,
+    update_tenant_row,
+)
 
 log = logging.getLogger(__name__)
 
@@ -86,6 +93,7 @@ class WarmStartResult:
     default_repo: str | None = None
     bindings: list[dict[str, Any]] = field(default_factory=list)
     total_repos_available: int = 0
+    pending_approval: bool = False
     error: str | None = None
 
 
@@ -130,7 +138,7 @@ def list_installation_repos(
                 "Authorization": f"Bearer {installation_token}",
                 "Accept": "application/vnd.github+json",
                 "X-GitHub-Api-Version": "2022-11-28",
-                "User-Agent": "AgentCore Reference-Bridge/1.0",
+                "User-Agent": "Agent-Bridge/1.0",
             },
         )
         try:
@@ -239,8 +247,8 @@ def run_install_warm_start(
     """Run the full install-time warm-start for a tenant.
 
     Steps:
-      1. Load the current tenant row (must exist — OAuth callback creates
-         it before we're called).
+      1. Load the current tenant row and require its operator-approved
+         ``github_installation_id`` to match the request exactly.
       2. Mint an installation token and list repos.
       3. Rank and pick default + bindings.
       4. Deep-merge a ``codebases`` block into the row and write back.
@@ -253,7 +261,18 @@ def run_install_warm_start(
     Never raises — every exception is wrapped into ``WarmStartResult``
     so the caller has a single error-handling path.
     """
-    result = WarmStartResult(ok=False, installation_id=installation_id)
+    try:
+        canonical_installation_id = normalize_installation_id(installation_id)
+    except (TypeError, ValueError) as e:
+        return WarmStartResult(
+            ok=False,
+            installation_id=str(installation_id),
+            error=str(e),
+        )
+    result = WarmStartResult(
+        ok=False,
+        installation_id=canonical_installation_id,
+    )
 
     try:
         current = get_tenant_row(tenant_id, region)
@@ -265,12 +284,45 @@ def run_install_warm_start(
         result.error = f"failed to load tenant row: {e}"
         return result
 
+    approved_installation_id = str(
+        (current.get("codebases") or {}).get("github_installation_id") or ""
+    )
+    if not approved_installation_id:
+        result.pending_approval = True
+        result.error = (
+            "GitHub App installation is not operator-approved for this tenant. "
+            "Ask the deployment operator to bind the installation ID first."
+        )
+        return result
+    if not hmac.compare_digest(
+        approved_installation_id,
+        canonical_installation_id,
+    ):
+        log.warning(
+            "github_install: rejected installation/tenant binding mismatch for tenant=%s",
+            tenant_id,
+        )
+        result.error = "GitHub App installation is not approved for this tenant"
+        return result
+
     try:
-        token = get_installation_token(installation_id)
+        owner = find_tenant_by_github_installation(
+            canonical_installation_id,
+            region,
+        )
+    except GitHubInstallationBindingConflict:
+        result.error = "GitHub App installation binding is not unique"
+        return result
+    if owner != tenant_id:
+        result.error = "GitHub App installation is not approved for this tenant"
+        return result
+
+    try:
+        token = get_installation_token(canonical_installation_id)
     except Exception as e:  # noqa: BLE001
         log.warning(
             "github_install: token mint failed for installation_id=%s: %s",
-            installation_id,
+            canonical_installation_id,
             e,
         )
         result.error = f"could not mint installation token: {e}"
@@ -282,7 +334,7 @@ def run_install_warm_start(
         log.warning(
             "github_install: list_installation_repos failed for "
             "installation_id=%s: %s",
-            installation_id,
+            canonical_installation_id,
             e,
         )
         result.error = f"could not list repositories: {e}"
@@ -297,12 +349,12 @@ def run_install_warm_start(
     # Deep-merge the codebases block so anything the onboarding UI has
     # already set on this tenant (e.g., a manual default_repo override)
     # survives the warm-start write. The only field we force is
-    # github_installation_id — the caller just passed that, so we know
-    # it's authoritative.
+    # github_installation_id — it already passed the operator-approved
+    # exact-match check above.
     codebases_patch = {
         "codebases": {
             "enabled": True,
-            "github_installation_id": installation_id,
+            "github_installation_id": canonical_installation_id,
             "default_repo": default_repo,
             "bindings": bindings,
             # Don't touch allow_learning — leave whatever's already set.
@@ -329,7 +381,7 @@ def run_install_warm_start(
         "github_install: warm-start complete for tenant=%s installation=%s "
         "default_repo=%s bindings=%d total_repos=%d",
         tenant_id,
-        installation_id,
+        canonical_installation_id,
         default_repo,
         len(bindings),
         result.total_repos_available,

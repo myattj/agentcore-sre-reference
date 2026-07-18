@@ -1,5 +1,5 @@
 /**
- * Phase B sandbox stack.
+ * Pull-request sandbox stack.
  *
  * Provisions a one-shot Fargate task definition for `propose_pr` PR-writing
  * runs. Each `propose_pr` tool call from the agent fires `ecs.run_task`
@@ -9,9 +9,8 @@
  *   3. Clones the target repo, creates a branch, makes the change, opens a PR
  *   4. Updates the job row + POSTs to the bridge `/internal/sandbox_complete`
  *
- * The sandbox runs Claude-authored bash inside the container (in v2 — first
- * slice ships a dummy "add a line to README" entrypoint to validate the
- * plumbing). Blast radius is therefore the design constraint:
+ * The sandbox runs Claude-authored commands inside the container, so blast
+ * radius is the primary design constraint:
  *   - dedicated task role with NO access to the tenants table, audit log,
  *     processed_events, or any other tenants' secrets
  *   - dedicated security group with egress-only and no ingress
@@ -29,8 +28,8 @@
  * DataStack's "customer config + audit log, RemovalPolicy.RETAIN" tables.
  *
  * The `AgentCoreSandboxAccess` managed policy below is attached to the
- * agent runtime role POST-DEPLOY by `infra/data/scripts/attach_agent_policy.sh`
- * (Step 8 extends that script to attach multiple policies idempotently).
+ * agent runtime role after deployment by
+ * `infra/data/scripts/attach_agent_policy.sh`.
  */
 import * as path from 'node:path';
 
@@ -100,8 +99,8 @@ export interface SandboxStackProps extends StackProps {
 
   /**
    * GitHub App ID — baked into the sandbox env so it can mint
-   * installation tokens via `scm_github.py`. Same App ID the bridge
-   * and agent use (123456 for AgentCore Reference).
+   * installation tokens via `scm_github.py`. Use the same App ID as the
+   * bridge and agent.
    */
   readonly githubAppId: string;
 
@@ -297,7 +296,7 @@ export class SandboxStack extends Stack {
     //   - api.anthropic.com (Claude agent loop)
     //   - dynamodb.<region>.amazonaws.com (sandbox_jobs read/write)
     //   - secretsmanager.<region>.amazonaws.com (token mint)
-    //   - agent.example.com (callback POST)
+    //   - the configured public bridge domain (callback POST)
     // No inbound traffic — never receives a connection.
     // ------------------------------------------------------------------
     const sandboxSg = new ec2.SecurityGroup(this, 'SandboxSg', {
@@ -335,7 +334,7 @@ export class SandboxStack extends Stack {
         GITHUB_APP_ID: props.githubAppId,
         // Agent loop configuration. Model and budget are plain env vars
         // (not secrets) — they're operational config, not credentials.
-        SANDBOX_MODEL: 'claude-sonnet-4-6-20250514',
+        SANDBOX_MODEL: 'claude-sonnet-4-6',
         SANDBOX_PR_BUDGET: '5.0',
       },
       secrets: {
@@ -388,9 +387,8 @@ export class SandboxStack extends Stack {
     // ------------------------------------------------------------------
     // AgentCoreSandboxAccess managed policy
     //
-    // Attached to the agent runtime role POST-DEPLOY by
-    // infra/data/scripts/attach_agent_policy.sh (extended in Step 8
-    // to attach multiple policies idempotently). SEPARATE policy from
+    // Attached to the agent runtime role after deployment by
+    // infra/data/scripts/attach_agent_policy.sh. This stays separate from
     // AgentCoreDataAccess (orthogonal blast radius — sandbox perms
     // are about firing tasks, not about reading customer data).
     //
@@ -407,7 +405,7 @@ export class SandboxStack extends Stack {
     this.sandboxAccessPolicy = new iam.ManagedPolicy(this, 'AgentSandboxAccessPolicy', {
       managedPolicyName: 'AgentCoreSandboxAccess',
       description:
-        'Phase B: grants the AgentCore agent runtime role permission to ' +
+        'Grants the AgentCore agent runtime role permission to ' +
         'launch sandbox Fargate tasks, read sandbox SSM coordinates, and ' +
         'write to the sandbox_jobs table. Attach via attach_agent_policy.sh.',
       statements: [

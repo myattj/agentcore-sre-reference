@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Two-pass deploy for the Phase B sandbox stack.
+# Two-pass deploy for the PR sandbox stack.
 #
 # SandboxStack needs five values from ServicesStack (VPC ID, AZs, public
 # subnets, cluster name + ARN) plus the sandbox secret ARN and the
@@ -27,10 +27,11 @@
 #   SLACK_SECRETS_ARN     — Slack Secrets Manager secret ARN
 #   BRIDGE_SECRETS_ARN    — Bridge Secrets Manager secret ARN
 #   CERTIFICATE_ARN       — ACM cert ARN (optional, but required for
-#                           the sandbox to be reachable on agent.example.com)
+#                           the sandbox to be reachable over HTTPS)
 #   DOMAIN_NAME           — e.g. agent.example.com. Required for sandbox
 #                           — the SANDBOX_CALLBACK_URL env var the
 #                           sandbox container POSTs to.
+#   GITHUB_APP_ID         — numeric ID for your GitHub App.
 #   SANDBOX_SECRETS_ARN   — agentcore/services/sandbox secret ARN
 #                           (created out-of-band via
 #                           `aws secretsmanager create-secret`).
@@ -74,6 +75,7 @@ missing=()
 [[ -z "${BRIDGE_SECRETS_ARN:-}" ]]  && missing+=("BRIDGE_SECRETS_ARN")
 [[ -z "${SANDBOX_SECRETS_ARN:-}" ]] && missing+=("SANDBOX_SECRETS_ARN")
 [[ -z "${DOMAIN_NAME:-}" ]]         && missing+=("DOMAIN_NAME")
+[[ -z "${GITHUB_APP_ID:-}" ]]       && missing+=("GITHUB_APP_ID")
 
 if (( ${#missing[@]} )); then
   echo "ERROR: missing required env vars: ${missing[*]}" >&2
@@ -85,6 +87,7 @@ if (( ${#missing[@]} )); then
   echo "  SANDBOX_SECRETS_ARN=arn:aws:secretsmanager:... \\" >&2
   echo "  CERTIFICATE_ARN=arn:aws:acm:... \\" >&2
   echo "  DOMAIN_NAME=agent.example.com \\" >&2
+  echo "  GITHUB_APP_ID=123456 \\" >&2
   echo "  bash infra/data/scripts/deploy_sandbox.sh" >&2
   exit 1
 fi
@@ -95,6 +98,7 @@ CONTEXT_FLAGS=(
   "--context" "bridgeSecretsArn=$BRIDGE_SECRETS_ARN"
   "--context" "sandboxSecretsArn=$SANDBOX_SECRETS_ARN"
   "--context" "domainName=$DOMAIN_NAME"
+  "--context" "githubAppId=$GITHUB_APP_ID"
 )
 
 if [[ -n "${CERTIFICATE_ARN:-}" ]]; then
@@ -158,6 +162,7 @@ SANDBOX_CONTEXT_FLAGS=(
   "--context" "sandboxClusterName=$CLUSTER_NAME"
   "--context" "sandboxClusterArn=$CLUSTER_ARN"
   "--context" "sandboxDomainName=$DOMAIN_NAME"
+  "--context" "sandboxGithubAppId=$GITHUB_APP_ID"
 )
 
 echo
@@ -173,11 +178,11 @@ fi
 echo
 if [[ "${ATTACH_POLICY:-0}" == "1" ]]; then
   echo "==> Attaching managed policies to agent role"
-  bash "$SCRIPT_DIR/attach_agent_policy.sh"
+  ATTACH_SANDBOX_POLICY=1 bash "$SCRIPT_DIR/attach_agent_policy.sh"
 else
   echo "==> Skipping attach_agent_policy.sh (set ATTACH_POLICY=1 to run)."
   echo "    To attach manually:"
-  echo "      bash infra/data/scripts/attach_agent_policy.sh"
+  echo "      ATTACH_SANDBOX_POLICY=1 bash infra/data/scripts/attach_agent_policy.sh"
 fi
 
 echo

@@ -17,6 +17,7 @@ short-circuits the Strands Agent path and writes directly to audit + memory.
 from __future__ import annotations
 
 import logging
+import hmac
 from typing import Any
 
 from .adapters.slack import SlackAdapter
@@ -104,6 +105,17 @@ async def dispatch_reaction_feedback(
     reactor_user_id = event.get("user", "")
     workspace_id = event.get("team_id", "")
 
+    # The signed Events API envelope identifies which Slack app received the
+    # event. Feedback is security-sensitive training data, so fail closed when
+    # the deployment identity is absent or the event belongs to another app.
+    event_app_id = str(event.get("api_app_id") or "")
+    if (
+        not slack_app_id
+        or not event_app_id
+        or not hmac.compare_digest(event_app_id, slack_app_id)
+    ):
+        return
+
     if not channel_id or not message_ts:
         return
 
@@ -118,11 +130,8 @@ async def dispatch_reaction_feedback(
 
     # ── Step 3: Verify it's our bot's message ──
     msg_app_id = bot_message.get("app_id", "")
-    msg_bot_id = bot_message.get("bot_id", "")
-    if not msg_bot_id and not msg_app_id:
-        return  # not a bot message at all
-    if slack_app_id and msg_app_id and msg_app_id != slack_app_id:
-        return  # different bot's message
+    if not msg_app_id or not hmac.compare_digest(str(msg_app_id), slack_app_id):
+        return  # not a message authored by this exact Slack app
 
     bot_answer = bot_message.get("text", "")
     thread_ts = bot_message.get("thread_ts", "")

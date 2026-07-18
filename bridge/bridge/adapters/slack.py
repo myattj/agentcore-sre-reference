@@ -7,9 +7,10 @@ What this module owns:
     using a per-tenant bot token fetched from `slack_token_store`
 
 Local-dev mode:
-  - If `signing_secret` is None (env var unset under `LOCAL_DEV=1`), HMAC
-    verification is SKIPPED and a one-time warning is logged. The local
-    debug loop and synthetic curl tests can post unsigned bodies.
+  - The caller must explicitly pass `allow_unsigned_requests=True` (the bridge
+    does this only under `LOCAL_DEV=1`) before an unset signing secret is
+    accepted. Production construction fails fast instead of exposing an
+    unsigned webhook.
   - If the per-tenant token store returns an empty string (no
     `SLACK_BOT_TOKEN` env var, no real OAuth-installed token in Secrets
     Manager), `reply()` falls back to printing to stdout instead of
@@ -66,11 +67,19 @@ class SlackAdapter:
         self,
         signing_secret: str | None = None,
         bot_token: str | None = None,
+        *,
+        allow_unsigned_requests: bool = False,
     ) -> None:
         """`bot_token` is retained for compatibility with LOCAL_DEV usage:
         if set, it's surfaced via the env-var path of the token store.
         Production reads from Secrets Manager — never from this constructor."""
+        if not signing_secret and not allow_unsigned_requests:
+            raise RuntimeError(
+                "SLACK_SIGNING_SECRET is required unless LOCAL_DEV=1 explicitly "
+                "enables unsigned local requests"
+            )
         self.signing_secret = signing_secret
+        self.allow_unsigned_requests = allow_unsigned_requests
         # Kept for legacy LOCAL_DEV callers that still pass it. Token
         # lookup goes through `slack_token_store.get_bot_token()` which
         # respects LOCAL_DEV / SLACK_BOT_TOKEN env vars.
@@ -85,19 +94,19 @@ class SlackAdapter:
 
         Raises `SlackSignatureError` on failure. Returns silently on success.
 
-        If `self.signing_secret` is unset (LOCAL_DEV without env var), this
-        method LOGS a warning and returns silently. Production deployments
-        MUST set `SLACK_SIGNING_SECRET` or every Slack request will be
-        accepted regardless of provenance.
+        If `self.signing_secret` is unset after the explicit LOCAL_DEV-only
+        constructor opt-in, this method logs a warning and returns silently.
 
         Reads the raw body via `await request.body()`. Starlette caches
         the body, so subsequent calls to `request.json()` / `request.body()`
         in the route handler still work — there's no double-read penalty.
         """
         if not self.signing_secret:
+            if not self.allow_unsigned_requests:  # defensive; constructor rejects this
+                raise SlackSignatureError("Slack signing secret is not configured")
             log.warning(
                 "SlackAdapter.verify_signature: signing_secret not set; "
-                "skipping HMAC verification (LOCAL_DEV path)"
+                "skipping HMAC verification (explicit LOCAL_DEV path)"
             )
             return
 

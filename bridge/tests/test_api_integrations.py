@@ -1,18 +1,7 @@
-"""Tests for POST /api/tenants/{id}/integrations/datadog (week 4 chunk F).
-
-Covers:
-  - Happy path: valid key + successful provisioning → 200 with ok=true
-  - Invalid Datadog key → ok=false with descriptive error
-  - Datadog unreachable → ok=false with "could not reach" error
-  - Provisioning failure → ok=false
-  - Missing/bad session token → 401
-  - Cross-tenant token → 403
-  - Tenant not found when writing BYO config → 404
-  - The route updates the tenant row's byo.enabled and byo.gateway_endpoint
-"""
+"""Security tests for the fail-closed Datadog connector surface."""
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -52,91 +41,67 @@ def _seed_tenant(monkeypatch):
 class TestConnectDatadog:
     """POST /api/tenants/{tenant_id}/integrations/datadog"""
 
-    def test_happy_path(self, session_token, _seed_tenant):
-        mock_validate = AsyncMock(return_value=True)
-        mock_provision = MagicMock(return_value={
-            "gateway_url": "https://gateway.example.com/mcp",
-            "target_id": "tgt-123",
-            "target_name": "tenant-slack-acme-datadog",
-            "credential_arn": "arn:cred",
-            "extra_headers": {"DD-APPLICATION-KEY": "dd-app-key"},
-        })
+    def test_valid_site_is_explicitly_disabled_without_touching_secrets(
+        self, session_token, _seed_tenant
+    ):
+        mock_provision = MagicMock()
 
-        with (
-            patch("bridge.api._validate_datadog_key", mock_validate),
-            patch("bridge.gateway_provisioner.provision_integration", mock_provision),
+        with patch(
+            "bridge.gateway_provisioner.provision_integration",
+            mock_provision,
         ):
             with TestClient(app) as client:
                 resp = client.post(
                     "/api/tenants/slack-acme/integrations/datadog",
-                    json={"api_key": "dd-test-key-123", "app_key": "dd-app-key-123"},
+                    json={"site": "datadoghq.com"},
                     headers={"Authorization": f"Bearer {session_token}"},
                 )
 
         assert resp.status_code == 200
-        body = resp.json()
-        assert body["ok"] is True
-        assert body["integration"] == "datadog"
-        assert body["target_name"] == "tenant-slack-acme-datadog"
-        assert body["gateway_url"] == "https://gateway.example.com/mcp"
+        assert resp.json()["ok"] is False
+        assert "trusted credential-broker" in resp.json()["error"]
+        mock_provision.assert_not_called()
 
-    def test_invalid_api_key_returns_error(self, session_token, _seed_tenant):
-        mock_validate = AsyncMock(return_value=False)
+        from bridge.tenant_write import get_tenant_row
 
-        with patch("bridge.api._validate_datadog_key", mock_validate):
-            with TestClient(app) as client:
-                resp = client.post(
-                    "/api/tenants/slack-acme/integrations/datadog",
-                    json={"api_key": "bad-key", "app_key": "bad-app-key"},
-                    headers={"Authorization": f"Bearer {session_token}"},
-                )
+        row = get_tenant_row("slack-acme", "us-west-2")
+        assert row["byo"]["gateway_auth"] is None
+        assert row["byo"]["connected_integrations"] == []
 
-        assert resp.status_code == 200
-        body = resp.json()
-        assert body["ok"] is False
-        assert "invalid" in body["error"].lower()
-
-    def test_datadog_unreachable_returns_error(self, session_token, _seed_tenant):
-        mock_validate = AsyncMock(side_effect=Exception("network error"))
-
-        with patch("bridge.api._validate_datadog_key", mock_validate):
-            with TestClient(app) as client:
-                resp = client.post(
-                    "/api/tenants/slack-acme/integrations/datadog",
-                    json={"api_key": "dd-key", "app_key": "dd-app-key"},
-                    headers={"Authorization": f"Bearer {session_token}"},
-                )
-
-        assert resp.status_code == 200
-        body = resp.json()
-        assert body["ok"] is False
-        assert "could not reach" in body["error"].lower()
-
-    def test_provisioning_failure_returns_error(self, session_token, _seed_tenant):
-        mock_validate = AsyncMock(return_value=True)
-        mock_provision = MagicMock(side_effect=RuntimeError("SSM missing"))
-
-        with (
-            patch("bridge.api._validate_datadog_key", mock_validate),
-            patch("bridge.gateway_provisioner.provision_integration", mock_provision),
+    @pytest.mark.parametrize(
+        "site",
+        [
+            "localhost",
+            "127.0.0.1",
+            "169.254.169.254",
+            "datadoghq.com.evil.test",
+            "datadoghq.com@127.0.0.1",
+            'datadoghq.com\"}],\"paths\":{\"/pwn\":{}},\"x\":\"',
+        ],
+    )
+    def test_unsafe_site_is_422_before_any_network_or_provisioning_call(
+        self, session_token, site
+    ):
+        mock_provision = MagicMock()
+        with patch(
+            "bridge.gateway_provisioner.provision_integration",
+            mock_provision,
         ):
             with TestClient(app) as client:
                 resp = client.post(
                     "/api/tenants/slack-acme/integrations/datadog",
-                    json={"api_key": "dd-key", "app_key": "dd-app-key"},
+                    json={"site": site},
                     headers={"Authorization": f"Bearer {session_token}"},
                 )
 
-        assert resp.status_code == 200
-        body = resp.json()
-        assert body["ok"] is False
-        assert "provisioning failed" in body["error"].lower()
+        assert resp.status_code == 422
+        mock_provision.assert_not_called()
 
     def test_no_auth_returns_401(self):
         with TestClient(app) as client:
             resp = client.post(
                 "/api/tenants/slack-acme/integrations/datadog",
-                json={"api_key": "dd-key", "app_key": "dd-app-key"},
+                json={},
             )
         assert resp.status_code == 401
 
@@ -145,45 +110,18 @@ class TestConnectDatadog:
         with TestClient(app) as client:
             resp = client.post(
                 "/api/tenants/slack-acme/integrations/datadog",
-                json={"api_key": "dd-key", "app_key": "dd-app-key"},
+                json={},
                 headers={"Authorization": f"Bearer {other_token}"},
             )
         assert resp.status_code == 403
 
-    def test_empty_api_key_returns_422(self, session_token):
+    @pytest.mark.parametrize("secret_field", ["api_key", "app_key"])
+    def test_raw_secret_fields_are_rejected_422(self, session_token, secret_field):
         with TestClient(app) as client:
             resp = client.post(
                 "/api/tenants/slack-acme/integrations/datadog",
-                json={"api_key": ""},
+                json={secret_field: "raw-secret-sentinel"},
                 headers={"Authorization": f"Bearer {session_token}"},
             )
         assert resp.status_code == 422
-
-    def test_happy_path_enables_byo_on_tenant(self, session_token, _seed_tenant):
-        """After connecting, the tenant row should have byo.enabled=True
-        and byo.gateway_endpoint set to the shared Gateway URL."""
-        from bridge.tenant_write import get_tenant_row
-
-        mock_validate = AsyncMock(return_value=True)
-        mock_provision = MagicMock(return_value={
-            "gateway_url": "https://gw.example.com/mcp",
-            "target_id": "tgt-123",
-            "target_name": "tenant-slack-acme-datadog",
-            "credential_arn": "arn:cred",
-            "extra_headers": {"DD-APPLICATION-KEY": "dd-app-key"},
-        })
-
-        with (
-            patch("bridge.api._validate_datadog_key", mock_validate),
-            patch("bridge.gateway_provisioner.provision_integration", mock_provision),
-        ):
-            with TestClient(app) as client:
-                client.post(
-                    "/api/tenants/slack-acme/integrations/datadog",
-                    json={"api_key": "dd-key", "app_key": "dd-app-key"},
-                    headers={"Authorization": f"Bearer {session_token}"},
-                )
-
-        row = get_tenant_row("slack-acme", "us-west-2")
-        assert row["byo"]["enabled"] is True
-        assert row["byo"]["gateway_endpoint"] == "https://gw.example.com/mcp"
+        assert "raw-secret-sentinel" not in resp.text

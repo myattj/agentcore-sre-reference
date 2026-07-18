@@ -39,6 +39,7 @@ export type MemoryConfig = {
   triggers: MemoryTriggers;
   namespace: string;
   extraction: MemoryExtraction;
+  shared_across_channels: boolean;
   isolated_channels: string[];
 };
 
@@ -125,6 +126,7 @@ export type TenantConfig = {
   heartbeat: HeartbeatConfig;
   cost_cap: CostCapConfig;
   channels: Record<string, ChannelPersona>;
+  admin_user_ids: string[];
   bot_policy: BotPolicyConfig;
   context_assembly: ContextAssemblyConfig;
   skills: SkillDef[];
@@ -144,17 +146,19 @@ export type TenantConfigPatch = Partial<{
   model_id: string;
   system_prompt: string;
   catalog: Partial<CatalogConfig>;
-  byo: Partial<ByoConfig>;
-  memory: Partial<MemoryConfig>;
+  // BYO Gateway trust configuration is operator/connector-managed and is
+  // intentionally absent from the tenant-session PATCH surface.
+  // Memory namespace is a platform isolation boundary, not a tenant setting.
+  memory: Partial<Omit<MemoryConfig, "namespace">>;
   heartbeat: Partial<HeartbeatConfig>;
-  cost_cap: Partial<CostCapConfig>;
+  // Cost caps are platform enforcement policy and are operator-managed.
   channels: Record<string, ChannelPersona>;
   bot_policy: Partial<BotPolicyConfig>;
   context_assembly: Partial<ContextAssemblyConfig>;
   skills: SkillDef[];
   escalation: Partial<EscalationConfig>;
-  codebases: Partial<CodebasesConfig>;
-  is_internal_testenv: boolean;
+  codebases: Partial<Omit<CodebasesConfig, "github_installation_id">>;
+  // is_internal_testenv is an operator accounting/visibility marker.
 }>;
 
 export type ChannelInfo = {
@@ -202,6 +206,7 @@ export type GitHubAppInstallResponse = {
   default_repo?: string | null;
   bindings: CodebaseBindingBrief[];
   total_repos_available: number;
+  pending_approval: boolean;
   error?: string | null;
 };
 
@@ -231,12 +236,6 @@ export const KNOWN_CATALOG_TOOLS: { id: string; label: string; description: stri
     id: "read_thread_context",
     label: "Read thread context",
     description: "Fetch the full Slack thread the bot was tagged in.",
-  },
-  {
-    id: "search_docs",
-    label: "Search docs",
-    description:
-      "Fan out a search across all configured doc sources (Confluence, Notion).",
   },
   {
     id: "post_to_channel",
@@ -288,8 +287,14 @@ export const KNOWN_CATALOG_TOOLS: { id: string; label: string; description: stri
   },
   {
     id: "propose_pr",
-    label: "Propose PR",
+    label: "Experimental — Propose PR",
     description:
-      "Open a pull request in a connected repo. Spawns a sandbox container that clones, edits, and pushes a branch, then opens the PR. Requires the GitHub App to be installed with write permissions.",
+      "Unsafe credential boundary; disabled by default. Explicit opt-in runs model-authored code in a sandbox, pushes a branch, and opens a pull request. Review the sandbox and GitHub write permissions before enabling.",
+  },
+  {
+    id: "render_dashboard",
+    label: "Render dashboard",
+    description:
+      "Create a validated, seven-day dashboard link with charts, tables, metrics, text, and lists.",
   },
 ];

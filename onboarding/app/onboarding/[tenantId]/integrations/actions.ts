@@ -5,7 +5,6 @@ import { revalidatePath } from "next/cache";
 import {
   BridgeApiError,
   connectConfluence,
-  connectDatadog,
   connectGitHub,
   connectJira,
   connectLinear,
@@ -17,36 +16,6 @@ import { requireSession } from "@/lib/session";
 export type ConnectResult =
   | { ok: true; target_name: string }
   | { ok: false; error: string };
-
-// ---------------------------------------------------------------------------
-// Datadog
-// ---------------------------------------------------------------------------
-
-export async function connectDatadogAction(
-  tenantId: string,
-  apiKey: string,
-  appKey: string,
-  site: string,
-): Promise<ConnectResult> {
-  const { token } = await requireSession(tenantId);
-  try {
-    const resp = await connectDatadog(tenantId, token, {
-      api_key: apiKey,
-      app_key: appKey,
-      site: site || "datadoghq.com",
-    });
-    if (!resp.ok) {
-      return { ok: false, error: resp.error ?? "unknown error" };
-    }
-    revalidatePath(`/onboarding/${tenantId}/integrations`);
-    return { ok: true, target_name: resp.target_name ?? "" };
-  } catch (e) {
-    if (e instanceof BridgeApiError) {
-      return { ok: false, error: e.detail };
-    }
-    return { ok: false, error: "unexpected error" };
-  }
-}
 
 // ---------------------------------------------------------------------------
 // Confluence

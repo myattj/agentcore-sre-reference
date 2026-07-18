@@ -7,7 +7,7 @@ name = "coreAgent"
 version = "0.1.0"
 description = "AgentCore Runtime Application using Strands SDK"
 readme = "README.md"
-requires-python = ">=3.10,<3.14"
+requires-python = ">=3.13,<3.14"
 dependencies = [
     "aws-opentelemetry-distro",
     "bedrock-agentcore >= 1.0.3",

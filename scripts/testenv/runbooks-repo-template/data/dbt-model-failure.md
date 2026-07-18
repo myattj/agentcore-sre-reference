@@ -46,7 +46,9 @@ If the root cause is upstream data quality, you have two choices:
 
 ## Step 5 — Related incident
 
-The March `fct_orders_daily` regression (see `incidents/2026-04-09-orders-data-regression.md`) was caused by a silent null-drop pattern we've since banned. See that postmortem for why `not_null` tests matter more than you think.
+The March `fct_orders_daily` regression in the seeded `#incidents` history was
+caused by a silent null-drop pattern we've since banned. That timeline shows
+why `not_null` tests matter more than you think.
 
 ## Related
 

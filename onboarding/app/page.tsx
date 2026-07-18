@@ -15,10 +15,9 @@ export default function LandingPage() {
           Automate the toil.
         </h1>
         <p className="mb-12 text-lg text-[color:var(--muted)]">
-          Add agent-core to your Slack workspace and the bot starts pulling
-          context from your tools — Datadog, GitHub, PagerDuty, Confluence,
-          Jira — to triage alerts, answer team questions, and run workflows
-          on demand. Set up takes under five minutes.
+          Connect Agent to Slack, choose the tools each tenant may use, and
+          turn an alert into evidence: metrics, runbooks, recent commits, a
+          proposed fix, or a short-lived dashboard your team can share.
         </p>
 
         <a
@@ -30,18 +29,16 @@ export default function LandingPage() {
         </a>
 
         <p className="mt-8 text-sm text-[color:var(--muted)]">
-          You&apos;ll be redirected to Slack to authorize the install. Bot
-          tokens are stored encrypted at rest. Your Slack data never leaves
-          your AWS region.
+          You&apos;ll be redirected to Slack to authorize the install. This is a
+          self-hosted reference implementation, so review the deployment and
+          security guides before connecting a real workspace.
         </p>
       </div>
 
       <footer className="mt-24 flex gap-6 text-xs text-[color:var(--muted)]">
-        <span>© agent-core</span>
+        <span>Agent</span>
         <span>·</span>
-        <span>Privacy (placeholder)</span>
-        <span>·</span>
-        <span>Terms (placeholder)</span>
+        <span>Open-source reference implementation</span>
       </footer>
     </main>
   );

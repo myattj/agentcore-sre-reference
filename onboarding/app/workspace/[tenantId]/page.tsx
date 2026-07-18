@@ -52,13 +52,12 @@ export default async function WorkspaceOverviewPage({
   if (ca.resolve_permalinks) contextParts.push("permalinks");
   if (ca.inject_thread_history) contextParts.push(`thread history (${ca.thread_history_depth} msgs)`);
 
-  // Memory summary line: shared-by-default with isolation callouts.
-  const memorySummary =
-    isolatedChannels.length === 0
-      ? "Shared memory across all channels"
-      : `Shared memory, except ${isolatedChannels.length} isolated channel${isolatedChannels.length === 1 ? "" : "s"}`;
+  const memorySummary = tenant.memory.shared_across_channels
+    ? isolatedChannels.length === 0
+      ? "Shared memory across channels (explicitly enabled)"
+      : `Shared memory, except ${isolatedChannels.length} isolated channel${isolatedChannels.length === 1 ? "" : "s"}`
+    : "Separate memory for each channel";
 
-  // Bot policy summary line: highlights the "magical default" when on.
   const botPolicySummary = allowAllBots
     ? "All bots allowed (PagerDuty, Datadog, etc. trigger auto-triage)"
     : botCount > 0 || openCount > 0
@@ -72,8 +71,7 @@ export default async function WorkspaceOverviewPage({
           Workspace overview
         </h1>
         <p className="text-sm text-[color:var(--muted)]">
-          Your bot&apos;s current setup. Click any section to change it — or
-          just ask the bot in Slack.
+          Your bot&apos;s current setup. Open any section to review or change it.
         </p>
       </header>
 
@@ -181,7 +179,7 @@ function OverviewSection({
       href={href}
       className="block rounded-lg border border-[color:var(--border)] p-5 transition hover:border-[color:var(--accent)]/40 hover:bg-[color:var(--card)]"
     >
-      <h3 className="mb-2 text-sm font-semibold">{title}</h3>
+      <h2 className="mb-2 text-sm font-semibold">{title}</h2>
       <ul className="space-y-1">
         {items.map((item) => (
           <li key={item.label} className="flex items-start gap-2 text-sm">

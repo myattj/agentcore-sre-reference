@@ -9,7 +9,7 @@
 3. Apply the Terraform change to the control plane (online, ~30 min)
 4. Rolling update the node groups one at a time
 5. Smoke test with `platform-smoke` helm chart
-6. If anything fails: **rollback via control plane downgrade**
+6. If anything fails: stop the rollout and **roll forward**; EKS control planes cannot be downgraded
 
 ## Pre-flight
 

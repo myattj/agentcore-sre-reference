@@ -25,11 +25,16 @@ etc.) ever needs direct access.
 """
 from __future__ import annotations
 
+import asyncio
+import copy
+import hmac
+import json
 import logging
 import os
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Path
+from pydantic import ValidationError
 from slack_sdk.errors import SlackApiError
 
 from .api_models import (
@@ -37,6 +42,8 @@ from .api_models import (
     CodebaseBindingBrief,
     ConfluenceConnectRequest,
     DatadogConnectRequest,
+    GitHubAppApprovalRequest,
+    GitHubAppApprovalResponse,
     GitHubAppInstallRequest,
     GitHubAppInstallResponse,
     GitHubConnectRequest,
@@ -50,15 +57,48 @@ from .api_models import (
 )
 from .slack_channels import list_channels_for_tenant
 from .slack_oauth import verify_session_token
-from .tenant_write import deep_merge, get_tenant_row, update_tenant_row
+from .tenant_write import (
+    TenantConfigConflictError,
+    deep_merge,
+    get_tenant_row,
+    update_tenant_row,
+)
 
 log = logging.getLogger(__name__)
 
 api_router = APIRouter(prefix="/api", tags=["api"])
 
+_PATCH_WRITE_ATTEMPTS = 3
+
 
 def _region() -> str:
     return os.getenv("AWS_REGION", "us-west-2")
+
+
+def _tenant_session_view(config: dict[str, Any]) -> dict[str, Any]:
+    """Return a tenant-session-safe copy of config.
+
+    Operator-managed isolation identifiers and credentials are persisted in
+    the full tenant row but are not needed by the tenant-session UI.
+    """
+
+    view = copy.deepcopy(config)
+    view["admin_user_ids"] = []
+    view["is_internal_testenv"] = False
+
+    byo = view.get("byo")
+    if isinstance(byo, dict):
+        byo["gateway_endpoint"] = None
+        byo["gateway_auth"] = None
+
+    memory = view.get("memory")
+    if isinstance(memory, dict):
+        memory["namespace"] = ""
+
+    codebases = view.get("codebases")
+    if isinstance(codebases, dict):
+        codebases["github_installation_id"] = None
+    return view
 
 
 # ----------------------------------------------------------------------------
@@ -107,7 +147,7 @@ async def get_tenant(
         row = get_tenant_row(tenant_id, _region())
     except KeyError:
         raise HTTPException(status_code=404, detail="tenant not found")
-    return TenantConfigOut.model_validate(row)
+    return TenantConfigOut.model_validate(_tenant_session_view(row))
 
 
 @api_router.patch("/tenants/{tenant_id}", response_model=TenantConfigOut)
@@ -127,24 +167,49 @@ async def patch_tenant(
     Refuses to create a tenant row that doesn't exist (404). Only the
     OAuth callback can bring a tenant into existence.
     """
-    try:
-        current = get_tenant_row(tenant_id, _region())
-    except KeyError:
-        raise HTTPException(status_code=404, detail="tenant not found")
-
     patch_dict = patch.model_dump(exclude_unset=True, exclude_none=False)
-    merged = deep_merge(current, patch_dict)
-    # Re-validate the merged result so any invalid combinations surface
-    # as 422. This also defaults in any fields the old row was missing.
-    validated = TenantConfigOut.model_validate(merged)
-    # The canonical dump goes back to DDB.
-    try:
-        update_tenant_row(tenant_id, _region(), validated.model_dump())
-    except KeyError:
-        # Race condition — tenant disappeared between GET and UPDATE.
-        # Vanishingly unlikely but surface as 404 rather than 500.
-        raise HTTPException(status_code=404, detail="tenant not found")
-    return validated
+    region = _region()
+    for attempt in range(_PATCH_WRITE_ATTEMPTS):
+        try:
+            current = get_tenant_row(tenant_id, region)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="tenant not found")
+
+        merged = deep_merge(current, patch_dict)
+        # Re-validate the merged result so any invalid combinations surface
+        # as 422. This also defaults in any fields the old row was missing.
+        try:
+            validated = TenantConfigOut.model_validate(merged)
+        except ValidationError:
+            # Never reflect Pydantic's ``input`` values: ``merged`` includes the
+            # tenant's stored configuration and may contain credentials.
+            log.info("patch_tenant: rejected invalid merged config tenant=%s", tenant_id)
+            raise HTTPException(
+                status_code=422,
+                detail="invalid tenant configuration",
+            ) from None
+
+        canonical = validated.model_dump()
+        try:
+            update_tenant_row(
+                tenant_id,
+                region,
+                canonical,
+                expected_config=current,
+            )
+        except KeyError:
+            raise HTTPException(status_code=404, detail="tenant not found")
+        except TenantConfigConflictError:
+            if attempt + 1 == _PATCH_WRITE_ATTEMPTS:
+                raise HTTPException(
+                    status_code=409,
+                    detail="tenant configuration changed; retry request",
+                ) from None
+            continue
+
+        return TenantConfigOut.model_validate(_tenant_session_view(canonical))
+
+    raise AssertionError("unreachable")
 
 
 @api_router.get("/tenants/{tenant_id}/channels", response_model=ChannelsResponse)
@@ -183,90 +248,29 @@ async def get_channels(
 
 
 # ----------------------------------------------------------------------------
-# Integrations (week 4 chunk F)
+# Integration provisioning
 # ----------------------------------------------------------------------------
 
-# Minimal Datadog OpenAPI spec covering the three tools from BUILD_PLAN
-# week 4: query_metrics, get_recent_alerts (monitors/search), search_logs.
-# The Gateway translates OpenAPI paths into MCP tools automatically.
-DATADOG_OPENAPI_SPEC = """{
-  "openapi": "3.0.0",
-  "info": {
-    "title": "Datadog API (agent-core subset)",
-    "version": "1.0.0"
-  },
-  "servers": [
-    {"url": "https://api.{site}/api/v1", "variables": {"site": {"default": "datadoghq.com"}}}
-  ],
-  "paths": {
-    "/query": {
-      "get": {
-        "operationId": "query_metrics",
-        "summary": "Query timeseries metric data for a given time window.",
-        "parameters": [
-          {"name": "from", "in": "query", "required": true, "schema": {"type": "integer"}, "description": "Start of the queried time period as a POSIX timestamp (seconds)."},
-          {"name": "to", "in": "query", "required": true, "schema": {"type": "integer"}, "description": "End of the queried time period as a POSIX timestamp (seconds)."},
-          {"name": "query", "in": "query", "required": true, "schema": {"type": "string"}, "description": "Datadog metrics query string (e.g. 'avg:system.cpu.user{host:web-prod-1}')."}
-        ],
-        "responses": {"200": {"description": "Metric timeseries data."}}
-      }
-    },
-    "/monitor/search": {
-      "get": {
-        "operationId": "get_recent_alerts",
-        "summary": "Search monitors (alerts). Use to find recently triggered alerts.",
-        "parameters": [
-          {"name": "query", "in": "query", "schema": {"type": "string"}, "description": "Search query (e.g. 'status:Alert' or 'tag:service:web')."},
-          {"name": "page", "in": "query", "schema": {"type": "integer", "default": 0}},
-          {"name": "per_page", "in": "query", "schema": {"type": "integer", "default": 10}}
-        ],
-        "responses": {"200": {"description": "List of matching monitors."}}
-      }
-    },
-    "/logs-queries/list": {
-      "post": {
-        "operationId": "search_logs",
-        "summary": "Search and filter log events.",
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "properties": {
-                  "query": {"type": "string", "description": "Log search query string."},
-                  "time": {
-                    "type": "object",
-                    "properties": {
-                      "from": {"type": "string", "description": "ISO datetime or relative (e.g. 'now-1h')."},
-                      "to": {"type": "string", "description": "ISO datetime or relative (e.g. 'now')."}
-                    }
-                  },
-                  "limit": {"type": "integer", "default": 10}
-                }
-              }
-            }
-          }
-        },
-        "responses": {"200": {"description": "Matching log events."}}
-      }
-    }
-  }
-}"""
+DATADOG_DISABLED_ERROR = (
+    "Datadog is disabled in this reference deployment: its API requires two "
+    "secrets, while AgentCore Gateway supports one credential provider per "
+    "target. Add a trusted credential-broker target before enabling it."
+)
 
 
-async def _validate_datadog_key(api_key: str, site: str) -> bool:
-    """Hit Datadog's /api/v1/validate to confirm the key works.
+def _openapi_spec_with_server(template: str, server_url: str) -> str:
+    """Return a JSON OpenAPI document with one safely encoded server URL.
 
-    Returns True on success, False on auth failure. Raises on network error.
+    Connector input must never be interpolated into raw JSON text. Parse the
+    trusted template, replace the structured field, then serialize it so even
+    a future validation regression cannot turn a hostname into JSON syntax.
     """
-    import httpx
 
-    url = f"https://api.{site}/api/v1/validate"
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        resp = await client.get(url, headers={"DD-API-KEY": api_key})
-    return resp.status_code == 200
-
+    document = json.loads(template)
+    if not isinstance(document, dict):
+        raise RuntimeError("OpenAPI template must be a JSON object")
+    document["servers"] = [{"url": server_url}]
+    return json.dumps(document, separators=(",", ":"), sort_keys=True)
 
 @api_router.post(
     "/tenants/{tenant_id}/integrations/datadog",
@@ -277,58 +281,19 @@ async def connect_datadog(
     body: DatadogConnectRequest,
     _verified: Annotated[str, Depends(require_session_token)],
 ) -> IntegrationConnectResponse:
-    """Connect a Datadog account to this tenant.
-
-    Flow:
-      1. Validate the API key against Datadog's /api/v1/validate
-      2. Provision a credential provider + Gateway target via gateway_provisioner
-      3. Enable BYO on the tenant row with the shared Gateway URL
-      4. Return the connection status
-    """
-    # 1. Validate
-    try:
-        valid = await _validate_datadog_key(body.api_key, body.site)
-    except Exception as e:
-        log.warning("connect_datadog: validation failed for tenant=%s: %s", tenant_id, e)
-        return IntegrationConnectResponse(
-            ok=False, integration="datadog", error="could not reach Datadog API"
+    """Fail closed until Datadog has a trusted two-secret broker target."""
+    if body.model_extra:
+        raise HTTPException(
+            status_code=422,
+            detail="Datadog secret fields are not accepted by this deployment",
         )
-    if not valid:
-        return IntegrationConnectResponse(
-            ok=False, integration="datadog", error="invalid Datadog API key"
-        )
-
-    # 2. Provision
-    from .gateway_provisioner import provision_integration
-
-    region = _region()
-    # Inject the tenant's Datadog site into the OpenAPI spec's server URL.
-    spec = DATADOG_OPENAPI_SPEC.replace("datadoghq.com", body.site)
-    try:
-        result = provision_integration(
-            tenant_id,
-            "datadog",
-            api_key=body.api_key,
-            app_key=body.app_key,
-            openapi_spec=spec,
-            credential_header_name="DD-API-KEY",
-            app_key_header_name="DD-APPLICATION-KEY",
-            region=region,
-        )
-    except Exception as e:
-        log.exception("connect_datadog: provisioning failed for tenant=%s", tenant_id)
-        return IntegrationConnectResponse(
-            ok=False, integration="datadog", error=f"provisioning failed: {e}"
-        )
-
-    # 3. Enable BYO on the tenant row + track connection
-    _enable_byo_for_integration(tenant_id, "datadog", result, region)
-
+    # Pydantic has already enforced the finite site allowlist before this
+    # handler runs. Do not validate or provision with the submitted secrets:
+    # there is no safe direct-target representation for both required keys.
     return IntegrationConnectResponse(
-        ok=True,
+        ok=False,
         integration="datadog",
-        target_name=result["target_name"],
-        gateway_url=result["gateway_url"],
+        error=DATADOG_DISABLED_ERROR,
     )
 
 
@@ -347,17 +312,11 @@ def _enable_byo_for_integration(
     byo_patch: dict[str, Any] = {
         "enabled": True,
         "gateway_endpoint": result["gateway_url"],
+        # Managed connectors keep credentials in AgentCore credential
+        # providers. Clear any legacy tenant-stored header secrets instead of
+        # returning or forwarding them on later tool calls.
+        "gateway_auth": None,
     }
-    extra = result.get("extra_headers")
-    if extra:
-        existing_headers: dict[str, str] = {}
-        existing_auth = current.get("byo", {}).get("gateway_auth")
-        if isinstance(existing_auth, dict):
-            h = existing_auth.get("headers")
-            if isinstance(h, dict):
-                existing_headers.update(h)
-        existing_headers.update(extra)
-        byo_patch["gateway_auth"] = {"headers": existing_headers}
 
     # Track which integrations are connected
     connected = list(current.get("byo", {}).get("connected_integrations", []))
@@ -369,13 +328,37 @@ def _enable_byo_for_integration(
     update_tenant_row(tenant_id, region, merged)
 
 
+def _provision_and_enable_integration(
+    tenant_id: str,
+    integration: str,
+    *,
+    api_key: str,
+    openapi_spec: str,
+    credential_header_name: str,
+    region: str,
+) -> dict[str, str]:
+    """Run all synchronous AWS and tenant-store work in one worker call."""
+    from .gateway_provisioner import provision_integration
+
+    result = provision_integration(
+        tenant_id,
+        integration,
+        api_key=api_key,
+        openapi_spec=openapi_spec,
+        credential_header_name=credential_header_name,
+        region=region,
+    )
+    _enable_byo_for_integration(tenant_id, integration, result, region)
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Confluence
 # ---------------------------------------------------------------------------
 
 CONFLUENCE_OPENAPI_SPEC = """{
   "openapi": "3.0.0",
-  "info": {"title": "Confluence Cloud API (agent-core subset)", "version": "1.0.0"},
+  "info": {"title": "Confluence Cloud API (Agent subset)", "version": "1.0.0"},
   "servers": [{"url": "https://DOMAIN.atlassian.net/wiki/rest/api"}],
   "paths": {
     "/content/search": {
@@ -434,24 +417,26 @@ async def connect_confluence(
     if not valid:
         return IntegrationConnectResponse(ok=False, integration="confluence", error="invalid Confluence credentials")
 
-    from .gateway_provisioner import provision_integration
-
     region = _region()
     creds = base64.b64encode(f"{body.email}:{body.api_token}".encode()).decode()
-    spec = CONFLUENCE_OPENAPI_SPEC.replace("DOMAIN", body.domain)
+    spec = _openapi_spec_with_server(
+        CONFLUENCE_OPENAPI_SPEC,
+        f"https://{body.domain}.atlassian.net/wiki/rest/api",
+    )
     try:
-        result = provision_integration(
-            tenant_id, "confluence",
+        result = await asyncio.to_thread(
+            _provision_and_enable_integration,
+            tenant_id,
+            "confluence",
             api_key=f"Basic {creds}",
             openapi_spec=spec,
             credential_header_name="Authorization",
             region=region,
         )
-    except Exception as e:
+    except Exception:
         log.exception("connect_confluence: provisioning failed for tenant=%s", tenant_id)
-        return IntegrationConnectResponse(ok=False, integration="confluence", error=f"provisioning failed: {e}")
+        return IntegrationConnectResponse(ok=False, integration="confluence", error="provisioning failed")
 
-    _enable_byo_for_integration(tenant_id, "confluence", result, region)
     return IntegrationConnectResponse(ok=True, integration="confluence", target_name=result["target_name"], gateway_url=result["gateway_url"])
 
 
@@ -461,13 +446,16 @@ async def connect_confluence(
 
 NOTION_OPENAPI_SPEC = """{
   "openapi": "3.0.0",
-  "info": {"title": "Notion API (agent-core subset)", "version": "1.0.0"},
+  "info": {"title": "Notion API (Agent subset)", "version": "1.0.0"},
   "servers": [{"url": "https://api.notion.com/v1"}],
   "paths": {
     "/search": {
       "post": {
         "operationId": "search",
         "summary": "Search across all Notion pages and databases.",
+        "parameters": [
+          {"name": "Notion-Version", "in": "header", "required": true, "schema": {"type": "string", "enum": ["2022-06-28"], "default": "2022-06-28"}}
+        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -490,6 +478,7 @@ NOTION_OPENAPI_SPEC = """{
         "operationId": "get_page",
         "summary": "Get a Notion page by ID.",
         "parameters": [
+          {"name": "Notion-Version", "in": "header", "required": true, "schema": {"type": "string", "enum": ["2022-06-28"], "default": "2022-06-28"}},
           {"name": "page_id", "in": "path", "required": true, "schema": {"type": "string"}}
         ],
         "responses": {"200": {"description": "Page properties."}}
@@ -528,27 +517,21 @@ async def connect_notion(
     if not valid:
         return IntegrationConnectResponse(ok=False, integration="notion", error="invalid Notion integration token")
 
-    from .gateway_provisioner import provision_integration
-
     region = _region()
     try:
-        # Notion-Version is required on every request. We use app_key +
-        # app_key_header_name so provision_integration forwards it as a
-        # secondary header (same pattern as Datadog's DD-APPLICATION-KEY).
-        result = provision_integration(
-            tenant_id, "notion",
+        result = await asyncio.to_thread(
+            _provision_and_enable_integration,
+            tenant_id,
+            "notion",
             api_key=f"Bearer {body.integration_token}",
-            app_key="2022-06-28",
             openapi_spec=NOTION_OPENAPI_SPEC,
             credential_header_name="Authorization",
-            app_key_header_name="Notion-Version",
             region=region,
         )
-    except Exception as e:
+    except Exception:
         log.exception("connect_notion: provisioning failed for tenant=%s", tenant_id)
-        return IntegrationConnectResponse(ok=False, integration="notion", error=f"provisioning failed: {e}")
+        return IntegrationConnectResponse(ok=False, integration="notion", error="provisioning failed")
 
-    _enable_byo_for_integration(tenant_id, "notion", result, region)
     return IntegrationConnectResponse(ok=True, integration="notion", target_name=result["target_name"], gateway_url=result["gateway_url"])
 
 
@@ -558,7 +541,7 @@ async def connect_notion(
 
 JIRA_OPENAPI_SPEC = """{
   "openapi": "3.0.0",
-  "info": {"title": "Jira Cloud API (agent-core subset)", "version": "1.0.0"},
+  "info": {"title": "Jira Cloud API (Agent subset)", "version": "1.0.0"},
   "servers": [{"url": "https://DOMAIN.atlassian.net/rest/api/3"}],
   "paths": {
     "/search": {
@@ -646,24 +629,26 @@ async def connect_jira(
     if not valid:
         return IntegrationConnectResponse(ok=False, integration="jira", error="invalid Jira credentials")
 
-    from .gateway_provisioner import provision_integration
-
     region = _region()
     creds = base64.b64encode(f"{body.email}:{body.api_token}".encode()).decode()
-    spec = JIRA_OPENAPI_SPEC.replace("DOMAIN", body.domain)
+    spec = _openapi_spec_with_server(
+        JIRA_OPENAPI_SPEC,
+        f"https://{body.domain}.atlassian.net/rest/api/3",
+    )
     try:
-        result = provision_integration(
-            tenant_id, "jira",
+        result = await asyncio.to_thread(
+            _provision_and_enable_integration,
+            tenant_id,
+            "jira",
             api_key=f"Basic {creds}",
             openapi_spec=spec,
             credential_header_name="Authorization",
             region=region,
         )
-    except Exception as e:
+    except Exception:
         log.exception("connect_jira: provisioning failed for tenant=%s", tenant_id)
-        return IntegrationConnectResponse(ok=False, integration="jira", error=f"provisioning failed: {e}")
+        return IntegrationConnectResponse(ok=False, integration="jira", error="provisioning failed")
 
-    _enable_byo_for_integration(tenant_id, "jira", result, region)
     return IntegrationConnectResponse(ok=True, integration="jira", target_name=result["target_name"], gateway_url=result["gateway_url"])
 
 
@@ -673,7 +658,7 @@ async def connect_jira(
 
 LINEAR_OPENAPI_SPEC = """{
   "openapi": "3.0.0",
-  "info": {"title": "Linear GraphQL API (agent-core subset)", "version": "1.0.0"},
+  "info": {"title": "Linear GraphQL API (Agent subset)", "version": "1.0.0"},
   "servers": [{"url": "https://api.linear.app"}],
   "paths": {
     "/graphql": {
@@ -732,22 +717,21 @@ async def connect_linear(
     if not valid:
         return IntegrationConnectResponse(ok=False, integration="linear", error="invalid Linear API key")
 
-    from .gateway_provisioner import provision_integration
-
     region = _region()
     try:
-        result = provision_integration(
-            tenant_id, "linear",
+        result = await asyncio.to_thread(
+            _provision_and_enable_integration,
+            tenant_id,
+            "linear",
             api_key=body.api_key,
             openapi_spec=LINEAR_OPENAPI_SPEC,
             credential_header_name="Authorization",
             region=region,
         )
-    except Exception as e:
+    except Exception:
         log.exception("connect_linear: provisioning failed for tenant=%s", tenant_id)
-        return IntegrationConnectResponse(ok=False, integration="linear", error=f"provisioning failed: {e}")
+        return IntegrationConnectResponse(ok=False, integration="linear", error="provisioning failed")
 
-    _enable_byo_for_integration(tenant_id, "linear", result, region)
     return IntegrationConnectResponse(ok=True, integration="linear", target_name=result["target_name"], gateway_url=result["gateway_url"])
 
 
@@ -757,7 +741,7 @@ async def connect_linear(
 
 PAGERDUTY_OPENAPI_SPEC = """{
   "openapi": "3.0.0",
-  "info": {"title": "PagerDuty API (agent-core subset)", "version": "1.0.0"},
+  "info": {"title": "PagerDuty API (Agent subset)", "version": "1.0.0"},
   "servers": [{"url": "https://api.pagerduty.com"}],
   "paths": {
     "/incidents/{id}": {
@@ -826,22 +810,21 @@ async def connect_pagerduty(
     if not valid:
         return IntegrationConnectResponse(ok=False, integration="pagerduty", error="invalid PagerDuty API key")
 
-    from .gateway_provisioner import provision_integration
-
     region = _region()
     try:
-        result = provision_integration(
-            tenant_id, "pagerduty",
+        result = await asyncio.to_thread(
+            _provision_and_enable_integration,
+            tenant_id,
+            "pagerduty",
             api_key=f"Token token={body.api_key}",
             openapi_spec=PAGERDUTY_OPENAPI_SPEC,
             credential_header_name="Authorization",
             region=region,
         )
-    except Exception as e:
+    except Exception:
         log.exception("connect_pagerduty: provisioning failed for tenant=%s", tenant_id)
-        return IntegrationConnectResponse(ok=False, integration="pagerduty", error=f"provisioning failed: {e}")
+        return IntegrationConnectResponse(ok=False, integration="pagerduty", error="provisioning failed")
 
-    _enable_byo_for_integration(tenant_id, "pagerduty", result, region)
     return IntegrationConnectResponse(ok=True, integration="pagerduty", target_name=result["target_name"], gateway_url=result["gateway_url"])
 
 
@@ -851,7 +834,7 @@ async def connect_pagerduty(
 
 GITHUB_OPENAPI_SPEC = """{
   "openapi": "3.0.0",
-  "info": {"title": "GitHub API (agent-core subset)", "version": "1.0.0"},
+  "info": {"title": "GitHub API (Agent subset)", "version": "1.0.0"},
   "servers": [{"url": "https://api.github.com"}],
   "paths": {
     "/repos/{owner}/{repo}/deployments": {
@@ -937,22 +920,21 @@ async def connect_github(
     if not valid:
         return IntegrationConnectResponse(ok=False, integration="github", error="invalid GitHub personal access token")
 
-    from .gateway_provisioner import provision_integration
-
     region = _region()
     try:
-        result = provision_integration(
-            tenant_id, "github",
+        result = await asyncio.to_thread(
+            _provision_and_enable_integration,
+            tenant_id,
+            "github",
             api_key=f"Bearer {body.personal_access_token}",
             openapi_spec=GITHUB_OPENAPI_SPEC,
             credential_header_name="Authorization",
             region=region,
         )
-    except Exception as e:
+    except Exception:
         log.exception("connect_github: provisioning failed for tenant=%s", tenant_id)
-        return IntegrationConnectResponse(ok=False, integration="github", error=f"provisioning failed: {e}")
+        return IntegrationConnectResponse(ok=False, integration="github", error="provisioning failed")
 
-    _enable_byo_for_integration(tenant_id, "github", result, region)
     return IntegrationConnectResponse(ok=True, integration="github", target_name=result["target_name"], gateway_url=result["gateway_url"])
 
 
@@ -963,7 +945,7 @@ async def connect_github(
 # The /integrations/github endpoint above is the BYO PAT flow — it
 # provisions a Gateway target so the agent can call the GitHub API as a
 # BYO tool. The /codebases/github/install endpoint below is a completely
-# different flow: the tenant installs the AgentCore Reference GitHub App on their org
+# different flow: the tenant installs the Agent GitHub App on their org
 # (OAuth redirect on the onboarding page), and we seed the ``codebases``
 # config block so the first Slack message already has a ranked shortlist.
 #
@@ -982,14 +964,16 @@ async def install_github_app(
 ) -> GitHubAppInstallResponse:
     """Run the install-time warm-start for a GitHub App installation.
 
-    The onboarding UI calls this after the user completes the GitHub
-    App install flow and is redirected back with ``installation_id`` in
-    the URL. We:
+    The onboarding UI calls this after the user completes the GitHub App
+    install flow. The tenant row must already contain the same installation
+    ID as an operator-approved trust binding; a tenant session cannot create
+    or change that binding. We:
 
-      1. Mint an installation token
-      2. List the installation's repos
-      3. Rank by ``pushed_at`` / stars
-      4. Write a ``codebases`` block to the tenant row with
+      1. Verify the requested ID equals the operator-approved tenant binding
+      2. Mint an installation token
+      3. List the installation's repos
+      4. Rank by ``pushed_at`` / stars
+      5. Write a ``codebases`` block to the tenant row with
          ``enabled=True``, the ranked bindings, and the top repo as
          ``default_repo``
 
@@ -998,14 +982,18 @@ async def install_github_app(
     pass through as ``ok=False`` in the response body. The UI decides
     whether to surface that as an error toast or a retry prompt.
 
-    Re-running this endpoint with the same ``installation_id`` is safe
+    Re-running this endpoint with the same approved ``installation_id`` is safe
     and idempotent — it re-fetches the repo list, re-ranks, and
     re-writes. Useful if the tenant adds repos to the installation
     after onboarding and wants to refresh their shortlist.
     """
     from .github_install import run_install_warm_start
 
-    result = run_install_warm_start(tenant_id, body.installation_id, _region())
+    result = run_install_warm_start(
+        tenant_id,
+        str(body.installation_id),
+        _region(),
+    )
 
     return GitHubAppInstallResponse(
         ok=result.ok,
@@ -1019,6 +1007,7 @@ async def install_github_app(
             for b in result.bindings
         ],
         total_repos_available=result.total_repos_available,
+        pending_approval=result.pending_approval,
         error=result.error,
     )
 
@@ -1051,8 +1040,59 @@ def _ops_guard(x_admin_token: Annotated[str, Header()] = "") -> None:
     if not expected:
         log.warning("_ops_guard: ADMIN_SECRET unset — rejecting all ops traffic")
         raise HTTPException(status_code=503, detail="ops dashboard disabled")
-    if not x_admin_token or x_admin_token != expected:
+    if not x_admin_token or not hmac.compare_digest(x_admin_token, expected):
         raise HTTPException(status_code=401, detail="invalid admin token")
+
+
+@api_router.post(
+    "/ops/tenants/{tenant_id}/codebases/github/approve",
+    response_model=GitHubAppApprovalResponse,
+)
+def approve_github_app_installation_route(
+    tenant_id: str,
+    body: GitHubAppApprovalRequest,
+    _: Annotated[None, Depends(_ops_guard)],
+) -> GitHubAppApprovalResponse:
+    """Verify and exclusively bind a GitHub installation as an operator."""
+
+    from .github_approval import GitHubAccountMismatch, approve_github_installation
+    from .tenant_write import GitHubInstallationBindingConflict
+
+    try:
+        result = approve_github_installation(
+            tenant_id=tenant_id,
+            installation_id=body.installation_id,
+            expected_account_login=body.expected_account_login,
+            region=_region(),
+        )
+    except KeyError:
+        raise HTTPException(status_code=404, detail="tenant not found")
+    except (GitHubAccountMismatch, GitHubInstallationBindingConflict):
+        raise HTTPException(
+            status_code=409,
+            detail="GitHub installation approval conflict",
+        )
+    except RuntimeError:
+        log.exception(
+            "GitHub installation verification failed for tenant=%s",
+            tenant_id,
+        )
+        raise HTTPException(
+            status_code=502,
+            detail="could not verify GitHub installation",
+        )
+
+    log.info(
+        "GitHub installation approved for tenant=%s account=%s installation=%s",
+        tenant_id,
+        result.account_login,
+        result.installation_id,
+    )
+    return GitHubAppApprovalResponse(
+        tenant_id=result.tenant_id,
+        installation_id=result.installation_id,
+        account_login=result.account_login,
+    )
 
 
 @api_router.get("/tenants/{tenant_id}/metrics")

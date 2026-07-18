@@ -15,7 +15,7 @@ What it creates:
      needs the Authorization header to verify the JWT).
   3. The resulting Gateway ID + URL + ARN are written to SSM Parameter
      Store under /agentcore/gateway/{id,url,arn} so the bridge's
-     per-tenant target provisioner (chunk D) can find them.
+     per-tenant target provisioner can find them.
 
 Idempotent: re-running the script when a Gateway already exists at the
 same name updates the SSM params and re-reads the existing Gateway
@@ -169,7 +169,7 @@ def create_gateway(
             {
                 # Field name is `arn` (not `lambdaArn`) per the
                 # bedrock-agentcore-control service model — verified via
-                # the boto3 input shape introspection during chunk C dev.
+                # boto3's input shape introspection.
                 "interceptor": {"lambda": {"arn": interceptor_lambda_arn}},
                 # Enum is REQUEST | RESPONSE (not BEFORE_TARGET / AFTER_TARGET).
                 # REQUEST runs before the target invocation; that's where
@@ -182,7 +182,7 @@ def create_gateway(
                 },
             },
         ],
-        "exceptionLevel": "DEBUG",  # verbose error reporting until chunk G smoke test passes
+        "exceptionLevel": "DEBUG",  # verbose control-plane error reporting
     }
     return client.create_gateway(**request)
 
@@ -347,7 +347,7 @@ def main(argv: list[str] | None = None) -> int:
     print(
         f"  Verify the JWKS URL is reachable from AWS:\n"
         f"    curl {outputs['BridgeJwksUrl']}\n"
-        f"  Then chunk D can provision per-tenant targets against:\n"
+        f"  Per-tenant targets can now be provisioned against:\n"
         f"    {final.get('gatewayUrl')}"
     )
     return 0

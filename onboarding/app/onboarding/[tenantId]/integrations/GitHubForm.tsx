@@ -43,7 +43,7 @@ export function GitHubForm({ tenantId, initialConnected }: { tenantId: string; i
         <label className="block text-xs font-medium">Personal Access Token<input name="pat" type="password" autoComplete="off" placeholder="ghp_..." className="mt-1 block w-full rounded border border-[color:var(--border)] px-2.5 py-1.5 text-sm" required /></label>
         <label className="block text-xs font-medium">Organization (optional)<input name="org" type="text" autoComplete="off" placeholder="my-org" className="mt-1 block w-full rounded border border-[color:var(--border)] px-2.5 py-1.5 text-sm" /></label>
       </div>
-      {result && !result.ok && <p className="mt-2 text-xs text-red-600">{result.error}</p>}
+      {result && !result.ok && <p className="mt-2 text-xs text-red-600" role="alert">{result.error}</p>}
       <button type="submit" disabled={isPending} className="mt-3 rounded-full bg-[color:var(--accent)] px-4 py-1.5 text-xs font-medium text-white hover:bg-[color:var(--accent-hover)] disabled:opacity-50">{isPending ? "Connecting..." : "Connect"}</button>
     </form>
   );

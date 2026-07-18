@@ -1,17 +1,20 @@
 """Tests for `handle_oauth_callback` redirect behavior.
 
-Week 3 changed the callback from returning placeholder HTML to a 302
-redirect into the onboarding UI. These tests lock in the redirect shape
+The callback returns a 302 redirect into the onboarding UI. These tests
+lock in the redirect shape
 and the error-path slugs so the Next.js side can rely on them.
 """
 from __future__ import annotations
 
+from http.cookies import SimpleCookie
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 import pytest
+from fastapi.testclient import TestClient
 
 from bridge import slack_oauth
+from bridge.main import app
 from bridge.slack_oauth import (
     handle_oauth_callback,
     make_state_token,
@@ -39,7 +42,8 @@ def _set_slack_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SLACK_CLIENT_ID", "id-x")
     monkeypatch.setenv("SLACK_CLIENT_SECRET", "secret-x")
     monkeypatch.setenv("SLACK_REDIRECT_URI", "https://example.test/slack/oauth/callback")
-    monkeypatch.setenv("ONBOARDING_BASE_URL", "http://localhost:3000")
+    monkeypatch.setenv("ONBOARDING_BASE_URL", "https://example.test")
+    monkeypatch.setenv("BRIDGE_PUBLIC_URL", "https://example.test")
 
 
 def _stub_provisioning(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[Any]]:
@@ -84,7 +88,11 @@ def _patch_slack_sdk(
     monkeypatch.setattr(async_client_mod, "AsyncWebClient", _fake_ctor)
 
 
-async def test_callback_success_redirects_with_verifiable_token(
+def _state_nonce(state: str) -> str:
+    return state.split(".", 1)[0]
+
+
+async def test_callback_success_sets_cookie_and_redirects_without_bearer_url(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _set_slack_env(monkeypatch)
@@ -99,18 +107,31 @@ async def test_callback_success_redirects_with_verifiable_token(
     )
 
     state = make_state_token()
-    response = await handle_oauth_callback(code="code-x", state=state)
+    response = await handle_oauth_callback(
+        code="code-x",
+        state=state,
+        browser_nonce=_state_nonce(state),
+    )
 
     assert response.status_code == 302
     location = response.headers["location"]
     parsed = urlparse(location)
-    assert parsed.scheme == "http"
-    assert parsed.netloc == "localhost:3000"
-    assert parsed.path == "/onboarding/slack-t12345/welcome"
+    assert parsed.scheme == "https"
+    assert parsed.netloc == "example.test"
+    assert parsed.path == "/onboarding/slack-t12345/integrations"
+    assert parsed.query == ""
 
-    qs = parse_qs(parsed.query)
-    token = qs["t"][0]
+    cookies = SimpleCookie()
+    for header in response.headers.getlist("set-cookie"):
+        cookies.load(header)
+    session_cookie = cookies["tenant_session"]
+    token = session_cookie.value
     assert verify_session_token(token) == "slack-t12345"
+    assert session_cookie["httponly"] is True
+    assert session_cookie["secure"] is True
+    assert session_cookie["samesite"] == "lax"
+    assert session_cookie["max-age"] == "3600"
+    assert response.headers["cache-control"] == "no-store"
 
     # Provisioning was called with the right args
     assert calls["upsert_default"] == [("slack-t12345", "us-west-2")]
@@ -126,7 +147,11 @@ async def test_callback_invalid_state_redirects_to_error(
     _stub_provisioning(monkeypatch)
     # No need to patch slack_sdk — we should fail before the exchange.
 
-    response = await handle_oauth_callback(code="code-x", state="not-a-valid-state")
+    response = await handle_oauth_callback(
+        code="code-x",
+        state="not-a-valid-state",
+        browser_nonce="wrong-browser",
+    )
 
     assert response.status_code == 302
     parsed = urlparse(response.headers["location"])
@@ -136,21 +161,32 @@ async def test_callback_invalid_state_redirects_to_error(
 
 async def test_callback_exchange_failure_redirects_to_error(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     _set_slack_env(monkeypatch)
     _stub_provisioning(monkeypatch)
     _patch_slack_sdk(
         monkeypatch,
-        {"ok": False, "error": "invalid_code"},
+        {
+            "ok": False,
+            "error": "invalid_code",
+            "access_token": "slack-token-must-never-reach-logs",
+        },
     )
 
     state = make_state_token()
-    response = await handle_oauth_callback(code="code-x", state=state)
+    response = await handle_oauth_callback(
+        code="code-x",
+        state=state,
+        browser_nonce=_state_nonce(state),
+    )
 
     assert response.status_code == 302
     parsed = urlparse(response.headers["location"])
     assert parsed.path == "/onboarding/error"
     assert parse_qs(parsed.query)["reason"] == ["exchange_failed"]
+    assert "invalid_code" in caplog.text
+    assert "slack-token-must-never-reach-logs" not in caplog.text
 
 
 async def test_callback_missing_config_redirects_to_error(
@@ -158,15 +194,69 @@ async def test_callback_missing_config_redirects_to_error(
 ) -> None:
     """If Slack env vars are missing, the callback cannot proceed even
     with a valid state."""
-    monkeypatch.setenv("ONBOARDING_BASE_URL", "http://localhost:3000")
+    monkeypatch.setenv("ONBOARDING_BASE_URL", "http://localhost:8000")
+    monkeypatch.setenv("BRIDGE_PUBLIC_URL", "http://localhost:8000")
+    monkeypatch.setenv(
+        "SLACK_REDIRECT_URI", "http://localhost:8000/slack/oauth/callback"
+    )
     monkeypatch.delenv("SLACK_CLIENT_ID", raising=False)
     monkeypatch.delenv("SLACK_CLIENT_SECRET", raising=False)
-    monkeypatch.delenv("SLACK_REDIRECT_URI", raising=False)
 
     state = make_state_token()
-    response = await handle_oauth_callback(code="code-x", state=state)
+    response = await handle_oauth_callback(
+        code="code-x",
+        state=state,
+        browser_nonce=_state_nonce(state),
+    )
 
     assert response.status_code == 302
     parsed = urlparse(response.headers["location"])
     assert parsed.path == "/onboarding/error"
     assert parse_qs(parsed.query)["reason"] == ["not_configured"]
+
+
+def test_oauth_state_is_bound_to_the_browser_that_started_install(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_slack_env(monkeypatch)
+    _stub_provisioning(monkeypatch)
+    _patch_slack_sdk(
+        monkeypatch,
+        {
+            "ok": True,
+            "team": {"id": "T12345", "name": "Acme"},
+            "access_token": "xoxb-fake",
+        },
+    )
+
+    browser_a = TestClient(app, base_url="https://example.test")
+    browser_b = TestClient(app, base_url="https://example.test")
+    install = browser_a.get("/slack/install", follow_redirects=False)
+    state = parse_qs(urlparse(install.headers["location"]).query)["state"][0]
+    state_cookie = SimpleCookie()
+    state_cookie.load(install.headers["set-cookie"])
+    assert state_cookie["slack_oauth_state"]["httponly"] is True
+    assert state_cookie["slack_oauth_state"]["secure"] is True
+    assert state_cookie["slack_oauth_state"]["samesite"] == "lax"
+    assert state_cookie["slack_oauth_state"]["path"] == "/slack/oauth/callback"
+
+    swapped = browser_b.get(
+        "/slack/oauth/callback",
+        params={"code": "code-x", "state": state},
+        follow_redirects=False,
+    )
+    assert parse_qs(urlparse(swapped.headers["location"]).query)["reason"] == [
+        "invalid_state"
+    ]
+    assert "tenant_session" not in browser_b.cookies
+
+    legitimate = browser_a.get(
+        "/slack/oauth/callback",
+        params={"code": "code-x", "state": state},
+        follow_redirects=False,
+    )
+    assert urlparse(legitimate.headers["location"]).path == (
+        "/onboarding/slack-t12345/integrations"
+    )
+    assert "tenant_session" in browser_a.cookies
+    assert "slack_oauth_state" not in browser_a.cookies

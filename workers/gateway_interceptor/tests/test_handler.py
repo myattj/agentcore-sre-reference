@@ -20,6 +20,7 @@ Covers:
   - Pass-through response shape (interceptorOutputVersion, transformedGatewayRequest)
   - Deny response shape (transformedGatewayResponse with JSON-RPC error)
 """
+
 from __future__ import annotations
 
 import jwt
@@ -33,6 +34,7 @@ from .conftest import TEST_AUDIENCE, TEST_ISSUER, SigningKey, make_request_event
 # Happy paths
 # ----------------------------------------------------------------------------
 
+
 def test_tools_list_with_valid_token_passes_through(stub_jwks, test_key: SigningKey):
     token = test_key.mint(tenant_id="slack-acme")
     event = make_request_event(method="tools/list", auth_header=f"Bearer {token}")
@@ -44,13 +46,13 @@ def test_tools_list_with_valid_token_passes_through(stub_jwks, test_key: Signing
     assert "transformedGatewayResponse" not in response["mcp"]
 
 
-def test_tools_call_with_matching_target_prefix_passes_through(
+def test_tools_call_with_exact_target_owner_passes_through(
     stub_jwks, test_key: SigningKey
 ):
     token = test_key.mint(tenant_id="slack-acme")
     event = make_request_event(
         method="tools/call",
-        tool_name="tenant-slack-acme-datadog___query_metrics",
+        tool_name="tenant-v1-onwgcy3lfvqwg3lf-datadog___query_metrics",
         auth_header=f"Bearer {token}",
     )
 
@@ -75,6 +77,7 @@ def test_other_methods_pass_through(stub_jwks, test_key: SigningKey):
 # Auth failures (401)
 # ----------------------------------------------------------------------------
 
+
 def _assert_denied(response: dict, status: int):
     assert "transformedGatewayResponse" in response["mcp"]
     body = response["mcp"]["transformedGatewayResponse"]
@@ -88,7 +91,12 @@ def test_missing_authorization_header_denies(stub_jwks, test_key: SigningKey):
     event = make_request_event(method="tools/list", auth_header=None)
     response = handler.lambda_handler(event, None)
     _assert_denied(response, 401)
-    assert "Authorization" in response["mcp"]["transformedGatewayResponse"]["body"]["error"]["data"]["reason"]
+    assert (
+        "Authorization"
+        in response["mcp"]["transformedGatewayResponse"]["body"]["error"]["data"][
+            "reason"
+        ]
+    )
 
 
 def test_malformed_authorization_not_bearer_denies(stub_jwks, test_key: SigningKey):
@@ -103,7 +111,12 @@ def test_headers_field_missing_entirely_denies(stub_jwks, test_key: SigningKey):
     event = make_request_event(method="tools/list", include_headers=False)
     response = handler.lambda_handler(event, None)
     _assert_denied(response, 401)
-    assert "passRequestHeaders" in response["mcp"]["transformedGatewayResponse"]["body"]["error"]["data"]["reason"]
+    assert (
+        "passRequestHeaders"
+        in response["mcp"]["transformedGatewayResponse"]["body"]["error"]["data"][
+            "reason"
+        ]
+    )
 
 
 def test_expired_token_denies(stub_jwks, test_key: SigningKey):
@@ -174,28 +187,32 @@ def test_token_missing_tenant_id_claim_denies(
     event = make_request_event(method="tools/list", auth_header=f"Bearer {token}")
     response = handler.lambda_handler(event, None)
     _assert_denied(response, 401)
-    assert "tenant_id" in response["mcp"]["transformedGatewayResponse"]["body"]["error"]["data"]["reason"]
+    assert (
+        "tenant_id"
+        in response["mcp"]["transformedGatewayResponse"]["body"]["error"]["data"][
+            "reason"
+        ]
+    )
 
 
 # ----------------------------------------------------------------------------
 # Tenant routing failures (403)
 # ----------------------------------------------------------------------------
 
+
 def test_tools_call_cross_tenant_denies(stub_jwks, test_key: SigningKey):
     """Acme's token tries to call Globex's Datadog target."""
     token = test_key.mint(tenant_id="slack-acme")
     event = make_request_event(
         method="tools/call",
-        tool_name="tenant-slack-globex-datadog___query_metrics",
+        tool_name="tenant-v1-onwgcy3lfvtwy33cmv4a-datadog___query_metrics",
         auth_header=f"Bearer {token}",
     )
     response = handler.lambda_handler(event, None)
     _assert_denied(response, 403)
 
 
-def test_tools_call_no_delimiter_in_tool_name_denies(
-    stub_jwks, test_key: SigningKey
-):
+def test_tools_call_no_delimiter_in_tool_name_denies(stub_jwks, test_key: SigningKey):
     token = test_key.mint(tenant_id="slack-acme")
     event = make_request_event(
         method="tools/call",
@@ -204,7 +221,12 @@ def test_tools_call_no_delimiter_in_tool_name_denies(
     )
     response = handler.lambda_handler(event, None)
     _assert_denied(response, 403)
-    assert "delimiter" in response["mcp"]["transformedGatewayResponse"]["body"]["error"]["data"]["reason"]
+    assert (
+        "delimiter"
+        in response["mcp"]["transformedGatewayResponse"]["body"]["error"]["data"][
+            "reason"
+        ]
+    )
 
 
 def test_tools_call_empty_tool_name_denies(stub_jwks, test_key: SigningKey):
@@ -218,16 +240,63 @@ def test_tools_call_empty_tool_name_denies(stub_jwks, test_key: SigningKey):
     _assert_denied(response, 403)
 
 
-def test_tools_call_target_for_different_tenant_with_same_prefix_denies(
-    stub_jwks, test_key: SigningKey
-):
-    """Edge case: 'slack-acme' must not match 'slack-acmecorp' — the
-    prefix check needs to include the trailing dash, otherwise a tenant
-    named with another tenant's name as a prefix could escalate."""
-    token = test_key.mint(tenant_id="slack-acme")
+def test_tools_call_foo_cannot_claim_foo_bar_target(stub_jwks, test_key: SigningKey):
+    """Regression: the legacy prefix check let `foo` claim `foo-bar`."""
+    token = test_key.mint(tenant_id="foo")
     event = make_request_event(
         method="tools/call",
-        tool_name="tenant-slack-acmecorp-datadog___query_metrics",
+        tool_name="tenant-v1-mzxw6llcmfza-datadog___query_metrics",
+        auth_header=f"Bearer {token}",
+    )
+    response = handler.lambda_handler(event, None)
+    _assert_denied(response, 403)
+
+
+def test_tools_call_foo_bar_can_claim_its_exact_target(stub_jwks, test_key: SigningKey):
+    token = test_key.mint(tenant_id="foo-bar")
+    event = make_request_event(
+        method="tools/call",
+        tool_name="tenant-v1-mzxw6llcmfza-datadog___query_metrics",
+        auth_header=f"Bearer {token}",
+    )
+    response = handler.lambda_handler(event, None)
+    assert "transformedGatewayResponse" not in response["mcp"]
+
+
+def test_tools_call_legacy_ambiguous_target_name_fails_closed(
+    stub_jwks, test_key: SigningKey
+):
+    token = test_key.mint(tenant_id="foo")
+    event = make_request_event(
+        method="tools/call",
+        tool_name="tenant-foo-bar-datadog___query_metrics",
+        auth_header=f"Bearer {token}",
+    )
+    response = handler.lambda_handler(event, None)
+    _assert_denied(response, 403)
+    assert (
+        "legacy"
+        in response["mcp"]["transformedGatewayResponse"]["body"]["error"]["data"][
+            "reason"
+        ]
+    )
+
+
+@pytest.mark.parametrize(
+    "target_name",
+    [
+        "tenant-v1-not-base32!-datadog",
+        "tenant-v1-mzxw6-data--dog",
+        "tenant-v1-mzxw6-DataDog",
+    ],
+)
+def test_tools_call_invalid_versioned_target_name_denies(
+    target_name: str, stub_jwks, test_key: SigningKey
+):
+    token = test_key.mint(tenant_id="foo")
+    event = make_request_event(
+        method="tools/call",
+        tool_name=f"{target_name}___query_metrics",
         auth_header=f"Bearer {token}",
     )
     response = handler.lambda_handler(event, None)
@@ -243,7 +312,7 @@ def test_tools_call_configurable_delimiter(
     token = test_key.mint(tenant_id="slack-acme")
     event = make_request_event(
         method="tools/call",
-        tool_name="tenant-slack-acme-datadog__query_metrics",
+        tool_name="tenant-v1-onwgcy3lfvqwg3lf-datadog__query_metrics",
         auth_header=f"Bearer {token}",
     )
     response = handler.lambda_handler(event, None)
@@ -254,9 +323,8 @@ def test_tools_call_configurable_delimiter(
 # JWKS cache behavior
 # ----------------------------------------------------------------------------
 
-def test_jwks_cache_is_reused_across_warm_invocations(
-    stub_jwks, test_key: SigningKey
-):
+
+def test_jwks_cache_is_reused_across_warm_invocations(stub_jwks, test_key: SigningKey):
     token = test_key.mint(tenant_id="slack-acme")
     event = make_request_event(method="tools/list", auth_header=f"Bearer {token}")
 
@@ -328,6 +396,7 @@ def test_jwks_cache_refresh_still_missing_kid_denies(monkeypatch, test_key: Sign
 # Response shape
 # ----------------------------------------------------------------------------
 
+
 def test_allow_response_includes_interceptor_output_version_and_request(
     stub_jwks, test_key: SigningKey
 ):
@@ -336,7 +405,9 @@ def test_allow_response_includes_interceptor_output_version_and_request(
     response = handler.lambda_handler(event, None)
 
     assert response["interceptorOutputVersion"] == "1.0"
-    assert response["mcp"]["transformedGatewayRequest"]["body"]["method"] == "tools/list"
+    assert (
+        response["mcp"]["transformedGatewayRequest"]["body"]["method"] == "tools/list"
+    )
 
 
 def test_deny_response_is_jsonrpc_error_shape(stub_jwks, test_key: SigningKey):

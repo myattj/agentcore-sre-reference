@@ -196,3 +196,20 @@ class TestSkillTriggers:
         skill = next(s for s in BUILTIN_SKILLS if s.name == "incident-response")
         code_tools = {"code_search", "code_read_file", "code_list_commits", "code_find_symbol"}
         assert code_tools.issubset(set(skill.required_tools))
+
+    def test_external_document_search_is_never_force_added(self):
+        """Gateway/MCP tools are advertised externally, not catalog requirements."""
+        assert all("search_docs" not in skill.required_tools for skill in BUILTIN_SKILLS)
+
+    def test_document_search_instructions_are_conditional(self):
+        """Skills may use a connected search_docs tool without assuming it exists."""
+        doc_skills = ("runbook-lookup", "deploy-watchdog", "incident-response")
+        for name in doc_skills:
+            prompt = next(s.prompt_template for s in BUILTIN_SKILLS if s.name == name)
+            assert "If your tools include `search_docs`" in prompt
+
+    def test_deploy_watchdog_has_one_rules_section(self):
+        prompt = next(
+            s.prompt_template for s in BUILTIN_SKILLS if s.name == "deploy-watchdog"
+        )
+        assert prompt.count("### Rules") == 1

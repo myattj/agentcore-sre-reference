@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Datadog seeder.
+"""Content-only Datadog seeder.
 
-Connects Datadog to the test tenant (via the bridge's
-``/api/tenants/{id}/integrations/datadog`` route, which provisions a
-Gateway target + credential provider) and then populates the Datadog
-account with Acme Data Co content: ~15 events and ~8 monitors that
-mirror the fictional incidents from the Slack seed.
+Populates a disposable Datadog account with Acme Data Co content:
+~15 events and ~8 monitors that mirror the fictional incidents from the
+Slack seed. It deliberately does not connect Datadog to a tenant. Datadog
+requires two independent secrets, while a direct AgentCore Gateway target
+supports one credential provider, so the bridge rejects that unsafe shape.
 
 Secret shape at ``agentcore/testenv/datadog``:
 
@@ -25,7 +25,11 @@ already exists. Pass ``--force`` to re-seed anyway (will duplicate).
 
 Usage:
     python -m scripts.testenv.integrations.seed_datadog \\
-        --tenant slack-t0xxxxxxxxx
+        --tenant slack-t0xxxxxxxxx --skip-connect
+
+The explicit ``--skip-connect`` acknowledgement is required. Credentials are
+used only by this local process to call Datadog's API; they are never sent to
+the bridge or written to tenant configuration.
 """
 from __future__ import annotations
 
@@ -36,7 +40,6 @@ from typing import Any
 
 from ._common import (
     RateLimitedClient,
-    bridge_connect_integration,
     configure_logging,
     err,
     grey,
@@ -322,12 +325,18 @@ def run_seed(
     tenant_id: str,
     *,
     region: str | None = None,
-    bridge_url: str | None = None,
     skip_connect: bool = False,
-    skip_seed: bool = False,
     force: bool = False,
 ) -> int:
-    """Top-level: connect Datadog to the tenant + seed content."""
+    """Seed synthetic content after an explicit no-connect acknowledgement."""
+    del tenant_id  # Kept for a consistent testenv seeder CLI.
+    if not skip_connect:
+        err(
+            "Datadog tenant connection is intentionally disabled. Re-run with "
+            "--skip-connect to seed synthetic content directly."
+        )
+        return 2
+
     # ---- 1. Load credentials ----
     step("Loading Datadog credentials from Secrets Manager")
     try:
@@ -342,33 +351,8 @@ def run_seed(
     site = creds["site"]
     ok(f"creds loaded (site: {site})")
 
-    # ---- 2. Bridge connect (Gateway provisioning) ----
-    if skip_connect:
-        warn("--skip-connect: skipping bridge integration connect")
-    else:
-        step(f"Connecting Datadog to tenant {tenant_id} via bridge")
-        try:
-            resp = bridge_connect_integration(
-                tenant_id,
-                "datadog",
-                body={
-                    "api_key": creds["api_key"],
-                    "app_key": creds["app_key"],
-                    "site": site,
-                },
-                bridge_url=bridge_url,
-                region=region,
-            )
-        except RuntimeError as e:
-            err(str(e))
-            return 1
-        ok(f"gateway target ready: {resp.get('target_name')}")
-        grey(f"  gateway URL: {resp.get('gateway_url')}")
-
-    # ---- 3. Seed content ----
-    if skip_seed:
-        warn("--skip-seed: skipping content seed")
-        return 0
+    # ---- 2. Seed content directly ----
+    warn("--skip-connect acknowledged: no tenant or Gateway changes will be made")
 
     step("Seeding Datadog events + monitors")
     client = RateLimitedClient(
@@ -427,16 +411,20 @@ def run_seed(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Seed Datadog for the AgentCore Reference test env.")
+    parser = argparse.ArgumentParser(description="Seed Datadog for the Agent test env.")
     parser.add_argument("--tenant", required=True)
     parser.add_argument("--region", default=None)
-    parser.add_argument("--bridge-url", default=None)
-    parser.add_argument("--skip-connect", action="store_true",
-                        help="Skip the bridge /integrations/datadog POST (content seed only)")
-    parser.add_argument("--skip-seed", action="store_true",
-                        help="Skip content seeding (connect only)")
-    parser.add_argument("--force", action="store_true",
-                        help="Re-seed content even if already-seeded events are found")
+    parser.add_argument(
+        "--skip-connect",
+        action="store_true",
+        required=True,
+        help="Required acknowledgement: seed content without connecting a tenant",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Re-seed content even if already-seeded events are found",
+    )
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -444,9 +432,7 @@ def main() -> int:
     return run_seed(
         args.tenant,
         region=args.region,
-        bridge_url=args.bridge_url,
         skip_connect=args.skip_connect,
-        skip_seed=args.skip_seed,
         force=args.force,
     )
 

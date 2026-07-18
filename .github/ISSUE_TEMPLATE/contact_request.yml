@@ -1,0 +1,27 @@
+name: Private contact request
+description: Ask a maintainer to establish a private channel without publishing sensitive details
+title: "[Private contact request]"
+labels:
+  - question
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this only when GitHub private vulnerability reporting is unavailable or when a conduct concern needs a private channel. Do not describe the vulnerability, incident, affected person, customer, credential, or private system in this public issue.
+  - type: checkboxes
+    id: acknowledgement
+    attributes:
+      label: Safety check
+      options:
+        - label: I have not included sensitive details and am only requesting a private contact route.
+          required: true
+  - type: dropdown
+    id: reason
+    attributes:
+      label: Reason
+      options:
+        - GitHub private vulnerability reporting is unavailable
+        - Code of conduct concern
+        - Accidental disclosure requiring private coordination
+    validations:
+      required: true

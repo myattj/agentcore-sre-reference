@@ -18,7 +18,7 @@ The IAM managed policy `AgentCoreBridgeDataAccess` (see
 `infra/data/lib/data-stack.ts`) grants the bridge role
 `secretsmanager:GetSecretValue` AND `CreateSecret`/`PutSecretValue` on
 `arn:aws:secretsmanager:*:*:secret:agentcore/tenants/*`. The OAuth callback
-(week 2) writes new tokens; this module only reads them.
+writes new tokens; this module only reads them.
 """
 from __future__ import annotations
 

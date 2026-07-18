@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
-"""Ad-hoc CLI for querying the `audit_log` DynamoDB table.
+"""Operator CLI for querying the `audit_log` DynamoDB table.
 
-This is a temporary helper that exists until the week-3 onboarding /
-admin UI lands with a real dashboard. It's the fastest way to answer
-"how much is tenant X costing me?" or "what tools did tenant X call
-yesterday?" before there's a proper observability surface.
+Use it to answer questions such as "how much is tenant X costing me?"
+or "what tools did tenant X call yesterday?" directly from audit data.
 
 The audit table is keyed by (tenant_id, sk). Two row types share the
 sort key namespace:

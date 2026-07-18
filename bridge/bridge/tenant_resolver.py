@@ -68,10 +68,9 @@ class DynamoWorkspaceResolver:
     unknown-workspace errors to a 404 or an "app not installed" reply
     rather than silently routing traffic to the demo tenant.
 
-    Caches lookups in-process with an LRU of 1024 entries. Bounce the
-    bridge to force a cache refresh when workspace mappings change (or
-    add explicit cache invalidation in week 3 when we build the OAuth
-    callback that creates new mappings).
+    Caches successful lookups in-process with an LRU of 1024 entries.
+    If an existing workspace mapping changes out of band, restart the
+    bridge or call cache_clear().
     """
 
     def __init__(self, table_name: str, region: str | None = None) -> None:

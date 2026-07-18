@@ -3,8 +3,8 @@
 # Attach the agent runtime's IAM execution role to all the managed
 # policies it needs:
 #   - AgentCoreDataAccess        (from data-stack.ts)
-#   - AgentCoreSandboxAccess     (from sandbox-stack.ts, Phase B —
-#                                 only attached if the sandbox stack is
+#   - AgentCoreSandboxAccess     (from sandbox-stack.ts — only attached
+#                                 if the sandbox stack is
 #                                 deployed; gracefully skipped if not)
 #
 # `agentcore deploy` creates an IAM role for the agent runtime inside the
@@ -24,6 +24,7 @@
 #   AGENT_STACK   — default AgentCore-coreAgent-default  (see aws-targets.json)
 #   DATA_STACK    — default AgentCore-coreAgent-data-<region>
 #   SANDBOX_STACK — default AgentCore-coreAgent-sandbox-<region>
+#   ATTACH_SANDBOX_POLICY — set to 1 only after explicit sandbox review
 #
 # Exit codes:
 #   0 — attached (or already attached)
@@ -36,6 +37,7 @@ REGION="${REGION:-us-west-2}"
 AGENT_STACK="${AGENT_STACK:-AgentCore-coreAgent-default}"
 DATA_STACK="${DATA_STACK:-AgentCore-coreAgent-data-${REGION}}"
 SANDBOX_STACK="${SANDBOX_STACK:-AgentCore-coreAgent-sandbox-${REGION}}"
+ATTACH_SANDBOX_POLICY="${ATTACH_SANDBOX_POLICY:-0}"
 
 command -v aws >/dev/null 2>&1 || { echo "aws CLI not installed"; exit 2; }
 command -v jq  >/dev/null 2>&1 || { echo "jq not installed"; exit 2; }
@@ -71,21 +73,20 @@ if [[ -z "$DATA_POLICY_ARN" || "$DATA_POLICY_ARN" == "None" ]]; then
   exit 1
 fi
 
-# Optional: AgentCoreSandboxAccess from sandbox-stack. Soft-skip if the
-# sandbox stack isn't deployed yet — pre-Phase-B environments still work.
-SANDBOX_POLICY_ARN="$(read_stack_output "$SANDBOX_STACK" "AgentSandboxAccessPolicyArn")"
-
 # Build the list of (stack, arn) pairs we'll attach. Empty entries are
 # filtered out below so the loop only iterates over real ARNs.
 POLICY_ARNS=("$DATA_POLICY_ARN")
 POLICY_LABELS=("AgentCoreDataAccess (data-stack)")
-if [[ -n "$SANDBOX_POLICY_ARN" && "$SANDBOX_POLICY_ARN" != "None" ]]; then
+if [[ "$ATTACH_SANDBOX_POLICY" == "1" ]]; then
+  SANDBOX_POLICY_ARN="$(read_stack_output "$SANDBOX_STACK" "AgentSandboxAccessPolicyArn")"
+  if [[ -z "$SANDBOX_POLICY_ARN" || "$SANDBOX_POLICY_ARN" == "None" ]]; then
+    echo "ERROR: ATTACH_SANDBOX_POLICY=1 but $SANDBOX_STACK has no sandbox policy." >&2
+    exit 1
+  fi
   POLICY_ARNS+=("$SANDBOX_POLICY_ARN")
-  POLICY_LABELS+=("AgentCoreSandboxAccess (sandbox-stack)")
+  POLICY_LABELS+=("AgentCoreSandboxAccess (experimental sandbox-stack)")
 else
-  echo "Note: $SANDBOX_STACK not found — skipping AgentCoreSandboxAccess attach."
-  echo "      Run 'bash infra/data/scripts/deploy_sandbox.sh' first if you" \
-       "want Phase B propose_pr support."
+  echo "Experimental sandbox policy: disabled (set ATTACH_SANDBOX_POLICY=1 only after review)."
 fi
 echo
 
@@ -99,12 +100,10 @@ echo
 # -----------------------------------------------------------------------
 # 2. Discover the agent's IAM execution role from its CFN stack resources.
 # -----------------------------------------------------------------------
-# The agentcore-cdk L3 construct creates one or more IAM roles; the one we
-# want is the execution role attached to the AgentCore Runtime. Its
-# logical ID contains "ExecutionRole" or "AgentRuntimeRole" depending on
-# the library version. We list all IAM::Role resources in the stack and
-# prefer the one whose logical ID matches; if nothing matches, we fall
-# back to the first role and warn loudly.
+# The agentcore-cdk L3 construct may create multiple IAM roles, and logical
+# IDs can change between CLI releases. Identify the execution role by its
+# trust policy instead: exactly one stack role must allow the AgentCore
+# service principal. Ambiguity or an unreadable trust policy fails closed.
 
 ROLES_JSON="$(
   aws cloudformation list-stack-resources \
@@ -124,24 +123,48 @@ if [[ "$ROLES_JSON" == "[]" || -z "$ROLES_JSON" ]]; then
   echo "     (look for a role whose trust policy lets bedrock-agentcore.amazonaws.com assume it)." >&2
   echo "  2. Run:" >&2
   echo "       aws iam attach-role-policy --role-name <role-name> \\\\" >&2
-  echo "           --policy-arn $POLICY_ARN" >&2
+  echo "           --policy-arn $DATA_POLICY_ARN" >&2
   exit 1
 fi
 
-ROLE_NAME="$(
-  echo "$ROLES_JSON" \
-  | jq -r '
-    (map(select(.LogicalResourceId | test("(?i)(executionrole|runtimerole|agentrole)"))) | first | .PhysicalResourceId) //
-    (.[0] | .PhysicalResourceId)
-  '
-)"
+TRUSTED_ROLES=()
+while IFS= read -r candidate_role; do
+  [[ -n "$candidate_role" ]] || continue
+  if ! role_json="$(
+    aws iam get-role \
+      --role-name "$candidate_role" \
+      --output json 2>/dev/null
+  )"; then
+    echo "ERROR: Could not inspect trust policy for role $candidate_role." >&2
+    exit 1
+  fi
+  if echo "$role_json" | jq -e \
+    --arg service "bedrock-agentcore.amazonaws.com" '
+      [
+        .Role.AssumeRolePolicyDocument.Statement[]?
+        | select(.Effect == "Allow")
+        | .Principal.Service?
+        | if type == "array" then .[] else . end
+      ]
+      | any(. == $service)
+    ' >/dev/null; then
+    TRUSTED_ROLES+=("$candidate_role")
+  fi
+done < <(echo "$ROLES_JSON" | jq -r '.[].PhysicalResourceId // empty')
 
-if [[ -z "$ROLE_NAME" || "$ROLE_NAME" == "null" ]]; then
-  echo "ERROR: Could not identify the agent execution role." >&2
+if [[ ${#TRUSTED_ROLES[@]} -ne 1 ]]; then
+  echo "ERROR: Expected exactly one AgentCore-assumable role in $AGENT_STACK;" >&2
+  echo "       found ${#TRUSTED_ROLES[@]}. Refusing to attach any policy." >&2
   echo "Available IAM roles in $AGENT_STACK:" >&2
   echo "$ROLES_JSON" | jq -r '.[] | "  - \(.LogicalResourceId) -> \(.PhysicalResourceId)"' >&2
+  if [[ ${#TRUSTED_ROLES[@]} -gt 0 ]]; then
+    echo "Roles trusting bedrock-agentcore.amazonaws.com:" >&2
+    printf '  - %s\n' "${TRUSTED_ROLES[@]}" >&2
+  fi
   exit 1
 fi
+
+ROLE_NAME="${TRUSTED_ROLES[0]}"
 
 echo "Agent role:    $ROLE_NAME"
 echo

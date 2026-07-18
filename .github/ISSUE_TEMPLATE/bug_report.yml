@@ -1,0 +1,60 @@
+name: Reproducible bug
+description: Report a defect in the archived reference implementation
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Agent is archived and has no support SLA. Please report only reproducible defects that improve the repository as a reference. Never include credentials, customer data, private URLs, AWS account identifiers, or undisclosed vulnerability details.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I read SUPPORT.md and SECURITY.md.
+          required: true
+        - label: I ran `make doctor`, `make setup`, and `make check`, or explained why I could not.
+          required: true
+        - label: This report contains no secrets, customer data, or undisclosed vulnerability details.
+          required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: What happened?
+      description: Describe the observed behavior and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Give exact commands and sanitized inputs that reproduce the problem.
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Redacted output
+      description: Paste the smallest useful log or stack trace. Remove identifiers and sensitive values.
+      render: shell
+  - type: input
+    id: commit
+    attributes:
+      label: Commit
+      placeholder: v0.1.0 or a commit SHA
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Operating system, architecture, Python, uv, Node.js, npm, and any relevant optional tooling.
+    validations:
+      required: true
+  - type: textarea
+    id: impact
+    attributes:
+      label: Impact and suggested fix
+      description: Explain why this matters and include a proposed direction if you have one.

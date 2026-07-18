@@ -37,17 +37,61 @@ export default function ChannelTabs({ tenantId, channels, config }: Props) {
 
   if (channels.length === 0) return null;
 
+  function tabId(channelId: string) {
+    return `channel-tab-${channelId}`;
+  }
+
+  function panelId(channelId: string) {
+    return `channel-panel-${channelId}`;
+  }
+
+  function activateTab(index: number) {
+    const channel = channels[index];
+    if (!channel) return;
+    setActiveTab(channel.id);
+    document.getElementById(tabId(channel.id))?.focus();
+  }
+
+  function handleTabKeyDown(
+    event: React.KeyboardEvent<HTMLButtonElement>,
+    index: number,
+  ) {
+    let nextIndex: number | null = null;
+    if (event.key === "ArrowRight") {
+      nextIndex = (index + 1) % channels.length;
+    } else if (event.key === "ArrowLeft") {
+      nextIndex = (index - 1 + channels.length) % channels.length;
+    } else if (event.key === "Home") {
+      nextIndex = 0;
+    } else if (event.key === "End") {
+      nextIndex = channels.length - 1;
+    }
+    if (nextIndex === null) return;
+    event.preventDefault();
+    activateTab(nextIndex);
+  }
+
   return (
     <div className="rounded-lg border border-[color:var(--border)]">
       {/* Tab bar */}
-      <div className="flex overflow-x-auto border-b border-[color:var(--border)] bg-[color:var(--card)]">
-        {channels.map((ch) => {
+      <div
+        aria-label="Slack channels"
+        className="flex overflow-x-auto border-b border-[color:var(--border)] bg-[color:var(--card)]"
+        role="tablist"
+      >
+        {channels.map((ch, index) => {
           const active = ch.id === activeTab;
           return (
             <button
               key={ch.id}
+              aria-controls={panelId(ch.id)}
+              aria-selected={active}
+              id={tabId(ch.id)}
+              role="tab"
+              tabIndex={active ? 0 : -1}
               type="button"
               onClick={() => setActiveTab(ch.id)}
+              onKeyDown={(event) => handleTabKeyDown(event, index)}
               className={`shrink-0 border-b-2 px-4 py-2.5 text-sm font-medium transition ${
                 active
                   ? "border-[color:var(--accent)] text-[color:var(--accent)]"
@@ -64,14 +108,21 @@ export default function ChannelTabs({ tenantId, channels, config }: Props) {
       {/* Tab panels */}
       {channels.map((ch) =>
         ch.id === activeTab ? (
-          <ChannelPanel
+          <div
             key={ch.id}
-            tenantId={tenantId}
-            channelId={ch.id}
-            channelName={ch.name}
-            persona={config.channels?.[ch.id] ?? {}}
-            baseConfig={config}
-          />
+            aria-labelledby={tabId(ch.id)}
+            id={panelId(ch.id)}
+            role="tabpanel"
+            tabIndex={0}
+          >
+            <ChannelPanel
+              tenantId={tenantId}
+              channelId={ch.id}
+              channelName={ch.name}
+              persona={config.channels?.[ch.id] ?? {}}
+              baseConfig={config}
+            />
+          </div>
         ) : null,
       )}
     </div>
@@ -140,7 +191,7 @@ function ChannelPanel({
 
   return (
     <div className="space-y-6 p-5">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col items-start gap-2 sm:flex-row sm:items-center sm:justify-between">
         <p className="text-xs text-[color:var(--muted)]">
           Overrides for <strong>#{channelName}</strong> ({channelId}). Leave a
           section unchecked to inherit from the tenant-level defaults.
@@ -171,7 +222,7 @@ function ChannelPanel({
               placeholder={"You are the SRE on-call assistant for #" + channelName + ". When someone says /oncall-start, search this channel for active incidents and summarize with action items."}
               className="w-full rounded-lg border border-[color:var(--border)] bg-white p-3 font-mono text-sm shadow-sm focus:border-[color:var(--accent)] focus:outline-none focus:ring-2 focus:ring-[color:var(--accent)]/20"
             />
-            <p className="text-[10px] text-[color:var(--muted)]">
+            <p className="text-xs text-[color:var(--muted)]">
               Define this channel&apos;s personality, team-specific workflows,
               and behavioral rules. This replaces the tenant-level prompt for
               messages in this channel.
@@ -279,7 +330,11 @@ function ChannelPanel({
 function StatusIndicator({ status }: { status: AutoSaveStatus }) {
   if (status.kind === "idle") return null;
   return (
-    <span className="text-xs">
+    <span
+      aria-live={status.kind === "error" ? "assertive" : "polite"}
+      className="text-xs"
+      role={status.kind === "error" ? "alert" : "status"}
+    >
       {status.kind === "saving" ? (
         <span className="text-[color:var(--muted)]">Saving...</span>
       ) : null}

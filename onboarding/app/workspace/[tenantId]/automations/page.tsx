@@ -50,13 +50,13 @@ export default async function AutomationsPage({
       </header>
 
       <div className="mb-8 rounded-lg border border-violet-100 bg-violet-50 p-4 text-sm text-violet-800">
-        <p className="mb-1 font-medium">These settings are always editable</p>
+        <p className="mb-1 font-medium">Edit here; authorize Slack writes separately</p>
         <p className="text-xs text-violet-700">
-          You can also update bot policy, escalation routes, and skills at any
-          time by asking your bot directly in Slack. Just say something like
-          &ldquo;add B_ALERTBOT to trusted bots&rdquo; or &ldquo;add an
-          escalation route for the security team.&rdquo; Changes persist
-          immediately and the bot will remember them.
+          This workspace UI remains the default editing path. Asking the bot to
+          change policy, routes, or skills works only when the requesting Slack
+          user has been explicitly added to the tenant&apos;s operator-managed admin
+          allowlist. Everyone else can inspect configuration from Slack, but
+          changes remain read-only.
         </p>
       </div>
 
@@ -78,7 +78,7 @@ export default async function AutomationsPage({
         <h2 className="mb-1 text-lg font-semibold">Escalation Routing</h2>
         <p className="mb-4 text-xs text-[color:var(--muted)]">
           Define teams and where to route escalations. The{" "}
-          <code className="rounded bg-[color:var(--card)] px-1 font-mono text-[10px]">
+          <code className="rounded bg-[color:var(--card)] px-1 font-mono text-xs">
             escalate
           </code>{" "}
           tool uses this routing table.

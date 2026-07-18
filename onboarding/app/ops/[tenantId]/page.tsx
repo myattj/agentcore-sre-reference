@@ -73,7 +73,7 @@ export default async function OpsTenantDrilldownPage({
 
   return (
     <div>
-      <header className="mb-8 flex items-start justify-between gap-6">
+      <header className="mb-8 flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between sm:gap-6">
         <div>
           <Link
             href={`/ops?window=${window}`}
@@ -85,7 +85,7 @@ export default async function OpsTenantDrilldownPage({
             <span className="font-mono text-lg">{tenantId}</span>
           </h1>
           <p className="text-sm text-[color:var(--muted)]">
-            Operator drill-down. Data from CloudWatch AgentCore Reference/Agent namespace.
+            Operator drill-down. Data from the CloudWatch Agent/Runtime namespace.
           </p>
         </div>
         <div className="flex gap-1 rounded-md border border-[color:var(--border)] p-1">

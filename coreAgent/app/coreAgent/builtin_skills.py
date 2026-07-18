@@ -14,12 +14,12 @@ Design principles:
     investigation.
   - No channel scoping. The triggers are tight enough to avoid false
     positives; let the bot reason about relevance.
-  - Tools referenced in ``required_tools`` are merged into the effective
-    tool list at match time, so skills work even if the tenant hasn't
-    explicitly whitelisted those tools.
-  - Graceful degradation: if a tool returns "not configured" (e.g.
-    escalate with no routes, search_docs with no sources), the bot
-    adapts. The prompts never hard-require a specific result.
+  - In-process tools referenced in ``required_tools`` are merged into the
+    effective catalog at match time, so skills work even if the tenant hasn't
+    explicitly whitelisted those tools. Gateway/MCP tools must never be listed
+    there: the connected server advertises them independently.
+  - Graceful degradation: prompts only ask for external integration tools when
+    those tools are present, and otherwise work from Slack and code context.
 """
 from __future__ import annotations
 
@@ -81,7 +81,7 @@ BUILTIN_SKILLS: list[SkillDef] = [
             "- Never assign blame. Post-mortems are blameless.\n"
             "- If the user is just discussing writing a postmortem (not asking you to draft one), respond normally."
         ),
-        required_tools=["read_thread_context", "search_team_history", "search_docs"],
+        required_tools=["read_thread_context", "search_team_history"],
         channels=[],
     ),
     # ------------------------------------------------------------------
@@ -186,7 +186,9 @@ BUILTIN_SKILLS: list[SkillDef] = [
             "Find the relevant runbook or remediation steps and walk them through it.\n\n"
             "### Investigation\n"
             "- Call `read_thread_context` to understand the situation.\n"
-            "- Call `search_docs` for matching runbooks or operational docs.\n"
+            "- If your tools include `search_docs`, call it for matching runbooks or operational docs.\n"
+            "- Otherwise, use any connected document-search tool by its advertised name; "
+            "if none is available, say so and continue with team history.\n"
             "- Call `search_team_history` for how this was handled before.\n\n"
             "### If you find a matching runbook:\n\n"
             "**Runbook: [title]**\n"
@@ -203,7 +205,7 @@ BUILTIN_SKILLS: list[SkillDef] = [
             "- Flag destructive steps clearly (restarts, failovers, data changes).\n"
             "- Don't dump the whole runbook — present steps in logical groups."
         ),
-        required_tools=["search_docs", "search_team_history", "read_thread_context"],
+        required_tools=["search_team_history", "read_thread_context"],
         channels=[],
     ),
     # ------------------------------------------------------------------
@@ -231,7 +233,9 @@ BUILTIN_SKILLS: list[SkillDef] = [
             "- Call `read_thread_context` to understand what was deployed.\n"
             "- If a repo is mentioned, call `code_list_commits` to see what changed.\n"
             "- Call `search_team_history` for recent incidents involving the same service.\n"
-            "- Call `search_docs` for known issues with the deployed service.\n\n"
+            "- If your tools include `search_docs`, call it for known issues with the deployed service.\n"
+            "- Otherwise, use any connected document-search tool by its advertised name, "
+            "or continue without docs when none is available.\n\n"
             "### Structure your response as:\n\n"
             "**Deploy Watch: [service name]**\n"
             "| Field | Detail |\n"
@@ -251,7 +255,7 @@ BUILTIN_SKILLS: list[SkillDef] = [
             "- Be specific — tie watch items to actual changes, not generic advice.\n"
             "- If you can't identify what was deployed, ask."
         ),
-        required_tools=["search_team_history", "search_docs", "read_thread_context", "code_list_commits"],
+        required_tools=["search_team_history", "read_thread_context", "code_list_commits"],
         channels=[],
     ),
     # ------------------------------------------------------------------
@@ -284,7 +288,9 @@ BUILTIN_SKILLS: list[SkillDef] = [
             "- Call `read_thread_context` to understand what's happening — look for metric names, "
             "service tags, error messages, stack traces, and dashboard links.\n"
             "- Call `search_team_history` for similar past incidents — how were they resolved?\n"
-            "- Call `search_docs` for relevant runbooks or known-issue documentation.\n\n"
+            "- If your tools include `search_docs`, call it for relevant runbooks or known-issue documentation.\n"
+            "- Otherwise, use any connected document-search tool by its advertised name, "
+            "or continue without docs when none is available.\n\n"
             "**2. Pull production metrics** (if monitoring tools are available):\n"
             "- If your tools include `query_metrics`, query the relevant metrics around the incident "
             "timeframe. Look for anomalies, spikes, or drops that correlate with the reported symptoms.\n"
@@ -335,7 +341,6 @@ BUILTIN_SKILLS: list[SkillDef] = [
         ),
         required_tools=[
             "search_team_history",
-            "search_docs",
             "read_thread_context",
             "escalate",
             "code_search",

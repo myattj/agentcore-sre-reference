@@ -48,6 +48,20 @@ def test_session_token_expired(monkeypatch: pytest.MonkeyPatch) -> None:
     assert verify_session_token(token) is None
 
 
+def test_session_token_from_the_future_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Tokens more than the small clock-skew allowance ahead are invalid."""
+    real_time = time.time
+    monkeypatch.setattr(
+        "bridge.slack_oauth.time.time",
+        lambda: real_time() + 31,
+    )
+    token = make_session_token("slack-t123")
+    monkeypatch.setattr("bridge.slack_oauth.time.time", real_time)
+    assert verify_session_token(token) is None
+
+
 def test_session_token_wrong_tenant_returned() -> None:
     """A token minted for A returns 'A' on verification (it's the caller's
     job to assert equality with the URL tenant)."""
@@ -80,10 +94,45 @@ def test_state_token_still_works_after_session_addition() -> None:
     """Sanity: the pre-existing state-token flow wasn't regressed by
     adding session tokens in the same module."""
     state = make_state_token()
-    assert verify_state_token(state)
-    assert not verify_state_token("garbage")
+    nonce = state.split(".", 1)[0]
+    assert verify_state_token(state, nonce)
+    assert not verify_state_token(state, "different-browser")
+    assert not verify_state_token("garbage", nonce)
     # Ensure state and session tokens are NOT interchangeable — a state
     # token shouldn't verify as a session token and vice versa.
     assert verify_session_token(state) is None
     session = make_session_token("slack-aaa")
-    assert not verify_state_token(session)
+    assert not verify_state_token(session, nonce)
+
+
+def test_state_token_from_the_future_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_time = time.time
+    monkeypatch.setattr(
+        "bridge.slack_oauth.time.time",
+        lambda: real_time() + 31,
+    )
+    state = make_state_token()
+    monkeypatch.setattr("bridge.slack_oauth.time.time", real_time)
+    nonce = state.split(".", 1)[0]
+    assert not verify_state_token(state, nonce)
+
+
+def test_oauth_state_secret_does_not_reuse_slack_signing_secret(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("BRIDGE_OAUTH_STATE_SECRET", raising=False)
+    monkeypatch.setenv("SLACK_SIGNING_SECRET", "s" * 64)
+
+    with pytest.raises(RuntimeError, match="BRIDGE_OAUTH_STATE_SECRET"):
+        make_state_token()
+
+
+def test_oauth_state_secret_rejects_short_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("BRIDGE_OAUTH_STATE_SECRET", "too-short")
+
+    with pytest.raises(RuntimeError, match="at least 32"):
+        make_state_token()

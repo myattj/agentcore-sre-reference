@@ -1,4 +1,4 @@
-"""Tests for the Phase B sandbox completion callback.
+"""Tests for the PR sandbox completion callback.
 
 Covers:
   - verify_callback_auth (missing/wrong scheme/empty token/correct token)

@@ -9,14 +9,13 @@ Covers:
 """
 from __future__ import annotations
 
-import json
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
 
-from bridge.main import _bot_allowed, _get_bot_policy, _bot_policy_cache, app
+from bridge.main import _bot_allowed, app
 
 
 # ---------------------------------------------------------------------------
@@ -28,8 +27,7 @@ class TestBotAllowed:
     """Unit tests for the four-tier bot policy evaluation."""
 
     def test_allow_all_bots_flag(self) -> None:
-        """When ``allow_all_bots`` is True, any bot passes — this is the
-        default for new tenants so PagerDuty/Datadog alerts auto-trigger."""
+        """When an operator explicitly enables ``allow_all_bots``, any bot passes."""
         policy = {"allow_all_bots": True, "trusted_bot_ids": [], "open_channels": []}
         assert _bot_allowed(policy, "B_ANY_BOT", "C_ANY") is True
         assert _bot_allowed(policy, "B_WHATEVER", None) is True
@@ -233,10 +231,9 @@ class TestDefaultConfig:
 
         config = build_default_config_dict("test-tenant")
         assert "bot_policy" in config
-        # New tenants default to fully open bot policy — the "magical
-        # default" that makes PagerDuty/Datadog auto-triage work with
-        # zero configuration.
-        assert config["bot_policy"]["allow_all_bots"] is True
+        # New tenants are humans-only until an operator explicitly trusts an
+        # alert bot or opens a channel.
+        assert config["bot_policy"]["allow_all_bots"] is False
         assert config["bot_policy"]["trusted_bot_ids"] == []
         assert config["bot_policy"]["open_channels"] == []
         assert "context_assembly" in config
@@ -270,9 +267,16 @@ class TestPatchNewFields:
                 raise KeyError(tenant_id)
             return copy.deepcopy(store[tenant_id])
 
-        def fake_update(tenant_id: str, _region: str, full: dict[str, Any]) -> None:
+        def fake_update(
+            tenant_id: str,
+            _region: str,
+            full: dict[str, Any],
+            expected_config: dict[str, Any] | None = None,
+        ) -> None:
             if tenant_id not in store:
                 raise KeyError(tenant_id)
+            if expected_config is not None:
+                assert store[tenant_id] == expected_config
             store[tenant_id] = full
 
         monkeypatch.setattr("bridge.api.get_tenant_row", fake_get)

@@ -342,7 +342,7 @@ def run_seed(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Seed Linear for the AgentCore Reference test env.")
+    parser = argparse.ArgumentParser(description="Seed Linear for the Agent test env.")
     parser.add_argument("--tenant", required=True)
     parser.add_argument("--region", default=None)
     parser.add_argument("--bridge-url", default=None)

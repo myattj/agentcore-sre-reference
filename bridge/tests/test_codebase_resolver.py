@@ -21,11 +21,8 @@ _AGENT_CODE = str(
 if _AGENT_CODE not in sys.path:
     sys.path.insert(0, _AGENT_CODE)
 
-from codebase_resolver import (  # type: ignore[import-not-found]
-    CodebaseContext,
-    resolve_codebase_context,
-)
-from tenant import CodebaseBinding, CodebasesConfig  # type: ignore[import-not-found]
+from codebase_resolver import resolve_codebase_context  # type: ignore[import-not-found]  # noqa: E402
+from tenant import CodebaseBinding, CodebasesConfig  # type: ignore[import-not-found]  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -76,13 +73,13 @@ class TestSingleBinding:
         """The trivial case: one repo connected, no reason to ask."""
         cfg = CodebasesConfig(
             enabled=True,
-            bindings=[CodebaseBinding(repo="myattj/coraBackend")],
+            bindings=[CodebaseBinding(repo="acme/backend")],
         )
         result = resolve_codebase_context({"channel_id": "C_ANY"}, cfg)
         assert result.disabled is False
         assert len(result.bindings) == 1
         # Block lists the repo and names it as the default
-        assert "myattj/coraBackend" in result.prompt_block
+        assert "acme/backend" in result.prompt_block
         assert "only repo connected" in result.prompt_block.lower()
 
     def test_single_binding_block_does_not_gate_tool_calls(self) -> None:
@@ -90,7 +87,7 @@ class TestSingleBinding:
         the model now."""
         cfg = CodebasesConfig(
             enabled=True,
-            bindings=[CodebaseBinding(repo="myattj/coraBackend")],
+            bindings=[CodebaseBinding(repo="acme/backend")],
         )
         result = resolve_codebase_context({"channel_id": "C_NEW"}, cfg)
         lower = result.prompt_block.lower()

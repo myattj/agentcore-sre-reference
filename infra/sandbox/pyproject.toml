@@ -1,0 +1,24 @@
+[project]
+name = "agent-pr-sandbox"
+version = "0.1.0"
+description = "One-shot pull-request worker for the archived Agent reference implementation"
+requires-python = ">=3.13,<3.14"
+dependencies = [
+    # The inner agent loop calls Anthropic directly for prompt caching.
+    "anthropic >= 0.52",
+    # Reads and updates sandbox jobs in DynamoDB.
+    "boto3 >= 1.34",
+    # Signs GitHub App JWTs; the crypto extra supplies the RS256 backend.
+    "pyjwt[crypto] >= 2.8",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest >= 8.0",
+]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

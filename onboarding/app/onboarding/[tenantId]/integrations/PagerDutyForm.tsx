@@ -41,7 +41,7 @@ export function PagerDutyForm({ tenantId, initialConnected }: { tenantId: string
       <div className="space-y-2">
         <label className="block text-xs font-medium">REST API Key (v2)<input name="apiKey" type="password" autoComplete="off" placeholder="PagerDuty API key" className="mt-1 block w-full rounded border border-[color:var(--border)] px-2.5 py-1.5 text-sm" required /></label>
       </div>
-      {result && !result.ok && <p className="mt-2 text-xs text-red-600">{result.error}</p>}
+      {result && !result.ok && <p className="mt-2 text-xs text-red-600" role="alert">{result.error}</p>}
       <button type="submit" disabled={isPending} className="mt-3 rounded-full bg-[color:var(--accent)] px-4 py-1.5 text-xs font-medium text-white hover:bg-[color:var(--accent-hover)] disabled:opacity-50">{isPending ? "Connecting..." : "Connect"}</button>
     </form>
   );

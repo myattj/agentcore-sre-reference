@@ -191,7 +191,7 @@ export default function SkillsEditor({ tenantId, initial }: Props) {
     <div className="space-y-4">
       {skills.length === 0 && editingIndex === null ? (
         <div className="rounded-lg border border-[color:var(--border)] bg-[color:var(--card)] p-8 text-center">
-          <h3 className="mb-2 text-base font-semibold">No skills yet</h3>
+          <h2 className="mb-2 text-base font-semibold">No skills yet</h2>
           <p className="mx-auto mb-4 max-w-md text-sm text-[color:var(--muted)]">
             Skills are tenant-wide workflows triggered by slash commands or
             pattern matches. For team-specific behaviors (on-call briefings,
@@ -278,13 +278,17 @@ export default function SkillsEditor({ tenantId, initial }: Props) {
           + Add skill
         </button>
         {status.kind === "saved" ? (
-          <span className="text-sm text-green-600">Saved.</span>
+          <span aria-live="polite" className="text-sm text-green-600" role="status">
+            Saved.
+          </span>
         ) : null}
         {status.kind === "pending" ? (
-          <span className="text-sm text-[color:var(--muted)]">Saving...</span>
+          <span aria-live="polite" className="text-sm text-[color:var(--muted)]" role="status">
+            Saving...
+          </span>
         ) : null}
         {status.kind === "error" ? (
-          <span className="text-sm text-red-600">
+          <span aria-live="assertive" className="text-sm text-red-600" role="alert">
             Couldn&apos;t save: {status.message}
           </span>
         ) : null}
@@ -293,7 +297,7 @@ export default function SkillsEditor({ tenantId, initial }: Props) {
       {/* Skill templates */}
       {editingIndex === null ? (
         <div className="mt-6 border-t border-[color:var(--border)] pt-6">
-          <h3 className="mb-1 text-sm font-medium">Templates</h3>
+          <h2 className="mb-1 text-sm font-medium">Templates</h2>
           <p className="mb-4 text-xs text-[color:var(--muted)]">
             Pre-built tenant-wide workflows you can add with one click.
           </p>
@@ -405,9 +409,9 @@ function SkillEditorPanel({
 
   return (
     <div className="rounded-lg border border-[color:var(--accent)]/30 bg-white p-5 shadow-sm">
-      <h3 className="mb-4 text-sm font-semibold">
+      <h2 className="mb-4 text-sm font-semibold">
         {isNew ? "New skill" : "Edit skill"}
-      </h3>
+      </h2>
       <div className="space-y-4">
         <label className="block">
           <span className="mb-1 block text-xs font-medium">Name</span>
@@ -429,7 +433,7 @@ function SkillEditorPanel({
             placeholder="/oncall-start"
             className="w-full rounded-lg border border-[color:var(--border)] bg-white p-2.5 font-mono text-sm shadow-sm focus:border-[color:var(--accent)] focus:outline-none focus:ring-2 focus:ring-[color:var(--accent)]/20"
           />
-          <span className="mt-1 block text-[10px] text-[color:var(--muted)]">
+          <span className="mt-1 block text-xs text-[color:var(--muted)]">
             {triggerType === "slash"
               ? "Slash command \u2014 case-insensitive prefix match"
               : "Regex pattern \u2014 matches anywhere in the message"}
@@ -485,7 +489,7 @@ function SkillEditorPanel({
                 placeholder="The user is starting an on-call shift. Execute a comprehensive briefing..."
                 className="w-full rounded-lg border border-[color:var(--border)] bg-white p-2.5 font-mono text-sm shadow-sm focus:border-[color:var(--accent)] focus:outline-none focus:ring-2 focus:ring-[color:var(--accent)]/20"
               />
-              <span className="mt-1 block text-[10px] text-[color:var(--muted)]">
+              <span className="mt-1 block text-xs text-[color:var(--muted)]">
                 Placeholders: {"{user_id}"} {"{channel_id}"} {"{thread_id}"}{" "}
                 {"{workspace_id}"}
               </span>
@@ -495,7 +499,7 @@ function SkillEditorPanel({
 
         <div>
           <span className="mb-2 block text-xs font-medium">Required tools</span>
-          <p className="mb-2 text-[10px] text-[color:var(--muted)]">
+          <p className="mb-2 text-xs text-[color:var(--muted)]">
             These tools will be available when this skill triggers, even if
             not in the base tool set.
           </p>
@@ -527,7 +531,7 @@ function SkillEditorPanel({
 
         <div>
           <span className="mb-2 block text-xs font-medium">Channels</span>
-          <p className="mb-2 text-[10px] text-[color:var(--muted)]">
+          <p className="mb-2 text-xs text-[color:var(--muted)]">
             By default, skills fire in all channels. Restrict to specific
             channels if needed.
           </p>
@@ -550,6 +554,7 @@ function SkillEditorPanel({
               {draft.channels.map((ch, ci) => (
                 <div key={ci} className="flex items-center gap-2">
                   <input
+                    aria-label={`Channel ID ${ci + 1}`}
                     type="text"
                     value={ch}
                     onChange={(e) =>

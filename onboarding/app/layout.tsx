@@ -2,8 +2,8 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "agent-core onboarding",
-  description: "Set up your team's Slack agent in under 5 minutes.",
+  title: "Agent onboarding",
+  description: "Connect a multi-tenant AI SRE to your Slack workspace.",
 };
 
 export default function RootLayout({

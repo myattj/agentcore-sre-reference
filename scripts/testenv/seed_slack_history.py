@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Slack history seeder for the AgentCore Reference test env.
+"""Slack history seeder for the Agent test env.
 
 Loads all seed packs, iterates each SeedMessage in order, and posts to
 the test workspace via the bot token. Idempotent via SeederState —
@@ -18,14 +18,14 @@ import argparse
 import logging
 import sys
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Callable
 
 from ._channels import discover_and_join
 from ._common import (
     RateLimitedPoster,
     SeedMessage,
     configure_logging,
-    load_bot_token,
+    load_seeder_bot_token,
     make_slack_client,
     persona,
 )
@@ -150,10 +150,10 @@ def seed_all(
 ) -> dict[str, int]:
     """Seed all packs for a given tenant. Returns counts dict.
 
-    Raises RuntimeError on hard failures (missing bot token, required
+    Raises RuntimeError on hard failures (missing seeder token, required
     channels missing, Slack API errors that aren't rate limits).
     """
-    bot_token = load_bot_token(tenant_id, region=region)
+    bot_token = load_seeder_bot_token()
     client = make_slack_client(bot_token)
     state = SeederState(tenant_id)
 
@@ -206,13 +206,13 @@ def seed_all(
 
 def _main() -> int:
     parser = argparse.ArgumentParser(
-        description="Seed a AgentCore Reference test-env Slack workspace with realistic history.",
+        description="Seed an Agent test-env Slack workspace with realistic history.",
     )
     parser.add_argument(
         "--tenant",
         required=True,
-        help="tenant_id (typically slack-<team_id>). Must have a bot token "
-        "in Secrets Manager at agentcore/tenants/<id>/slack/bot_token.",
+        help="tenant_id (typically slack-<team_id>); the separate seeder token "
+        "comes from SLACK_SEEDER_BOT_TOKEN.",
     )
     parser.add_argument(
         "--region",

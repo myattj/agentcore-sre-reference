@@ -20,9 +20,9 @@ type Props = {
 
 export default function BotPolicyEditor({ tenantId, initial, channels }: Props) {
   // `allow_all_bots` may be missing on legacy tenant rows — default to
-  // the new permissive posture when the field isn't set, matching the
+  // the conservative posture when the field isn't set, matching the
   // server-side ``BotPolicyConfigOut`` default.
-  const [allowAllBots, setAllowAllBots] = useState<boolean>(initial.allow_all_bots ?? true);
+  const [allowAllBots, setAllowAllBots] = useState<boolean>(initial.allow_all_bots ?? false);
   const [trustedBotIds, setTrustedBotIds] = useState<string[]>(initial.trusted_bot_ids);
   const [openChannels, setOpenChannels] = useState<string[]>(initial.open_channels);
   const [newBotId, setNewBotId] = useState("");
@@ -97,11 +97,11 @@ export default function BotPolicyEditor({ tenantId, initial, channels }: Props) 
           className="mt-1 h-4 w-4 cursor-pointer rounded border-[color:var(--border)] text-[color:var(--accent)] focus:ring-[color:var(--accent)]"
         />
         <div className="min-w-0 flex-1">
-          <div className="text-sm font-medium">Allow all bots (default)</div>
+          <div className="text-sm font-medium">Allow all bots (high trust)</div>
           <div className="text-xs text-[color:var(--muted)]">
             PagerDuty, Datadog, and any other bot can @mention your
-            agent to trigger auto-triage. Turn this off to use the
-            granular trusted-bot / open-channel whitelist below.
+            agent to trigger model spend and enabled tools. Prefer the
+            trusted-bot or open-channel allowlists below.
           </div>
         </div>
       </label>
@@ -125,6 +125,7 @@ export default function BotPolicyEditor({ tenantId, initial, channels }: Props) 
               <li key={id} className="flex items-center justify-between px-4 py-2.5">
                 <code className="font-mono text-sm">{id}</code>
                 <button
+                  aria-label={`Remove trusted bot ${id}`}
                   type="button"
                   onClick={() => removeBot(id)}
                   disabled={isPending}
@@ -138,6 +139,7 @@ export default function BotPolicyEditor({ tenantId, initial, channels }: Props) 
         ) : null}
         <div className="flex gap-2">
           <input
+            aria-label="Trusted Slack bot ID"
             type="text"
             value={newBotId}
             onChange={(e) => setNewBotId(e.target.value)}
@@ -154,7 +156,7 @@ export default function BotPolicyEditor({ tenantId, initial, channels }: Props) 
             Add
           </button>
         </div>
-        <p className="mt-1.5 text-[10px] text-[color:var(--muted)]">
+        <p className="mt-1.5 text-xs text-[color:var(--muted)]">
           Find bot IDs in Slack&apos;s admin panel or by right-clicking a bot&apos;s
           profile.
         </p>
@@ -171,6 +173,7 @@ export default function BotPolicyEditor({ tenantId, initial, channels }: Props) 
               <li key={id} className="flex items-center justify-between px-4 py-2.5">
                 <span className="text-sm">{channelName(id)}</span>
                 <button
+                  aria-label={`Remove open channel ${channelName(id)}`}
                   type="button"
                   onClick={() => removeChannel(id)}
                   disabled={isPending}
@@ -185,6 +188,7 @@ export default function BotPolicyEditor({ tenantId, initial, channels }: Props) 
         <div className="flex gap-2">
           {channels.length > 0 ? (
             <select
+              aria-label="Open channel"
               value={selectedChannel}
               onChange={(e) => setSelectedChannel(e.target.value)}
               className="flex-1 rounded-lg border border-[color:var(--border)] bg-white p-2.5 text-sm shadow-sm focus:border-[color:var(--accent)] focus:outline-none focus:ring-2 focus:ring-[color:var(--accent)]/20"
@@ -201,6 +205,7 @@ export default function BotPolicyEditor({ tenantId, initial, channels }: Props) 
             </select>
           ) : (
             <input
+              aria-label="Open Slack channel ID"
               type="text"
               value={selectedChannel}
               onChange={(e) => setSelectedChannel(e.target.value)}
@@ -233,10 +238,12 @@ export default function BotPolicyEditor({ tenantId, initial, channels }: Props) 
       ) : null}
 
       {status.kind === "saved" ? (
-        <span className="text-sm text-green-600">Saved.</span>
+        <span aria-live="polite" className="text-sm text-green-600" role="status">
+          Saved.
+        </span>
       ) : null}
       {status.kind === "error" ? (
-        <span className="text-sm text-red-600">
+        <span aria-live="assertive" className="text-sm text-red-600" role="alert">
           Couldn&apos;t save: {status.message}
         </span>
       ) : null}

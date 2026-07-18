@@ -24,7 +24,7 @@ Is this bad enough to rollback?
 gh workflow run rollback-deploy.yml \
   --ref main \
   -f service=checkout-api \
-  -f target_sha=<previous-sha>
+  -f target_sha=PREVIOUS_SHA
 ```
 
 Monitor in the Actions tab. The workflow:

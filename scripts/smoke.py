@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""End-to-end smoke test for the agent-core onboarding flow.
+"""End-to-end smoke test for the Agent onboarding flow.
 
 What this validates (without touching real Slack):
   - All three services (agent, bridge, onboarding) start cleanly
   - Landing page renders with the correct install URL
-  - The welcome route handler verifies a session token, sets the
-    HttpOnly cookie, and redirects to the clean config URL
-  - Cookie-gated config/channels/integrations/done pages all render
+  - A bridge-minted session authenticates cookie-gated onboarding pages
+    without putting the bearer token in a URL or query string
+  - Cookie-gated onboarding and workspace settings pages all render
   - Bridge `/api/tenants/*` GET/PATCH happy paths work
   - Deep-merge: PATCH catalog.allowed_tools preserves catalog.tool_config
   - Negative paths: no auth → 401, bad token → 401, cross-tenant → 403
@@ -17,7 +17,7 @@ What this validates (without touching real Slack):
 
 What this does NOT validate (requires a human + real Slack):
   - The Slack consent screen click on slack.com (Slack requires it)
-  - A real @agent-core mention in a Slack channel
+  - A real @Agent mention in a Slack channel
   - Real `users.conversations` listing (bot must be invited by a human)
   These are covered by `bridge/tests/test_oauth_callback_redirect.py`
   (which mocks Slack) and a 30-second manual demo afterward.
@@ -25,12 +25,18 @@ What this does NOT validate (requires a human + real Slack):
 Usage:
   scripts/smoke.sh                   # full run (recommended)
   scripts/smoke.sh --no-services     # if you already started the 3 services
-  scripts/smoke.sh --keep-alive      # leave services running after success
+  scripts/smoke.sh --keep-alive      # leave only services running after success
   scripts/smoke.sh --no-agent        # skip the slow Bedrock call (Phase E)
   scripts/smoke.sh -v                # verbose: show all HTTP request/response
 
+Port overrides (useful when a local port is occupied):
+  SMOKE_AGENT_PORT=8180 \
+  SMOKE_BRIDGE_PORT=8100 \
+  SMOKE_ONBOARDING_PORT=3100 scripts/smoke.sh --no-agent
+
 Exit code is 0 on full success, 1 on any failure.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -58,9 +64,9 @@ ONBOARDING_DIR = REPO_ROOT / "onboarding"
 EXAMPLES_DIR = REPO_ROOT / "examples"
 LOG_DIR = REPO_ROOT / ".smoke-logs"
 
-AGENT_PORT = 8080
-BRIDGE_PORT = 8000
-ONBOARDING_PORT = 3000
+AGENT_PORT = int(os.environ.get("SMOKE_AGENT_PORT", "8080"))
+BRIDGE_PORT = int(os.environ.get("SMOKE_BRIDGE_PORT", "8000"))
+ONBOARDING_PORT = int(os.environ.get("SMOKE_ONBOARDING_PORT", "3000"))
 
 BRIDGE_URL = f"http://localhost:{BRIDGE_PORT}"
 ONBOARDING_URL = f"http://localhost:{ONBOARDING_PORT}"
@@ -78,6 +84,7 @@ SMOKE_WORKSPACE_ID = "T_SMOKETEST"
 # ----------------------------------------------------------------------------
 # Output helpers
 # ----------------------------------------------------------------------------
+
 
 class Color:
     GREEN = "\033[92m"
@@ -117,6 +124,7 @@ def grey(msg: str) -> None:
 # Result tracking
 # ----------------------------------------------------------------------------
 
+
 @dataclass
 class Results:
     passed: list[str] = field(default_factory=list)
@@ -141,28 +149,41 @@ class Results:
 
     def summary(self) -> None:
         print()
-        print(f"{Color.BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Color.RESET}")
+        print(
+            f"{Color.BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Color.RESET}"
+        )
         if not self.failed:
             print(
                 f"{Color.GREEN}{Color.BOLD}✓ {len(self.passed)} passed{Color.RESET}"
-                + (f"  {Color.YELLOW}({len(self.skipped)} skipped){Color.RESET}" if self.skipped else "")
+                + (
+                    f"  {Color.YELLOW}({len(self.skipped)} skipped){Color.RESET}"
+                    if self.skipped
+                    else ""
+                )
             )
         else:
             print(
                 f"{Color.RED}{Color.BOLD}✗ {len(self.failed)} failed{Color.RESET}"
                 f"  {Color.GREEN}{len(self.passed)} passed{Color.RESET}"
-                + (f"  {Color.YELLOW}{len(self.skipped)} skipped{Color.RESET}" if self.skipped else "")
+                + (
+                    f"  {Color.YELLOW}{len(self.skipped)} skipped{Color.RESET}"
+                    if self.skipped
+                    else ""
+                )
             )
             print()
             for name, detail in self.failed:
                 print(f"  {Color.RED}✗{Color.RESET} {name}")
                 print(f"    {Color.GREY}{detail}{Color.RESET}")
-        print(f"{Color.BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Color.RESET}")
+        print(
+            f"{Color.BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{Color.RESET}"
+        )
 
 
 # ----------------------------------------------------------------------------
 # Pre-flight
 # ----------------------------------------------------------------------------
+
 
 def preflight(no_services: bool) -> None:
     step("Pre-flight checks")
@@ -213,6 +234,7 @@ def port_in_use(port: int) -> bool:
 # Service lifecycle
 # ----------------------------------------------------------------------------
 
+
 @dataclass
 class Service:
     name: str
@@ -229,11 +251,14 @@ def start_services() -> list[Service]:
     agent_log = LOG_DIR / "agent.log"
     agent_env = os.environ.copy()
     agent_env["AGENT_LOCAL_STORES"] = "1"
-    info(f"agent: agentcore dev --logs (logs → {agent_log.relative_to(REPO_ROOT)})")
+    info(
+        f"agent: agentcore dev --logs --port {AGENT_PORT} "
+        f"(logs → {agent_log.relative_to(REPO_ROOT)})"
+    )
     # `--logs` puts agentcore dev in non-interactive mode (the CLI's
     # interactive Ink UI crashes when stdin isn't a TTY).
     agent_proc = subprocess.Popen(
-        ["agentcore", "dev", "--logs"],
+        ["agentcore", "dev", "--logs", "--port", str(AGENT_PORT)],
         cwd=str(AGENT_DIR),
         env=agent_env,
         stdin=subprocess.DEVNULL,
@@ -246,20 +271,28 @@ def start_services() -> list[Service]:
     # ----- Bridge ------------------------------------------------------------
     bridge_log = LOG_DIR / "bridge.log"
     bridge_env = os.environ.copy()
-    bridge_env.update({
-        "LOCAL_DEV": "1",
-        "LOCAL_AGENT_URL": AGENT_URL,
-        "BRIDGE_OAUTH_STATE_SECRET": SHARED_SECRET,
-        "ONBOARDING_BASE_URL": ONBOARDING_URL,
-        # Slack creds aren't needed because we don't exercise OAuth from
-        # this script — but uvicorn imports the bridge module which is
-        # tolerant of them being unset (only the install/callback paths
-        # actually read them).
-    })
-    info(f"bridge: uvicorn bridge.main:app --port {BRIDGE_PORT} (logs → {bridge_log.relative_to(REPO_ROOT)})")
+    bridge_env.update(
+        {
+            "LOCAL_DEV": "1",
+            "LOCAL_AGENT_URL": AGENT_URL,
+            "BRIDGE_OAUTH_STATE_SECRET": SHARED_SECRET,
+            "ONBOARDING_BASE_URL": ONBOARDING_URL,
+            # Slack creds aren't needed because we don't exercise OAuth from
+            # this script — but uvicorn imports the bridge module which is
+            # tolerant of them being unset (only the install/callback paths
+            # actually read them).
+        }
+    )
+    info(
+        f"bridge: uvicorn bridge.main:app --port {BRIDGE_PORT} (logs → {bridge_log.relative_to(REPO_ROOT)})"
+    )
     bridge_proc = subprocess.Popen(
-        [str(BRIDGE_DIR / ".venv" / "bin" / "uvicorn"),
-         "bridge.main:app", "--port", str(BRIDGE_PORT)],
+        [
+            str(BRIDGE_DIR / ".venv" / "bin" / "uvicorn"),
+            "bridge.main:app",
+            "--port",
+            str(BRIDGE_PORT),
+        ],
         cwd=str(BRIDGE_DIR),
         env=bridge_env,
         stdout=open(bridge_log, "wb"),
@@ -271,14 +304,16 @@ def start_services() -> list[Service]:
     # ----- Onboarding --------------------------------------------------------
     onboarding_log = LOG_DIR / "onboarding.log"
     onboarding_env = os.environ.copy()
-    onboarding_env.update({
-        "BRIDGE_URL": BRIDGE_URL,
-        "BRIDGE_OAUTH_STATE_SECRET": SHARED_SECRET,
-        "NEXT_PUBLIC_BRIDGE_INSTALL_URL": f"{BRIDGE_URL}/slack/install",
-        "PORT": str(ONBOARDING_PORT),
-        # Disable telemetry so we don't get the prompt on first run.
-        "NEXT_TELEMETRY_DISABLED": "1",
-    })
+    onboarding_env.update(
+        {
+            "BRIDGE_URL": BRIDGE_URL,
+            "BRIDGE_OAUTH_STATE_SECRET": SHARED_SECRET,
+            "NEXT_PUBLIC_BRIDGE_INSTALL_URL": f"{BRIDGE_URL}/slack/install",
+            "PORT": str(ONBOARDING_PORT),
+            # Disable telemetry so we don't get the prompt on first run.
+            "NEXT_TELEMETRY_DISABLED": "1",
+        }
+    )
     info(f"onboarding: npm run dev (logs → {onboarding_log.relative_to(REPO_ROOT)})")
     onboarding_proc = subprocess.Popen(
         ["npm", "run", "dev"],
@@ -355,7 +390,16 @@ def stop_services(services: list[Service]) -> None:
 # Test fixtures (synthetic OAuth — no real Slack)
 # ----------------------------------------------------------------------------
 
-def seed_test_tenant() -> None:
+
+@dataclass(frozen=True)
+class FixtureSnapshot:
+    """Exact pre-smoke contents, used to leave the worktree unchanged."""
+
+    tenant_text: str | None
+    mapping_text: str | None
+
+
+def seed_test_tenant() -> FixtureSnapshot:
     """Pre-create the test tenant on disk + workspace mapping.
 
     This is what the OAuth callback would do for a real install. We
@@ -364,6 +408,12 @@ def seed_test_tenant() -> None:
     by `bridge/tests/test_oauth_callback_redirect.py`.
     """
     tenant_path = EXAMPLES_DIR / "tenants" / f"{SMOKE_TENANT_ID}.json"
+    mapping_path = EXAMPLES_DIR / "workspace_to_tenant.json"
+    snapshot = FixtureSnapshot(
+        tenant_text=tenant_path.read_text() if tenant_path.exists() else None,
+        mapping_text=mapping_path.read_text() if mapping_path.exists() else None,
+    )
+
     config = {
         "tenant_id": SMOKE_TENANT_ID,
         "model_id": "global.anthropic.claude-sonnet-4-6",
@@ -378,33 +428,49 @@ def seed_test_tenant() -> None:
             "gateway_auth": None,
         },
         "memory": {
-            "triggers": {"message_count": 6, "token_count": 1000, "idle_timeout_seconds": 1800},
+            "triggers": {
+                "message_count": 6,
+                "token_count": 1000,
+                "idle_timeout_seconds": 1800,
+            },
             "namespace": f"tenants/{SMOKE_TENANT_ID}",
             "extraction": {"enabled": True, "rules": ["facts"]},
         },
         "heartbeat": {"busy_threshold": 1, "max_background_seconds": 3600},
     }
-    tenant_path.write_text(json.dumps(config, indent=2) + "\n")
+    try:
+        # Add the workspace mapping so /debug/message can route to this tenant.
+        mapping = (
+            json.loads(snapshot.mapping_text)
+            if snapshot.mapping_text is not None
+            else {}
+        )
+        mapping[SMOKE_WORKSPACE_ID] = SMOKE_TENANT_ID
 
-    # Add the workspace mapping so /debug/message can route to this tenant.
-    mapping_path = EXAMPLES_DIR / "workspace_to_tenant.json"
-    mapping = json.loads(mapping_path.read_text()) if mapping_path.exists() else {}
-    mapping[SMOKE_WORKSPACE_ID] = SMOKE_TENANT_ID
-    mapping_path.write_text(json.dumps(mapping, indent=2) + "\n")
+        tenant_path.write_text(json.dumps(config, indent=2) + "\n")
+        mapping_path.write_text(json.dumps(mapping, indent=2) + "\n")
+    except Exception:
+        restore_test_tenant(snapshot)
+        raise
 
     info(f"seeded test tenant {SMOKE_TENANT_ID} → {tenant_path.relative_to(REPO_ROOT)}")
     info(f"mapped workspace {SMOKE_WORKSPACE_ID} → {SMOKE_TENANT_ID}")
+    return snapshot
 
 
-def cleanup_test_tenant() -> None:
+def restore_test_tenant(snapshot: FixtureSnapshot) -> None:
+    """Restore fixtures byte-for-byte, including pre-existing smoke data."""
     tenant_path = EXAMPLES_DIR / "tenants" / f"{SMOKE_TENANT_ID}.json"
-    if tenant_path.exists():
-        tenant_path.unlink()
     mapping_path = EXAMPLES_DIR / "workspace_to_tenant.json"
-    if mapping_path.exists():
-        mapping = json.loads(mapping_path.read_text())
-        if mapping.pop(SMOKE_WORKSPACE_ID, None):
-            mapping_path.write_text(json.dumps(mapping, indent=2) + "\n")
+
+    for path, original_text in (
+        (tenant_path, snapshot.tenant_text),
+        (mapping_path, snapshot.mapping_text),
+    ):
+        if original_text is None:
+            path.unlink(missing_ok=True)
+        else:
+            path.write_text(original_text)
 
 
 def mint_session_token(tenant_id: str) -> str:
@@ -417,6 +483,7 @@ def mint_session_token(tenant_id: str) -> str:
     sys.path.insert(0, str(BRIDGE_DIR))
     try:
         from bridge.slack_oauth import make_session_token
+
         return make_session_token(tenant_id)
     finally:
         sys.path.pop(0)
@@ -426,14 +493,19 @@ def mint_session_token(tenant_id: str) -> str:
 # Test phases
 # ----------------------------------------------------------------------------
 
+
 def phase_landing(results: Results, verbose: bool) -> None:
     step("Phase A — landing + error pages")
     with httpx.Client(timeout=5.0, follow_redirects=False) as client:
         try:
             r = client.get(f"{ONBOARDING_URL}/")
             assert r.status_code == 200, f"got {r.status_code}"
-            assert "Add to Slack" in r.text, "landing page missing 'Add to Slack' button"
-            assert f"{BRIDGE_URL}/slack/install" in r.text, "install URL not embedded in landing page"
+            assert "Add to Slack" in r.text, (
+                "landing page missing 'Add to Slack' button"
+            )
+            assert f"{BRIDGE_URL}/slack/install" in r.text, (
+                "install URL not embedded in landing page"
+            )
             results.add_pass("landing page renders with install URL")
         except Exception as e:
             results.add_fail("landing page renders with install URL", str(e))
@@ -447,87 +519,104 @@ def phase_landing(results: Results, verbose: bool) -> None:
             results.add_fail("error page renders with reason slug", str(e))
 
 
-def phase_welcome_cookie(
+def _assert_token_not_in_request_url(request: httpx.Request, token: str) -> None:
+    """Prove the smoke flow never leaks its bearer token through a URL."""
+    requested_url = str(request.url)
+    query = request.url.query.decode("utf-8", errors="replace")
+    assert token not in requested_url, "session token leaked into requested URL"
+    assert token not in query, "session token leaked into requested query string"
+
+
+def phase_session_cookie(
     results: Results, verbose: bool
 ) -> tuple[str | None, httpx.Cookies | None]:
-    step("Phase B — synthetic welcome flow (no Slack)")
+    step("Phase B — synthetic authenticated session (no Slack)")
 
     token = mint_session_token(SMOKE_TENANT_ID)
     if verbose:
-        grey(f"minted token: {token[:32]}…")
+        grey("minted tenant session token (redacted)")
     results.add_pass("minted session token via bridge.slack_oauth.make_session_token")
 
-    with httpx.Client(timeout=5.0, follow_redirects=False) as client:
-        # 1. Welcome route handler should set the cookie + 302 redirect.
+    # Slack OAuth owns the real Set-Cookie response and is regression-tested in
+    # bridge/tests/test_oauth_callback_redirect.py. Here we inject the same
+    # cookie into the local HTTP client so the smoke test never sends a bearer
+    # through a URL.
+    with httpx.Client(
+        timeout=5.0,
+        follow_redirects=False,
+        cookies={"tenant_session": token},
+    ) as client:
         try:
             r = client.get(
-                f"{ONBOARDING_URL}/onboarding/{SMOKE_TENANT_ID}/welcome",
-                params={"t": token},
+                f"{ONBOARDING_URL}/onboarding/{SMOKE_TENANT_ID}/integrations"
             )
-            assert r.status_code in (302, 303, 307), f"expected redirect, got {r.status_code}"
-            location = r.headers.get("location", "")
-            assert location.endswith(f"/onboarding/{SMOKE_TENANT_ID}/config"), (
-                f"unexpected redirect target: {location}"
+            _assert_token_not_in_request_url(r.request, token)
+            assert r.status_code == 200, f"got {r.status_code}"
+            assert "Connect your data" in r.text
+            results.add_pass(
+                "session cookie authenticates without exposing bearer in URL"
             )
-            set_cookie = r.headers.get("set-cookie", "")
-            assert "tenant_session=" in set_cookie, "no tenant_session cookie set"
-            assert "HttpOnly" in set_cookie, "cookie not HttpOnly"
-            assert "SameSite=lax" in set_cookie or "SameSite=Lax" in set_cookie, (
-                f"cookie SameSite missing/wrong: {set_cookie}"
-            )
-            results.add_pass("welcome route sets HttpOnly cookie + redirects to clean URL")
         except Exception as e:
-            results.add_fail("welcome route sets HttpOnly cookie", str(e))
+            results.add_fail("cookie authentication without URL bearer", str(e))
             return token, None
 
-        cookies = r.cookies
+        cookies = client.cookies
         if verbose:
-            grey(f"got cookies: {dict(cookies)}")
+            grey("tenant_session cookie attached to local smoke client")
 
-    # 2. Use the cookie to fetch the config page.
+    # 1. Use the cookie to fetch the current onboarding pages.
     with httpx.Client(timeout=10.0, follow_redirects=False, cookies=cookies) as client:
-        try:
-            r = client.get(f"{ONBOARDING_URL}/onboarding/{SMOKE_TENANT_ID}/config")
-            assert r.status_code == 200, f"got {r.status_code}"
-            assert "Configure your agent" in r.text, "config page header missing"
-            assert "smoke-test bot" in r.text, "seeded system_prompt not rendered on config page"
-            results.add_pass("cookie-protected /config renders with seeded values")
-        except Exception as e:
-            results.add_fail("cookie-protected /config renders", str(e))
-
-        # 3. The other tenant pages should also render with the cookie.
         for slug, marker in [
-            ("integrations", "Coming soon"),
+            ("integrations", "Connect your data"),
             ("done", "You&#x27;re ready"),
         ]:
             try:
                 r = client.get(f"{ONBOARDING_URL}/onboarding/{SMOKE_TENANT_ID}/{slug}")
+                _assert_token_not_in_request_url(r.request, token)
                 assert r.status_code == 200
-                assert marker in r.text, f"page marker not found on {slug}: looking for {marker!r}"
+                assert marker in r.text, (
+                    f"page marker not found on {slug}: looking for {marker!r}"
+                )
                 results.add_pass(f"/onboarding/.../{slug} renders")
             except Exception as e:
                 results.add_fail(f"/onboarding/.../{slug} renders", str(e))
 
-        # Channels page renders, but in LOCAL_DEV the bot token is empty
-        # so it shows the empty-state hint OR an error banner — both are
-        # valid; the page should be 200 either way.
-        try:
-            r = client.get(f"{ONBOARDING_URL}/onboarding/{SMOKE_TENANT_ID}/channels")
-            assert r.status_code == 200
-            assert "Channels" in r.text
-            results.add_pass("/onboarding/.../channels renders (empty state OK in LOCAL_DEV)")
-        except Exception as e:
-            results.add_fail("/onboarding/.../channels renders", str(e))
+        # 2. Post-onboarding settings now live under /workspace/{tenantId}.
+        for slug, marker in [
+            ("", "Workspace overview"),
+            ("prompt", "System prompt"),
+            ("channels", "Channels"),
+            ("skills", "Skills &amp; Runbooks"),
+            ("automations", "Automations"),
+        ]:
+            path = f"/workspace/{SMOKE_TENANT_ID}" + (f"/{slug}" if slug else "")
+            try:
+                r = client.get(f"{ONBOARDING_URL}{path}")
+                _assert_token_not_in_request_url(r.request, token)
+                assert r.status_code == 200, f"got {r.status_code}"
+                assert marker in r.text, (
+                    f"page marker not found on {path}: looking for {marker!r}"
+                )
+                if slug == "prompt":
+                    assert "smoke-test bot" in r.text, (
+                        "seeded system_prompt not rendered"
+                    )
+                results.add_pass(f"{path} renders")
+            except Exception as e:
+                results.add_fail(f"{path} renders", str(e))
 
-    # 4. Without the cookie, /config should redirect to /error.
+    # 3. Without the cookie, workspace settings should redirect to /error.
     with httpx.Client(timeout=5.0, follow_redirects=False) as client:
         try:
-            r = client.get(f"{ONBOARDING_URL}/onboarding/{SMOKE_TENANT_ID}/config")
+            r = client.get(f"{ONBOARDING_URL}/workspace/{SMOKE_TENANT_ID}/prompt")
+            _assert_token_not_in_request_url(r.request, token)
             assert r.status_code in (302, 303, 307)
             assert "no_session" in r.headers.get("location", "")
-            results.add_pass("no-cookie /config redirects to /error?reason=no_session")
+            results.add_pass(
+                "no-cookie workspace page redirects to /error?reason=no_session"
+            )
         except Exception as e:
-            results.add_fail("no-cookie /config redirects", str(e))
+            results.add_fail("no-cookie workspace page redirects", str(e))
 
     return token, cookies
 
@@ -576,9 +665,13 @@ def phase_bridge_api(results: Results, token: str, verbose: bool) -> None:
             assert body["catalog"]["tool_config"] == {"echo": {"prefix": "[smoke]"}}, (
                 f"deep merge dropped tool_config: {body['catalog']}"
             )
-            results.add_pass("PATCH catalog.allowed_tools preserves catalog.tool_config (deep merge L2)")
+            results.add_pass(
+                "PATCH catalog.allowed_tools preserves catalog.tool_config (deep merge L2)"
+            )
         except Exception as e:
-            results.add_fail("PATCH catalog.allowed_tools preserves tool_config", str(e))
+            results.add_fail(
+                "PATCH catalog.allowed_tools preserves tool_config", str(e)
+            )
 
         # 422 on invalid type.
         try:
@@ -600,7 +693,9 @@ def phase_bridge_api(results: Results, token: str, verbose: bool) -> None:
                 json={"system_prompt": ""},
             )
             assert r.status_code == 422
-            results.add_pass("PATCH empty system_prompt → 422 (Bedrock validation guard)")
+            results.add_pass(
+                "PATCH empty system_prompt → 422 (Bedrock validation guard)"
+            )
         except Exception as e:
             results.add_fail("PATCH empty system_prompt → 422", str(e))
 
@@ -639,11 +734,11 @@ def phase_negative_paths(results: Results, verbose: bool) -> None:
         except Exception as e:
             results.add_fail("cross-tenant → 403", str(e))
 
-        # 4. Tampered cookie via /config (Next.js side).
+        # 4. Tampered cookie via workspace settings (Next.js side).
         with httpx.Client(timeout=5.0, follow_redirects=False) as nc:
             try:
                 r = nc.get(
-                    f"{ONBOARDING_URL}/onboarding/{SMOKE_TENANT_ID}/config",
+                    f"{ONBOARDING_URL}/workspace/{SMOKE_TENANT_ID}/prompt",
                     cookies={"tenant_session": "tampered.cookie.value.bad"},
                 )
                 assert r.status_code in (302, 303, 307)
@@ -710,7 +805,9 @@ def phase_agent_e2e(results: Results, token: str, verbose: bool) -> None:
         assert marker in reply_text.upper(), (
             f"marker {marker!r} not in agent reply: {reply_text!r}"
         )
-        results.add_pass("/debug/message reply contains marker — config flowed to live agent")
+        results.add_pass(
+            "/debug/message reply contains marker — config flowed to live agent"
+        )
     except Exception as e:
         results.add_fail("agent reply contains marker", str(e))
 
@@ -719,9 +816,10 @@ def phase_agent_e2e(results: Results, token: str, verbose: bool) -> None:
 # Main
 # ----------------------------------------------------------------------------
 
+
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="End-to-end smoke test for the agent-core onboarding flow.",
+        description="End-to-end smoke test for the Agent onboarding flow.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
@@ -732,7 +830,10 @@ def main() -> int:
     parser.add_argument(
         "--keep-alive",
         action="store_true",
-        help="Don't kill the services after a successful run (useful for poking around).",
+        help=(
+            "After a successful run, leave the three service processes running; "
+            "synthetic tenant files are still restored."
+        ),
     )
     parser.add_argument(
         "--no-agent",
@@ -740,20 +841,22 @@ def main() -> int:
         help="Skip the slow Phase E that calls real Bedrock via /debug/message.",
     )
     parser.add_argument(
-        "-v", "--verbose",
+        "-v",
+        "--verbose",
         action="store_true",
         help="Show extra debug output (cookies, agent reply text, etc.)",
     )
     args = parser.parse_args()
 
-    print(f"{Color.BOLD}agent-core onboarding smoke test{Color.RESET}")
+    print(f"{Color.BOLD}Agent onboarding smoke test{Color.RESET}")
     print(f"{Color.GREY}repo: {REPO_ROOT}{Color.RESET}")
 
     preflight(no_services=args.no_services)
 
     services: list[Service] = []
     results = Results()
-    seeded = False
+    fixture_snapshot: FixtureSnapshot | None = None
+    run_completed = False
 
     try:
         if not args.no_services:
@@ -762,11 +865,10 @@ def main() -> int:
         else:
             info("--no-services: assuming the three services are already running")
 
-        seed_test_tenant()
-        seeded = True
+        fixture_snapshot = seed_test_tenant()
 
         phase_landing(results, args.verbose)
-        token, cookies = phase_welcome_cookie(results, args.verbose)
+        token, cookies = phase_session_cookie(results, args.verbose)
 
         if token is not None:
             phase_bridge_api(results, token, args.verbose)
@@ -777,23 +879,38 @@ def main() -> int:
             else:
                 phase_agent_e2e(results, token, args.verbose)
         else:
-            results.add_skip("Phase C-E", "session token minting / welcome flow failed")
+            results.add_skip("Phase C-E", "session token minting / cookie flow failed")
+        run_completed = True
 
     finally:
+        if fixture_snapshot is not None:
+            try:
+                restore_test_tenant(fixture_snapshot)
+                info("restored test fixtures to their pre-smoke contents")
+            except Exception as e:
+                results.add_fail("restore test fixtures", str(e))
+
         results.summary()
 
-        if seeded and not results.failed and not args.keep_alive:
-            cleanup_test_tenant()
-            info(f"cleaned up test fixtures (passed)")
-        elif seeded and results.failed:
-            warn(f"left test fixtures in place for debugging: examples/tenants/{SMOKE_TENANT_ID}.json")
-
-        if services and not args.keep_alive:
+        keep_services = args.keep_alive and run_completed and not results.failed
+        if services and not keep_services:
             stop_services(services)
-        elif services and args.keep_alive:
-            info("--keep-alive: services left running. Manual cleanup:")
+        elif services:
+            info(
+                "--keep-alive: services left running; synthetic tenant files "
+                "were restored."
+            )
+            grey(f"  onboarding: {ONBOARDING_URL}")
+            grey(f"  bridge health: {BRIDGE_URL}/healthz")
+            grey(f"  agent ping: {AGENT_URL}/ping")
+            info("Manual cleanup:")
+            process_groups = " ".join(
+                f"-{os.getpgid(service.process.pid)}" for service in services
+            )
             for s in services:
-                grey(f"  kill -TERM -{os.getpgid(s.process.pid)}  # {s.name}")
+                grey(f"  {s.name}: process group {os.getpgid(s.process.pid)}")
+            grey(f"  kill -TERM -- {process_groups}")
+            grey(f"  sleep 5; kill -KILL -- {process_groups} 2>/dev/null || true")
 
     return 0 if not results.failed else 1
 

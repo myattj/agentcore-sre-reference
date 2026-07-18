@@ -4,13 +4,13 @@
  * Uses debounced auto-save — changes persist ~1.5s after the last edit.
  * No explicit save button needed.
  *
- * Tools and context assembly are intentionally NOT exposed here. All
+ * Tools and context assembly are intentionally NOT exposed here. Built-in
  * catalog tools are enabled by default, and permalink resolution /
  * thread history injection are both on by default. Users who want to
- * customize either can ask the bot directly in Slack (via
- * ``manage_config``) — the goal of this page is to stay as frictionless
- * as possible so most users can just accept the default prompt and
- * move on to connecting integrations.
+ * customize either can use ``manage_config`` from an operator-authorized
+ * Slack admin account. The goal of this page is to stay as frictionless as
+ * possible so most users can accept the default prompt and move on to
+ * connecting integrations.
  */
 "use client";
 
@@ -73,10 +73,12 @@ export default function ConfigForm({ tenantId, initial }: Props) {
       </div>
 
       <p className="rounded-lg border border-blue-100 bg-blue-50 p-3 text-xs text-blue-800">
-        <strong>Good to know:</strong> all catalog tools (search, docs,
-        escalation, cross-channel posting) are enabled by default, and
-        the bot already reads Slack thread history + permalinks when
-        relevant. You can tweak these by asking the bot in Slack — e.g.{" "}
+        <strong>Good to know:</strong> built-in tools such as team-history
+        search, escalation, and cross-channel posting are enabled by default.
+        Document tools appear after you connect a Gateway integration. The bot
+        also reads Slack thread history + permalinks when relevant. An
+        operator-authorized Slack admin can tweak built-in tools by asking
+        the bot — e.g.{" "}
         <code className="rounded bg-white px-1 font-mono text-[11px]">
           disable the escalate tool
         </code>
@@ -95,7 +97,11 @@ export default function ConfigForm({ tenantId, initial }: Props) {
 function StatusIndicator({ status }: { status: AutoSaveStatus }) {
   if (status.kind === "idle") return null;
   return (
-    <div className="text-xs">
+    <div
+      aria-live={status.kind === "error" ? "assertive" : "polite"}
+      className="text-xs"
+      role={status.kind === "error" ? "alert" : "status"}
+    >
       {status.kind === "saving" ? (
         <span className="text-[color:var(--muted)]">Saving...</span>
       ) : null}

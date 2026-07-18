@@ -15,8 +15,8 @@
  *
  * Secrets:
  *   Pre-create two Secrets Manager secrets (NOT managed by CDK):
- *     agentcore/services/slack  → {SLACK_CLIENT_ID, SLACK_CLIENT_SECRET, SLACK_SIGNING_SECRET}
- *     agentcore/services/bridge → {BRIDGE_OAUTH_STATE_SECRET, BRIDGE_GATEWAY_JWT_PRIVATE_KEY_PEM}
+ *     agentcore/services/slack  → {SLACK_CLIENT_ID, SLACK_CLIENT_SECRET, SLACK_SIGNING_SECRET, SLACK_APP_ID}
+ *     agentcore/services/bridge → {BRIDGE_OAUTH_STATE_SECRET, BRIDGE_GATEWAY_JWT_PRIVATE_KEY_PEM, ADMIN_SECRET}
  *   Pass their ARNs as context vars. ECS task definitions reference
  *   individual JSON keys via ecs.Secret.fromSecretsManager().
  */
@@ -49,22 +49,25 @@ export interface ServicesStackProps extends StackProps {
   /** Custom domain (e.g. "app.agentcore.dev"). Omit to use ALB DNS. */
   readonly domainName?: string;
 
-  /** Secrets Manager ARN: {SLACK_CLIENT_ID, SLACK_CLIENT_SECRET, SLACK_SIGNING_SECRET}. */
+  /** Secrets Manager ARN: {SLACK_CLIENT_ID, SLACK_CLIENT_SECRET, SLACK_SIGNING_SECRET, SLACK_APP_ID}. */
   readonly slackSecretsArn: string;
 
-  /** Secrets Manager ARN: {BRIDGE_OAUTH_STATE_SECRET, BRIDGE_GATEWAY_JWT_PRIVATE_KEY_PEM}. */
+  /** Secrets Manager ARN: {BRIDGE_OAUTH_STATE_SECRET, BRIDGE_GATEWAY_JWT_PRIVATE_KEY_PEM, ADMIN_SECRET}. */
   readonly bridgeSecretsArn: string;
 
   /** Managed policy ARN from DataStack for the bridge task role. */
   readonly bridgeDataAccessPolicyArn: string;
 
-  /** Managed policy ARN from DataStack for the onboarding task role. */
-  readonly onboardingDataAccessPolicyArn: string;
+  /** Optional GitHub App numeric ID used by the bridge integration. */
+  readonly githubAppId?: string;
+
+  /** Optional GitHub App slug used to build the onboarding install URL. */
+  readonly githubAppSlug?: string;
 
   /**
    * Secrets Manager ARN for `agentcore/services/sandbox` ({ CALLBACK_SECRET }).
    *
-   * Optional — omit for environments that haven't set up Phase B yet.
+   * Optional — omit for environments that have not enabled the PR sandbox.
    * When provided, injects `SANDBOX_CALLBACK_SECRET` into the bridge
    * container env, which the bridge's `/internal/sandbox_complete`
    * handler checks via `hmac.compare_digest`. The sandbox task def in
@@ -121,9 +124,9 @@ export class ServicesStack extends Stack {
     const bridgeSecret = secretsmanager.Secret.fromSecretCompleteArn(
       this, 'BridgeSecret', props.bridgeSecretsArn,
     );
-    // Phase B: shared bridge↔sandbox callback secret. Same secret read
+    // Shared bridge↔PR-sandbox callback secret. The same secret is read
     // by sandbox-stack.ts so both sides agree on the Bearer token.
-    // Omitted in environments that haven't set up Phase B yet — the
+    // Omitted in environments that haven't enabled the PR sandbox — the
     // bridge deploys without SANDBOX_CALLBACK_SECRET and the
     // /internal/sandbox_complete endpoint rejects all requests.
     const sandboxSecret = props.sandboxSecretsArn
@@ -141,6 +144,7 @@ export class ServicesStack extends Stack {
     const publicUrl = hasHttps
       ? `https://${props.domainName}`
       : `http://${alb.loadBalancerDnsName}`;
+    const slackInstallUrl = `${publicUrl}/slack/install`;
 
     // ------------------------------------------------------------------
     // Onboarding target group (defined first — it's the default)
@@ -205,8 +209,8 @@ export class ServicesStack extends Stack {
         action: elbv2.ListenerAction.forward([bridgeTg]),
       });
 
-      // Phase B: separate listener rule for /internal/* — kept distinct
-      // from BridgeRoutes because ALB caps a single path-pattern
+      // Keep /internal/* in a separate listener rule because ALB caps a
+      // single path-pattern
       // condition at 5 patterns and BridgeRoutes is already at the
       // limit.
       httpsListener.addAction('BridgeInternalRoutes', {
@@ -243,7 +247,7 @@ export class ServicesStack extends Stack {
         action: elbv2.ListenerAction.forward([bridgeTg]),
       });
 
-      // Phase B: separate listener rule for /internal/* — see HTTPS
+      // Keep /internal/* in a separate listener rule; see the HTTPS
       // branch above for the rationale (5-pattern ALB cap).
       httpListener.addAction('BridgeInternalRoutes', {
         priority: 11,
@@ -301,15 +305,9 @@ export class ServicesStack extends Stack {
     const onboardingTaskRole = new iam.Role(this, 'OnboardingTaskRole', {
       assumedBy: new iam.ServicePrincipal('ecs-tasks.amazonaws.com'),
       description:
-        'Onboarding Fargate task role. Currently no direct AWS access ' +
-        '(all data flows through bridge /api/*). Managed policy attached ' +
-        'for future direct DDB reads if SSR performance demands it.',
+        'Onboarding Fargate task role. No direct AWS data access; all tenant ' +
+        'and dashboard reads flow through the bridge API.',
     });
-    onboardingTaskRole.addManagedPolicy(
-      iam.ManagedPolicy.fromManagedPolicyArn(
-        this, 'OnboardingDataPolicy', props.onboardingDataAccessPolicyArn,
-      ),
-    );
 
     // ------------------------------------------------------------------
     // Docker image assets (CDK handles ECR repos automatically)
@@ -328,10 +326,13 @@ export class ServicesStack extends Stack {
       platform: ecr_assets.Platform.LINUX_AMD64,
       buildArgs: {
         NEXT_PUBLIC_BRIDGE_INSTALL_URL: hasHttps
-          ? `https://${props.domainName}/slack/install`
-          // Fallback for HTTP-only testing — will be wrong until domain is set,
-          // but avoids a hard failure during the first deploy.
-          : `http://localhost:8000/slack/install`,
+          ? slackInstallUrl
+          // The ALB DNS name is a deploy-time token and therefore cannot be
+          // part of a Docker asset's build args. A same-origin path resolves
+          // to that exact ALB URL in the browser without baking localhost into
+          // the production image. The task also receives the absolute URL
+          // below for runtime rendering.
+          : '/slack/install',
       },
     });
 
@@ -362,17 +363,18 @@ export class ServicesStack extends Stack {
         BRIDGE_PUBLIC_URL: publicUrl,
         SLACK_REDIRECT_URI: `${publicUrl}/slack/oauth/callback`,
         ONBOARDING_BASE_URL: publicUrl,
-        // GitHub App — identity only; the private key lives in Secrets
-        // Manager at agentcore/platform/github_app/private_key and is
-        // fetched at token-mint time by bridge/bridge/github_app.py.
-        // Task role already has secretsmanager:GetSecretValue on
-        // agentcore/platform/* via PlatformSecretsRead (data-stack.ts).
-        GITHUB_APP_ID: '123456',
+        // The ALB appends the real peer IP as the rightmost X-Forwarded-For
+        // value. Trust it only in this ALB-restricted reference topology.
+        DASHBOARD_TRUST_X_FORWARDED_FOR: '1',
+        // GitHub App identity only. The optional private key lives in
+        // Secrets Manager and is fetched at token-mint time.
+        ...(props.githubAppId ? { GITHUB_APP_ID: props.githubAppId } : {}),
       },
       secrets: {
         SLACK_CLIENT_ID: ecs.Secret.fromSecretsManager(slackSecret, 'SLACK_CLIENT_ID'),
         SLACK_CLIENT_SECRET: ecs.Secret.fromSecretsManager(slackSecret, 'SLACK_CLIENT_SECRET'),
         SLACK_SIGNING_SECRET: ecs.Secret.fromSecretsManager(slackSecret, 'SLACK_SIGNING_SECRET'),
+        SLACK_APP_ID: ecs.Secret.fromSecretsManager(slackSecret, 'SLACK_APP_ID'),
         BRIDGE_OAUTH_STATE_SECRET: ecs.Secret.fromSecretsManager(bridgeSecret, 'BRIDGE_OAUTH_STATE_SECRET'),
         BRIDGE_GATEWAY_JWT_PRIVATE_KEY_PEM: ecs.Secret.fromSecretsManager(bridgeSecret, 'BRIDGE_GATEWAY_JWT_PRIVATE_KEY_PEM'),
         // Shared secret for /ops operator dashboard routes. Guards the
@@ -380,9 +382,9 @@ export class ServicesStack extends Stack {
         // Same value is injected into the onboarding task below so the
         // /ops login page can validate the cookie.
         ADMIN_SECRET: ecs.Secret.fromSecretsManager(bridgeSecret, 'ADMIN_SECRET'),
-        // Phase B: shared with the sandbox container — guards
+        // Shared with the sandbox container — guards
         // POST /internal/sandbox_complete. Conditional: omitted when
-        // sandboxSecretsArn is not set (pre-Phase-B environments).
+        // the optional PR sandbox is not configured.
         ...(sandboxSecret ? {
           SANDBOX_CALLBACK_SECRET: ecs.Secret.fromSecretsManager(sandboxSecret, 'CALLBACK_SECRET'),
         } : {}),
@@ -426,17 +428,13 @@ export class ServicesStack extends Stack {
       environment: {
         NODE_ENV: 'production',
         BRIDGE_URL: publicUrl,
+        ONBOARDING_PUBLIC_URL: publicUrl,
         // NEXT_PUBLIC_* is inlined at build time for the client bundle,
         // but lib/env.ts also validates it at runtime on the server.
-        NEXT_PUBLIC_BRIDGE_INSTALL_URL: hasHttps
-          ? `https://${props.domainName}/slack/install`
-          : `http://localhost:8000/slack/install`,
-        // GitHub App slug — used by the onboarding UI to build the
-        // install link (github.com/apps/<slug>/installations/new). Must
-        // match the actual slug of the app on github.com or users hit
-        // a 404. The bridge + agent read GITHUB_APP_ID instead (set on
-        // their own task defs) — the slug is UI-only.
-        GITHUB_APP_SLUG: 'agent-example',
+        NEXT_PUBLIC_BRIDGE_INSTALL_URL: slackInstallUrl,
+        // GitHub App slug is UI-only. When omitted, the integration card
+        // explains that the optional GitHub integration is not configured.
+        ...(props.githubAppSlug ? { GITHUB_APP_SLUG: props.githubAppSlug } : {}),
       },
       secrets: {
         BRIDGE_OAUTH_STATE_SECRET: ecs.Secret.fromSecretsManager(bridgeSecret, 'BRIDGE_OAUTH_STATE_SECRET'),
@@ -492,7 +490,7 @@ export class ServicesStack extends Stack {
     });
 
     // ------------------------------------------------------------------
-    // Phase B exports — consumed by SandboxStack via Fn.importValue.
+    // Network exports consumed by SandboxStack via Fn.importValue.
     // SandboxStack rehydrates the cluster + VPC via fromXxxAttributes
     // so it can register a new task def in the same network without
     // taking a hard cross-stack reference (which would tangle the

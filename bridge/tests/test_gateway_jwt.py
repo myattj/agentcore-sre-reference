@@ -1,4 +1,4 @@
-"""Tests for the AgentCore Gateway JWT issuer + JWKS surface (week 4 chunk A).
+"""Tests for the AgentCore Gateway JWT issuer and JWKS surface.
 
 Covers:
   - mint_token / verify_token roundtrip with the LOCAL_DEV ephemeral key

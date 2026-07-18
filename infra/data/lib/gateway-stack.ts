@@ -145,8 +145,8 @@ export class GatewayStack extends Stack {
         BRIDGE_JWKS_URL: `${stripTrailingSlash(props.bridgePublicUrl)}/jwks.json`,
         GATEWAY_JWT_AUDIENCE: 'agentcore-gateway',
         GATEWAY_JWT_ISSUER: stripTrailingSlash(props.gatewayJwtIssuer),
-        // Default delimiter — chunk D smoke test will confirm this matches
-        // what AgentCore Gateway uses to namespace tools per target.
+        // Default delimiter used by AgentCore Gateway to namespace tools
+        // per target.
         // Override here without redeploying the Lambda code.
         INTERCEPTOR_TARGET_DELIMITER: '___',
       },
@@ -162,7 +162,7 @@ export class GatewayStack extends Stack {
     // gateway execution roles.
     //
     // We don't ALSO grant credentialProvider read perms here — those go
-    // on a SEPARATE role attached at target creation time (chunk D),
+    // on a SEPARATE role attached when each target is created,
     // because credential providers are per-tenant and we want a tight
     // blast radius if one is misconfigured.
     this.gatewayRole = new Role(this, 'AgentCoreGatewayRole', {
@@ -171,7 +171,7 @@ export class GatewayStack extends Stack {
       description:
         'Assumed by the shared AgentCore Gateway. Grants lambda:InvokeFunction ' +
         'on the interceptor only. Per-target credential provider access is ' +
-        'attached separately by chunk D.',
+        'attached separately for each target.',
       inlinePolicies: {
         InvokeInterceptor: new PolicyDocument({
           statements: [
@@ -182,30 +182,52 @@ export class GatewayStack extends Stack {
             }),
           ],
         }),
-        // The Gateway needs GetWorkloadAccessToken to authenticate with
-        // credential providers (e.g. to fetch the Datadog API key stored
-        // in the ApiKeyCredentialProvider). Without this, every tool call
-        // through the Gateway fails with AccessDenied.
-        // The Gateway needs these permissions to authenticate with
-        // credential providers, fetch stored API keys, and read the
-        // underlying secrets when making outbound calls to targets.
+        // The Gateway needs these permissions to authenticate with API-key
+        // credential providers and read only their AgentCore Identity-managed
+        // backing secrets. Never widen the Secrets Manager resource to
+        // `secret:*`: that would expose tenant Slack tokens and platform keys.
         AgentCoreAndSecretsAccess: new PolicyDocument({
           statements: [
             new PolicyStatement({
               effect: Effect.ALLOW,
-              actions: [
-                'bedrock-agentcore:GetWorkloadAccessToken',
-                'bedrock-agentcore:GetResourceApiKey',
+              actions: ['bedrock-agentcore:GetWorkloadAccessToken'],
+              resources: [
+                `arn:aws:bedrock-agentcore:${this.region}:${this.account}:` +
+                  'workload-identity-directory/default',
+                `arn:aws:bedrock-agentcore:${this.region}:${this.account}:` +
+                  'workload-identity-directory/default/workload-identity/*',
               ],
-              resources: ['*'],
+            }),
+            new PolicyStatement({
+              effect: Effect.ALLOW,
+              actions: ['bedrock-agentcore:GetResourceApiKey'],
+              // AgentCore's current documentation uses `api-key`, while some
+              // control-plane responses use `apikeycredentialprovider`. Scope
+              // both shapes to this account's default token vault rather than
+              // falling back to an account-wide `*` resource.
+              resources: [
+                `arn:aws:bedrock-agentcore:${this.region}:${this.account}:` +
+                  'workload-identity-directory/default',
+                `arn:aws:bedrock-agentcore:${this.region}:${this.account}:` +
+                  'workload-identity-directory/default/workload-identity/*',
+                `arn:aws:bedrock-agentcore:${this.region}:${this.account}:` +
+                  'token-vault/default',
+                `arn:aws:bedrock-agentcore:${this.region}:${this.account}:` +
+                  'token-vault/default/api-key/*',
+                `arn:aws:bedrock-agentcore:${this.region}:${this.account}:` +
+                  'token-vault/default/apikeycredentialprovider/*',
+              ],
             }),
             new PolicyStatement({
               effect: Effect.ALLOW,
               actions: ['secretsmanager:GetSecretValue'],
-              // Scoped to the credential provider secrets created by
-              // CreateApiKeyCredentialProvider. These live under an
-              // AgentCore-managed prefix, not our agentcore/tenants/* prefix.
-              resources: [`arn:aws:secretsmanager:${this.region}:${this.account}:secret:*`],
+              // Prefix documented by AgentCore Identity for API-key providers.
+              // The suffix wildcard accounts for Secrets Manager's generated
+              // six-character ARN suffix.
+              resources: [
+                `arn:aws:secretsmanager:${this.region}:${this.account}:` +
+                  'secret:bedrock-agentcore-identity!default/apikey/*-*',
+              ],
             }),
           ],
         }),

@@ -2,12 +2,12 @@
  * GitHub App install card — the codebase-access entry point.
  *
  * Distinct from `GitHubForm` (the PAT-based BYO integration). This card
- * drives the AgentCore Reference GitHub App install flow:
+ * drives the Agent GitHub App install flow:
  *
  *   1. User clicks "Install on GitHub"
  *   2. Link sends them to github.com/apps/{slug}/installations/new with
- *      `state=<session_cookie>` so the post-install redirect back to our
- *      /github/installed route handler can verify the session
+ *      a short-lived, session-bound CSRF state. The session bearer itself is
+ *      never sent to GitHub.
  *   3. That handler POSTs to the bridge's warm-start endpoint and
  *      redirects back here with ?github=connected&repo=...
  *   4. On re-render, this card reads the tenant config and shows the
@@ -26,13 +26,13 @@ import type { CodebasesConfig } from "@/lib/types";
 export function GitHubAppCard({
   codebases,
   appSlug,
-  sessionToken,
+  installState,
 }: {
   codebases: CodebasesConfig | undefined;
   /** From `getGitHubAppSlug()` — null when unset. */
   appSlug: string | null;
-  /** The session cookie value — passed as `state` in the install URL. */
-  sessionToken: string;
+  /** Purpose-specific, short-lived state bound to the current session. */
+  installState: string;
 }) {
   const connected = codebases?.enabled === true;
   const defaultRepo = codebases?.default_repo ?? null;
@@ -108,18 +108,17 @@ export function GitHubAppCard({
     );
   }
 
-  // Fresh install — link out to github.com. No client-side JS needed.
-  // `state` is the session cookie, round-tripped via GitHub and verified
-  // on the /github/installed route handler.
-  const installUrl = `https://github.com/apps/${encodeURIComponent(appSlug)}/installations/new?state=${encodeURIComponent(sessionToken)}`;
+  // Fresh install — link out to github.com. `state` is a dedicated signed
+  // nonce, not the tenant session bearer.
+  const installUrl = `https://github.com/apps/${encodeURIComponent(appSlug)}/installations/new?state=${encodeURIComponent(installState)}`;
 
   return (
     <div className="rounded-lg border border-[color:var(--border)] bg-white p-5">
       <h3 className="mb-1 font-semibold">GitHub App (Codebase access)</h3>
       <p className="mb-3 text-xs text-[color:var(--muted)]">
-        Install the AgentCore Reference app on your GitHub org so the bot can read code
-        across your repos. We&rsquo;ll pick your most-active repo as the
-        default and learn the rest from context.
+        Install the Agent app on your GitHub org so the bot can read code
+        across your repos. The deployment operator must approve the resulting
+        installation ID for this tenant before repository access activates.
       </p>
       <a
         href={installUrl}

@@ -1,6 +1,9 @@
 # North star
 
-> Where AgentCore Reference is going, beyond the "first paying customer onboards in <5 min" KPI in [`BUILD_PLAN.md`](./BUILD_PLAN.md). This is direction, not a delivery schedule — initiatives are grouped by pillar, not sequenced. Dependencies are called out inline.
+> [!NOTE]
+> Archived product vision. This document preserves the direction Agent explored before the project was archived. Its checklists are historical, not a current roadmap or implementation-status source.
+
+> Where Agent was headed beyond its original "first customer onboards in under five minutes" goal. This is direction, not a delivery schedule — initiatives are grouped by pillar, not sequenced. Dependencies are called out inline.
 
 ## The feeling we're chasing
 
@@ -23,7 +26,7 @@ Three shorthand tests:
 - **Customer-owned MCPs / integrations with their own OAuth.** Customers bring their own systems (internal tools, private SaaS) by registering an MCP endpoint and supplying OAuth credentials that live under *their* identity, not ours. Requires: a per-tenant credential vault, an OAuth broker flow in the onboarding/admin UI, and Gateway target provisioning keyed to the tenant's credentials.
 - **Skill sharing & templates.** Once the authoring flow works, let tenants fork skills from a public template gallery. Reinforces the "magic out of the box" feeling for new tenants and creates a long-tail library without us authoring every skill.
 
-**Dependencies:** the customer-OAuth story blocks on a clean credential model — today's single-credential-provider Gateway gotcha (see `reference_agentcore_gateway_gotchas.md`) needs an answer before this scales. Skills portal can ship against the existing `skills[]` schema without waiting.
+**Dependencies:** the customer-OAuth story blocks on a clean credential model — the single-credential-provider Gateway constraint documented in [SECURITY.md](./SECURITY.md) needs an answer before this scales. Skills portal can ship against the existing `skills[]` schema without waiting.
 
 ---
 
@@ -34,7 +37,7 @@ Three shorthand tests:
 ### Initiatives
 - **Unified admin portal per tenant.** One surface that absorbs the current onboarding flow and extends it with: configuration editing, tool/skill management, memory inspection, user/permission management, audit log search, usage & cost, and billing.
 - **Self-serve config for everything in `TenantConfig`.** Anything that today requires editing a DynamoDB row should be editable in the portal. The three-place tenant-config rule (CLAUDE.md gotcha #14) becomes load-bearing — need a strategy that doesn't make every new field a three-way merge exercise.
-- **Pricing and billing.** Plans, metering (Bedrock spend + tool calls + skills invoked), invoices, payment method, usage alerts. Ties directly into the cost-cap work already in flight (see `BUILD_PLAN.md` post-week-7).
+- **Pricing and billing.** Plans, metering (Bedrock spend + tool calls + skills invoked), invoices, payment method, usage alerts. Builds on the cost-cap implementation already present in the runtime.
 - **Tenant admin observability.** A dashboard the *customer's* admin team uses to see their own bot's health: conversations per channel, top skills fired, tool success rates, memory growth, cost burn vs. cap, recent errors. This is the customer-side half of Pillar 4.
 - **Role-based access within a tenant.** At minimum: admins (edit config, see billing) vs. viewers (see usage, can't change anything). Critical before billing is exposed.
 
@@ -44,7 +47,7 @@ Three shorthand tests:
 
 ## Pillar 3 — Dynamic dashboards hosted by the bot
 
-**Why this pillar matters:** this is one of the biggest "magic" levers. Instead of posting a table in Slack, the bot can say *"here's a live dashboard: example.com/d/abc123"* and the user gets an interactive visualization of whatever they asked about. This is the single feature most likely to produce "wait, it can do that?" moments.
+**Why this pillar matters:** this is one of the biggest "magic" levers. Instead of posting a table in Slack, the bot can say *"here's a live dashboard: your-host.example/d/abc123"* and the user gets an interactive visualization of whatever they asked about. This is the single feature most likely to produce "wait, it can do that?" moments.
 
 ### Initiatives
 - **Ephemeral dashboard hosting.** The bot can generate a small web page (chart, table, timeline, map) from a tool result and host it at a short-lived per-tenant URL. Think "render this query result as a chart I can share."
@@ -72,12 +75,12 @@ Three shorthand tests:
 
 ## Pillar 5 — Brand, marketing, and UX polish
 
-**Why this pillar matters:** the product currently looks like an internal tool. For a company called AgentCore Reference at `example.com`, the surface needs to match the ambition. First impressions determine whether anyone even reaches the onboarding flow.
+**Why this pillar matters:** the product currently looks like an internal tool. For a project called Agent at `agent.example.com`, the surface needs to match the ambition. First impressions determine whether anyone even reaches the onboarding flow.
 
 ### Initiatives
-- **Landing page at example.com.** Marketing surface: what it does, the three core patterns (alert triage / team Q&A / workflow automation), pricing, social proof, install CTA. Currently `example.com` serves the app.
+- **Landing page at agent.example.com.** Marketing surface: what it does, the three core patterns (alert triage / team Q&A / workflow automation), pricing, social proof, install CTA. At the time, `agent.example.com` served the app.
 - **New brand system.** Logo, color palette, typography, voice. Applied across marketing site, onboarding, admin portal, Slack messages. This is a precondition for the UX cleanup — don't redesign onboarding twice.
-- **UX cleanup pass.** Across onboarding (`onboarding/`) and the eventual admin portal. Focus: fewer steps, clearer defaults, less "configure everything before you can try it" and more "try it, then configure what's wrong." The zero-config onboarding work (commit `df13d3a`) is the right direction; extend it.
+- **UX cleanup pass.** Across onboarding (`onboarding/`) and the eventual admin portal. Focus: fewer steps, clearer defaults, less "configure everything before you can try it" and more "try it, then configure what's wrong." The repository's short, default-first onboarding flow points in that direction.
 - **In-product moments of delight.** Small magic: the bot introduces itself contextually, first-run surfaces the most-likely-useful skill, empty states teach instead of blocking.
 
 **Dependencies:** brand system is upstream of both the landing page and the UX pass. Picking a brand system can happen in parallel with everything else, but should land before we invest heavily in admin portal visual design.
@@ -114,14 +117,17 @@ These don't belong to one pillar but block several:
 
 - Not a commitment — items here are direction, not scope.
 - Not ordered — pillars are parallel tracks with their own dependency chains.
-- Not a replacement for `BUILD_PLAN.md`, which covers the near-term path to the first-customer KPI. That KPI still comes first.
-- Not exhaustive — it captures the shape of the direction, not every feature we'll build along the way.
+- Not a delivery roadmap. The project is archived, and these ideas are preserved to explain the product thinking rather than imply future work.
+- Not exhaustive — it captures the shape of the direction, not every idea considered during the experiment.
 
 ---
 
-## TODO list (flat view of the dump)
+## Idea inventory
 
-A checklist form of the original brain-dump, grouped by pillar. Use this as a working surface — the pillars above are the *why*, this is the *what*. Nothing here is scheduled; check items off as they land.
+A checklist form of the original product exploration, grouped by pillar. The
+pillars above are the *why*; this is the *what might have followed*. Nothing
+here is scheduled, and unchecked boxes are historical possibilities rather
+than promises.
 
 ### Skills & extensibility
 - [ ] Skills portal UI — plain-language skill authoring, lives in admin portal
@@ -170,8 +176,8 @@ A checklist form of the original brain-dump, grouped by pillar. Use this as a wo
 - [ ] New color palette
 - [ ] Typography + voice guidelines
 - [ ] Brand system applied across marketing, onboarding, admin portal, Slack messages
-- [ ] Landing page at `example.com` — what it does, three patterns, pricing, install CTA
-- [ ] Move app off `example.com` root (currently serves the app, not marketing)
+- [ ] Landing page at `agent.example.com` — what it does, three patterns, pricing, install CTA
+- [ ] Move app off the `agent.example.com` root (the app occupied the marketing URL)
 - [ ] UX cleanup pass on onboarding
 - [ ] UX cleanup pass on admin portal (once it exists)
 - [ ] First-run "magic moment" — surface most-likely-useful skill immediately

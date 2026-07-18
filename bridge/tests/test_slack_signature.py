@@ -111,9 +111,14 @@ async def test_missing_headers_raises():
         await adapter.verify_signature(request)
 
 
+def test_no_signing_secret_fails_closed_by_default():
+    with pytest.raises(RuntimeError, match="SLACK_SIGNING_SECRET"):
+        SlackAdapter(signing_secret=None)
+
+
 @pytest.mark.asyncio
-async def test_no_signing_secret_skips_verification():
-    """LOCAL_DEV path: signing_secret unset → skip silently."""
+async def test_explicit_local_dev_can_skip_signature_verification():
+    """The unsigned path exists only behind an explicit LOCAL_DEV opt-in."""
     request = FakeRequest(body=b"{}", headers={})
-    adapter = SlackAdapter(signing_secret=None)
+    adapter = SlackAdapter(signing_secret=None, allow_unsigned_requests=True)
     await adapter.verify_signature(request)  # no raise

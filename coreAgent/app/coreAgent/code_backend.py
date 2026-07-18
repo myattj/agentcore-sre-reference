@@ -48,11 +48,10 @@ from __future__ import annotations
 import base64
 import json
 import logging
-import os
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Protocol
 
 log = logging.getLogger(__name__)
@@ -188,7 +187,7 @@ class GithubBackend:
             "Authorization": f"Bearer {self._token_provider()}",
             "Accept": "application/vnd.github+json",
             "X-GitHub-Api-Version": "2022-11-28",
-            "User-Agent": "AgentCore Reference-Agent/1.0",
+            "User-Agent": "Agent-Runtime/1.0",
         }
 
     def _diagnose_404(self, url: str) -> str:
@@ -220,7 +219,7 @@ class GithubBackend:
         except urllib.error.HTTPError:
             # Repo itself returns non-200 → genuine access problem
             return (
-                f"Cannot access repo {repo}. Either the AgentCore Reference GitHub "
+                f"Cannot access repo {repo}. Either the Agent GitHub "
                 "App isn't installed on it, the repo isn't in the App's "
                 "selected-repositories list, or the repo was "
                 "deleted/renamed."

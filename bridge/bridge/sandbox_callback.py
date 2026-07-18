@@ -1,6 +1,6 @@
 """Bridge handler for ``POST /internal/sandbox_complete``.
 
-Phase B: the Fargate sandbox container POSTs here when its PR-writing
+The PR sandbox container POSTs here when its code-change task
 work finishes (success or error). The bridge:
 
   1. Verifies the ``Authorization: Bearer <SANDBOX_CALLBACK_SECRET>``

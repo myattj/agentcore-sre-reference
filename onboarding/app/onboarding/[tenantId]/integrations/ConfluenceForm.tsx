@@ -45,7 +45,7 @@ export function ConfluenceForm({ tenantId, initialConnected }: { tenantId: strin
         <label className="block text-xs font-medium">API Token<input name="apiToken" type="password" autoComplete="off" placeholder="Atlassian API token" className="mt-1 block w-full rounded border border-[color:var(--border)] px-2.5 py-1.5 text-sm" required /></label>
         <label className="block text-xs font-medium">Domain<input name="domain" type="text" autoComplete="off" placeholder="mycompany (for mycompany.atlassian.net)" className="mt-1 block w-full rounded border border-[color:var(--border)] px-2.5 py-1.5 text-sm" required /></label>
       </div>
-      {result && !result.ok && <p className="mt-2 text-xs text-red-600">{result.error}</p>}
+      {result && !result.ok && <p className="mt-2 text-xs text-red-600" role="alert">{result.error}</p>}
       <button type="submit" disabled={isPending} className="mt-3 rounded-full bg-[color:var(--accent)] px-4 py-1.5 text-xs font-medium text-white hover:bg-[color:var(--accent-hover)] disabled:opacity-50">{isPending ? "Connecting..." : "Connect"}</button>
     </form>
   );

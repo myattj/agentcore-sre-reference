@@ -13,19 +13,14 @@ production bridge has no debug route at all — zero attack surface.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
+import threading
 import time
 
-# Configure root logger so our app-level log.warning/info calls
-# actually appear in container stdout (uvicorn only configures its own).
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(levelname)s:%(name)s: %(message)s",
-)
-
-from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Request, Response
 
 from .adapters.debug import DebugAdapter
 from .adapters.slack import SlackAdapter, SlackSignatureError
@@ -34,6 +29,7 @@ from .async_dispatcher import dispatch_async
 from .client import AgentCoreClient
 from .dedup import is_duplicate
 from .reaction_feedback import classify_reaction, dispatch_reaction_feedback
+from .rate_limit import TokenBucketRateLimiter
 from .gateway_jwt import get_jwks, get_oidc_configuration
 from .sandbox_callback import handle_sandbox_complete, verify_callback_auth
 from .sandbox_progress import handle_sandbox_progress
@@ -48,6 +44,13 @@ from .slack_oauth import build_install_redirect, handle_oauth_callback
 from .tenant_resolver import resolve_tenant_id
 from .tenant_write import get_tenant_row
 
+# Configure root logger so our app-level log.warning/info calls
+# actually appear in container stdout (uvicorn only configures its own).
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(levelname)s:%(name)s: %(message)s",
+)
+
 log = logging.getLogger(__name__)
 
 # Slack app ID for self-message filtering. Set via env to avoid the bot
@@ -56,17 +59,46 @@ _SLACK_APP_ID = os.getenv("SLACK_APP_ID", "")
 
 LOCAL_DEV = os.getenv("LOCAL_DEV") == "1"
 
+
+def _bounded_int_env(name: str, default: int, *, minimum: int, maximum: int) -> int:
+    raw = os.getenv(name, "")
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        log.warning("Ignoring invalid %s=%r; using %d", name, raw, default)
+        return default
+    if not minimum <= value <= maximum:
+        log.warning("Ignoring out-of-range %s=%r; using %d", name, raw, default)
+        return default
+    return value
+
+
+_DASHBOARD_RATE_LIMIT = TokenBucketRateLimiter(
+    capacity=_bounded_int_env(
+        "DASHBOARD_READS_PER_MINUTE",
+        60,
+        minimum=1,
+        maximum=10_000,
+    )
+)
+_DASHBOARD_READ_SLOTS = threading.BoundedSemaphore(
+    _bounded_int_env("DASHBOARD_MAX_CONCURRENT_READS", 16, minimum=1, maximum=256)
+)
+
 # No CORS middleware — all /api/tenants/* callers are server-side Next.js
 # code in the onboarding service. The browser never talks to these routes
 # directly. Add FastAPI CORSMiddleware here if/when a client-side caller
 # (admin dashboard, etc.) needs direct access.
-app = FastAPI(title="coreAgent bridge")
+app = FastAPI(title="Agent bridge")
 
 app.include_router(api_router)
 
 slack = SlackAdapter(
     signing_secret=os.getenv("SLACK_SIGNING_SECRET"),
     bot_token=os.getenv("SLACK_BOT_TOKEN"),
+    allow_unsigned_requests=LOCAL_DEV,
 )
 
 client = AgentCoreClient(
@@ -102,14 +134,11 @@ def _get_bot_policy(tenant_id: str) -> dict:
 def _bot_allowed(policy: dict, bot_id: str, channel_id: str | None) -> bool:
     """Evaluate the four-tier bot policy. Returns True if the bot is allowed.
 
-    Tier 0 (``allow_all_bots``) is the "magical default" for new tenants:
-    any bot can trigger the agent without explicit configuration, so
-    PagerDuty/Datadog alerts get auto-triaged. Missing-key defaults to
-    ``False`` so existing tenants that pre-date this field keep the
-    conservative posture until they explicitly opt in (their DDB row
-    simply doesn't have the key).
+    Tier 0 (``allow_all_bots``) is an explicit high-trust opt-in. Missing-key
+    defaults to ``False`` so new and legacy tenants remain humans-only until
+    an operator trusts a bot or opens a channel.
     """
-    # Tier 0: fully open — any bot allowed (new-tenant default)
+    # Tier 0: fully open — any bot allowed (explicit opt-in)
     if policy.get("allow_all_bots", False):
         return True
     # Tier 1: explicitly trusted bots
@@ -128,7 +157,7 @@ async def healthz() -> dict[str, str]:
 
 
 # ---------------------------------------------------------------------------
-# Phase B: sandbox container -> bridge callback
+# PR sandbox -> bridge callbacks
 # ---------------------------------------------------------------------------
 #
 # The Fargate sandbox container POSTs here when its propose_pr work
@@ -142,7 +171,7 @@ async def healthz() -> dict[str, str]:
 # up FastAPI. This handler is a thin auth + JSON shim.
 #
 # ALB routing: /internal/* is added to the bridge target group's
-# path-pattern listener rule in services-stack.ts (Phase B Step 2).
+# path-pattern listener rule in services-stack.ts.
 @app.post("/internal/sandbox_complete")
 async def sandbox_complete(request: Request) -> dict[str, object]:
     """Receive a completion notification from a Fargate sandbox task."""
@@ -173,6 +202,79 @@ async def sandbox_progress(request: Request) -> dict[str, object]:
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="payload must be a JSON object")
     return await handle_sandbox_progress(payload)
+
+
+# ---------------------------------------------------------------------------
+# Ephemeral dashboards — serve specs to the onboarding service
+# ---------------------------------------------------------------------------
+#
+# Unauthenticated by design — the token IS the access control (UUID,
+# unguessable). The onboarding Next.js app calls this server-side from
+# its /d/[token] route, which renders the dashboard with Recharts.
+@app.get("/internal/dashboard")
+async def get_dashboard(request: Request, response: Response) -> dict[str, object]:
+    """Return a dashboard spec using a bearer token kept out of access-log URLs."""
+    from .dashboard_store import (
+        DashboardStoreError,
+        get_dashboard_spec,
+        is_valid_dashboard_token,
+    )
+
+    token = request.headers.get("x-dashboard-token", "")
+    no_store_headers = {"Cache-Control": "no-store", "X-Robots-Tag": "noindex"}
+    if not is_valid_dashboard_token(token):
+        raise HTTPException(
+            status_code=404,
+            detail="dashboard not found or expired",
+            headers=no_store_headers,
+        )
+    # In the reference topology, the trusted ALB appends the real peer address
+    # to X-Forwarded-For. Reading the rightmost value prevents a caller-supplied
+    # prefix from choosing a fresh bucket. Other deployments use the socket peer
+    # unless they explicitly opt into the same trusted-proxy contract.
+    forwarded_for = (
+        request.headers.get("x-forwarded-for", "")
+        if os.getenv("DASHBOARD_TRUST_X_FORWARDED_FOR") == "1"
+        else ""
+    )
+    source = forwarded_for.rsplit(",", 1)[-1].strip()
+    if not source:
+        source = request.client.host if request.client else "unknown"
+    retry_after = _DASHBOARD_RATE_LIMIT.retry_after(source)
+    if retry_after is not None:
+        raise HTTPException(
+            status_code=429,
+            detail="dashboard request rate exceeded",
+            headers={**no_store_headers, "Retry-After": str(retry_after)},
+        )
+    if not _DASHBOARD_READ_SLOTS.acquire(blocking=False):
+        raise HTTPException(
+            status_code=429,
+            detail="dashboard service is busy",
+            headers={**no_store_headers, "Retry-After": "1"},
+        )
+    try:
+        # boto3 is synchronous. Keep its network I/O off the FastAPI event loop.
+        try:
+            spec = await asyncio.to_thread(get_dashboard_spec, token)
+        finally:
+            _DASHBOARD_READ_SLOTS.release()
+    except DashboardStoreError as exc:
+        log.error("get_dashboard: dashboard store unavailable: %s", exc)
+        raise HTTPException(
+            status_code=503,
+            detail="dashboard service temporarily unavailable",
+            headers={**no_store_headers, "Retry-After": "5"},
+        ) from exc
+    if spec is None:
+        raise HTTPException(
+            status_code=404,
+            detail="dashboard not found or expired",
+            headers=no_store_headers,
+        )
+    response.headers.update(no_store_headers)
+    response.headers["Referrer-Policy"] = "no-referrer"
+    return spec
 
 
 # OIDC discovery + JWKS endpoints for AgentCore Gateway's CUSTOM_JWT
@@ -248,6 +350,7 @@ async def slack_events(request: Request, background: BackgroundTasks):
         # The handler fetches the message from Slack and invokes the agent.
         event_with_team = dict(event)
         event_with_team["team_id"] = workspace_id
+        event_with_team["api_app_id"] = body.get("api_app_id", "")
         background.add_task(
             dispatch_reaction_feedback, slack, event_with_team, client,
             tenant_id, _SLACK_APP_ID,
@@ -400,10 +503,14 @@ async def slack_install():
 
 
 @app.get("/slack/oauth/callback")
-async def slack_oauth_callback(code: str = "", state: str = ""):
-    """OAuth callback: exchange `code` for a bot token, provision the
-    tenant, and return a placeholder onboarding page."""
-    return await handle_oauth_callback(code=code, state=state)
+async def slack_oauth_callback(request: Request, code: str = "", state: str = ""):
+    """Exchange `code` for a bot token, provision the tenant, and
+    redirect into the onboarding UI."""
+    return await handle_oauth_callback(
+        code=code,
+        state=state,
+        browser_nonce=request.cookies.get("slack_oauth_state", ""),
+    )
 
 
 # `/debug/message` is registered ONLY in LOCAL_DEV. Production builds

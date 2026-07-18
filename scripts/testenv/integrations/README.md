@@ -1,20 +1,72 @@
 # External integration seeders
 
-Link real Datadog / PagerDuty / Jira / Linear / Sentry accounts to the AgentCore Reference test env so you can drive the agent against real external APIs, not just seeded Slack content. This is the only way to exercise the BYO / AgentCore Gateway provisioning path end-to-end.
+Populate disposable Datadog, PagerDuty, Jira, Linear, or Sentry accounts with
+realistic Acme Data Co content that mirrors the Slack fixtures. PagerDuty,
+Jira, and Linear can also exercise their managed AgentCore Gateway connector
+before seeding. Sentry and Datadog are content-only.
 
-Each integration has:
+Datadog is intentionally different: its API needs both an API key and an
+application key, while a direct Gateway target supports one credential
+provider. The bridge rejects that unsafe two-secret connector shape. The
+Datadog seeder never sends credentials to the bridge and requires an explicit
+`--skip-connect` acknowledgement.
 
-1. **A seeder script** — `scripts/testenv/integrations/seed_<name>.py`
-2. **A bridge connect step** — the seeder POSTs your credentials to the bridge's `POST /api/tenants/{id}/integrations/<name>` route, which provisions a credential provider + Gateway target via AgentCore
-3. **A content seed step** — the seeder then calls the integration's own API to populate realistic Acme Data Co content that mirrors the Slack seed (same services, same incidents, same teams)
-
-> **Before you start:** make sure the bridge's Fargate task role has `GatewayControlPlaneProvisioning` and `GatewaySsmParametersRead` statements on its `AgentCoreBridgeDataAccess` managed policy. See `infra/data/lib/data-stack.ts` — if you redeployed the data stack after the Gateway IAM fix, you're good.
+> **Before using a managed connector:** make sure the bridge task role has the
+> Gateway provisioning permissions defined in `infra/data/lib/data-stack.ts`.
 
 ## Prerequisites
 
 - You've run the main bootstrap (`./scripts/testenv-bootstrap.sh --tenant slack-t0xxxxxxx`) successfully, so the test Slack workspace + tenant row already exist.
 - Your local AWS credentials can read + write Secrets Manager in the same account + region as the bridge (typically your dev profile).
-- Nothing is committed — credentials live only in Secrets Manager under `agentcore/testenv/<integration>`.
+- Credentials live only in Secrets Manager under `agentcore/testenv/<integration>`; never commit them.
+
+### History-safe secret helper
+
+Define this helper once in the shell where you run the seeders. It opens a
+mode-0600 temporary JSON file in your editor, validates the JSON, creates or
+rotates the named secret, and removes the file. Secret values never appear in
+the command line or shell history.
+
+```bash
+umask 077
+TESTENV_SECRET_FILE=
+cleanup_testenv_secret() {
+  if [ -n "$TESTENV_SECRET_FILE" ]; then
+    rm -f "$TESTENV_SECRET_FILE"
+  fi
+}
+trap cleanup_testenv_secret EXIT
+trap 'cleanup_testenv_secret; exit 130' HUP INT TERM
+
+store_testenv_secret() {
+  TESTENV_SECRET_NAME=$1
+  TESTENV_SECRET_FILE=$(mktemp)
+  "${EDITOR:-vi}" "$TESTENV_SECRET_FILE"
+  if ! python3 -m json.tool "$TESTENV_SECRET_FILE" >/dev/null; then
+    printf 'Secret file is not valid JSON. Nothing was uploaded.\n' >&2
+    rm -f "$TESTENV_SECRET_FILE"
+    TESTENV_SECRET_FILE=
+    return 1
+  fi
+  if aws secretsmanager describe-secret \
+      --secret-id "$TESTENV_SECRET_NAME" >/dev/null 2>&1; then
+    aws secretsmanager put-secret-value \
+      --secret-id "$TESTENV_SECRET_NAME" \
+      --secret-string "file://$TESTENV_SECRET_FILE"
+  else
+    aws secretsmanager create-secret \
+      --name "$TESTENV_SECRET_NAME" \
+      --secret-string "file://$TESTENV_SECRET_FILE"
+  fi
+  TESTENV_SECRET_STATUS=$?
+  rm -f "$TESTENV_SECRET_FILE"
+  TESTENV_SECRET_FILE=
+  return "$TESTENV_SECRET_STATUS"
+}
+```
+
+Each integration section gives the JSON shape to enter and the secret name to
+pass to this helper. Use only disposable integration accounts.
 
 ## Running
 
@@ -23,20 +75,24 @@ Either as part of bootstrap:
 ```bash
 ./scripts/testenv-bootstrap.sh \
   --tenant slack-t0xxxxxxxxx \
-  --integrations datadog,pagerduty,jira
+  --integrations pagerduty,jira
 ```
 
 Or one at a time (useful when debugging or adding integrations incrementally):
 
 ```bash
-bridge/.venv/bin/python -m scripts.testenv.integrations.seed_datadog --tenant slack-t0xxxxxxxxx
+bridge/.venv/bin/python -m scripts.testenv.integrations.seed_pagerduty \
+  --tenant slack-t0xxxxxxxxx
 ```
 
-Per-integration flags:
+Managed-connector seeder flags:
 
-- `--skip-connect` — don't POST to the bridge (content seed only, useful if the Gateway provisioning fails)
+- `--skip-connect` — don't POST to the bridge; populate external content only
 - `--skip-seed` — connect only (useful when you just want to wire the Gateway target and test agent tool calls)
 - `--force` — re-seed even if existing state is found
+
+Datadog supports only `--skip-connect` plus `--force`; it has no connect-only
+mode. Sentry is also content-only because the bridge has no Sentry route.
 
 Each seeder is idempotent — re-running is safe. State is tracked in `scripts/testenv/integrations/.<name>-seeded.json` (gitignored).
 
@@ -44,7 +100,10 @@ Each seeder is idempotent — re-running is safe. State is tracked in `scripts/t
 
 ## 1. Datadog
 
-**Why:** metrics, events, monitors — the highest-leverage integration. Signing up for this first also exercises the most complex Gateway target shape (two-credential pattern: API key via credential provider, app key via forwarded header).
+**Why:** populate a disposable account with realistic metrics-adjacent events
+and monitors for demos or manual exploration. This seeder does not make those
+resources available as Agent tools; a trusted credential broker would be
+required before enabling the two-secret connector.
 
 ### Signup
 
@@ -58,36 +117,34 @@ Each seeder is idempotent — re-running is safe. State is tracked in `scripts/t
 
 ### Credentials
 
-3. Get an **API key**: Organization Settings → Access → API Keys → New Key. Name it `agentcore-testenv`. Copy it.
-4. Get an **Application key**: Organization Settings → Access → Application Keys → New Key. Name it `agentcore-testenv`. Copy it.
+3. Get an **API key**: Organization Settings → Access → API Keys → New Key. Name it `agent-testenv`. Copy it.
+4. Get an **Application key**: Organization Settings → Access → Application Keys → New Key. Name it `agent-testenv`. Copy it.
 
 ### Store in Secrets Manager
 
-```bash
-aws secretsmanager create-secret \
-  --name agentcore/testenv/datadog \
-  --description "Datadog credentials for the AgentCore Reference test env" \
-  --secret-string '{
-    "api_key":  "<paste api key>",
-    "app_key":  "<paste application key>",
-    "site":     "datadoghq.com"
-  }'
+```json
+{
+  "api_key": "paste the API key here",
+  "app_key": "paste the application key here",
+  "site": "datadoghq.com"
+}
 ```
 
-If the secret already exists, use `put-secret-value` instead of `create-secret`:
-
 ```bash
-aws secretsmanager put-secret-value \
-  --secret-id agentcore/testenv/datadog \
-  --secret-string '{"api_key":"...", "app_key":"...", "site":"datadoghq.com"}'
+store_testenv_secret agentcore/testenv/datadog
 ```
 
 ### Run
 
 ```bash
 bridge/.venv/bin/python -m scripts.testenv.integrations.seed_datadog \
-  --tenant slack-t0xxxxxxxxx
+  --tenant slack-t0xxxxxxxxx \
+  --skip-connect
 ```
+
+`--skip-connect` is required and fail-closed. The local seeder reads the two
+credentials from Secrets Manager and calls Datadog directly. It does not call
+the bridge, provision a Gateway target, or change tenant configuration.
 
 ### What you get
 
@@ -113,19 +170,20 @@ bridge/.venv/bin/python -m scripts.testenv.integrations.seed_datadog \
 
 ### Credentials
 
-3. Generate a REST API key: Profile (top right) → User Settings → API Access Keys → Create New API User Token. Scope: Full Access (you can restrict later). Name it `agentcore-testenv`. Copy it.
+3. Generate a REST API key: Profile (top right) → User Settings → API Access Keys → Create New API User Token. Scope: Full Access (you can restrict later). Name it `agent-testenv`. Copy it.
 4. Note your account email — the seeder uses it as the `From` header on incident creation calls. The seeder reads the first user on the account by default, or you can specify it explicitly.
 
 ### Store in Secrets Manager
 
+```json
+{
+  "api_key": "paste the API key here",
+  "from_email": "you@example.com"
+}
+```
+
 ```bash
-aws secretsmanager create-secret \
-  --name agentcore/testenv/pagerduty \
-  --description "PagerDuty credentials for the AgentCore Reference test env" \
-  --secret-string '{
-    "api_key":    "<paste api key>",
-    "from_email": "<your pagerduty account email>"
-  }'
+store_testenv_secret agentcore/testenv/pagerduty
 ```
 
 `from_email` is optional — omit it and the seeder will look up the first user on the account.
@@ -164,20 +222,21 @@ Open `https://<your-subdomain>.pagerduty.com/incidents` — you should see the t
 
 ### Credentials
 
-4. Generate an API token at <https://id.atlassian.com/manage-profile/security/api-tokens> → Create API token. Label it `agentcore-testenv`. Copy it — you won't see it again.
+4. Generate an API token at <https://id.atlassian.com/manage-profile/security/api-tokens> → Create API token. Label it `agent-testenv`. Copy it — you won't see it again.
 5. Note your Atlassian account email (the one you use to log in).
 
 ### Store in Secrets Manager
 
+```json
+{
+  "email": "you@example.com",
+  "api_token": "paste the API token here",
+  "domain": "acme-testenv"
+}
+```
+
 ```bash
-aws secretsmanager create-secret \
-  --name agentcore/testenv/jira \
-  --description "Jira Cloud credentials for the AgentCore Reference test env" \
-  --secret-string '{
-    "email":     "<your atlassian email>",
-    "api_token": "<paste api token>",
-    "domain":    "acme-testenv"
-  }'
+store_testenv_secret agentcore/testenv/jira
 ```
 
 `domain` is the subdomain — just the part before `.atlassian.net`. Do NOT include `https://` or `.atlassian.net`.
@@ -218,15 +277,18 @@ Open `https://<your-domain>.atlassian.net/jira/software/projects/ACME/board`. Yo
 
 ### Credentials
 
-3. Get a personal API key: Avatar (top left) → Settings → API → Personal API keys → Create new key. Scope: full workspace. Name it `agentcore-testenv`. Copy it.
+3. Get a personal API key: Avatar (top left) → Settings → API → Personal API keys → Create new key. Scope: full workspace. Name it `agent-testenv`. Copy it.
 
 ### Store in Secrets Manager
 
+```json
+{
+  "api_key": "paste the API key here"
+}
+```
+
 ```bash
-aws secretsmanager create-secret \
-  --name agentcore/testenv/linear \
-  --description "Linear credentials for the AgentCore Reference test env" \
-  --secret-string '{"api_key": "<paste api key>"}'
+store_testenv_secret agentcore/testenv/linear
 ```
 
 ### Run
@@ -252,27 +314,30 @@ Open `https://linear.app/` and switch to your first team — you should see the 
 
 **Why:** error tracking. Lets you test the agent's ability to correlate Slack alerts with Sentry issues (e.g. "is this 504 in Sentry yet?").
 
-> **Note:** Sentry does NOT currently have a bridge connect route (`bridge/bridge/api.py` has Datadog / Confluence / Notion / Jira / Linear / PagerDuty / GitHub but no Sentry). The seeder skips the bridge connect step and only seeds content. If you add `connect_sentry` to `api.py` later, un-skip in `seed_sentry.py`.
+> **Note:** Sentry has no bridge connect route. The seeder skips connection and
+> only populates content. If a trusted managed connector is added later, wire
+> it into `seed_sentry.py` explicitly.
 
 ### Signup
 
 1. Visit <https://sentry.io/signup/> — free plan is 5k events/month.
 2. Create an organization and project. Pick Python as the platform. Note the **organization slug** and **project slug** (visible in the URL: `https://sentry.io/organizations/<org-slug>/projects/<project-slug>/`).
 3. On the project's setup page, copy the **DSN** (starts with `https://<key>@o12345.ingest.sentry.io/67890`).
-4. Create an internal integration token: Settings → Developer Settings → New Internal Integration. Name it `agentcore-testenv`, give it `event:read` + `event:write` + `project:read` scopes, save, then copy the Token.
+4. Create an internal integration token: Settings → Developer Settings → New Internal Integration. Name it `agent-testenv`, give it `event:read` + `event:write` + `project:read` scopes, save, then copy the Token.
 
 ### Store in Secrets Manager
 
+```json
+{
+  "auth_token": "paste the internal integration token here",
+  "dsn": "paste the full DSN here",
+  "organization": "your-org-slug",
+  "project": "your-project-slug"
+}
+```
+
 ```bash
-aws secretsmanager create-secret \
-  --name agentcore/testenv/sentry \
-  --description "Sentry credentials for the AgentCore Reference test env" \
-  --secret-string '{
-    "auth_token":   "<paste internal integration token>",
-    "dsn":          "<paste full DSN>",
-    "organization": "<org slug>",
-    "project":      "<project slug>"
-  }'
+store_testenv_secret agentcore/testenv/sentry
 ```
 
 ### Run
@@ -294,17 +359,19 @@ Open `https://sentry.io/organizations/<org-slug>/issues/`. Events take ~30 secon
 
 ---
 
-## Running all five at once
+## Running all bootstrap-supported seeders
 
 ```bash
 ./scripts/testenv-bootstrap.sh \
   --tenant slack-t0xxxxxxxxx \
-  --github-org <your-org> \
+  --github-org YOUR_ORG \
   --github-installation-id 12345678 \
   --integrations all
 ```
 
-Order of execution: Slack seed first (the main bootstrap step), then integrations in the order `datadog, pagerduty, jira, linear, sentry`.
+Order of execution: Slack seed first, then `pagerduty`, `jira`, `linear`, and
+`sentry`. Datadog is excluded from `--integrations all` by design; run its
+content-only command separately with `--skip-connect`.
 
 Integration failures do NOT abort the bootstrap — each seeder is independent. The final summary shows a `✓` / `✗` per integration; failed ones can be re-run individually.
 
@@ -317,6 +384,9 @@ Integration failures do NOT abort the bootstrap — each seeder is independent. 
 The seeder couldn't find the Secrets Manager secret. Re-run the `aws secretsmanager create-secret` command for that integration.
 
 ### "bridge connect failed for X: HTTP 500 — provisioning failed: AccessDeniedException"
+
+This applies to the PagerDuty, Jira, or Linear managed connectors, not the
+content-only Datadog and Sentry seeders.
 
 The bridge's IAM role is missing Gateway permissions. Deploy the data stack:
 
@@ -364,8 +434,12 @@ Minimal cleanup recipes:
 
 ## Adding a new integration
 
-1. Add `integrations/seed_<name>.py` following the pattern of `seed_datadog.py`
-2. Add a connect route to `bridge/bridge/api.py` if one doesn't exist (look at `connect_datadog` as a template)
-3. Add the integration to `_ALL_INTEGRATIONS` in `scripts/testenv/bootstrap.py`
-4. Add a section to this README
-5. Test: `--integrations <name>` should pass end-to-end before merging
+1. Add `integrations/seed_<name>.py` with a direct, idempotent content-seeding path.
+2. If one credential provider can represent the API's authentication safely,
+   add a managed connector route in `bridge/bridge/api.py`. Otherwise keep the
+   seeder content-only and make that limitation explicit.
+3. Add bootstrap-safe seeders to `_BOOTSTRAP_INTEGRATIONS` in
+   `scripts/testenv/bootstrap.py`. Never add a guaranteed-failure connector.
+4. Add its credential shape and operating mode to this README.
+5. Test `--integrations <name>` end to end before merging, or document and test
+   the explicit direct-seeder command for content-only integrations.

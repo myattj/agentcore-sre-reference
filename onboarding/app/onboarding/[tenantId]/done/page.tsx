@@ -28,9 +28,9 @@ export default async function DonePage({
           You&apos;re ready
         </h1>
         <p className="text-sm text-[color:var(--muted)]">
-          Your bot is provisioned with sensible defaults — all tools
-          enabled, shared memory across channels, and a prompt that
-          already knows how to triage alerts, answer questions, and do
+          Your bot is provisioned with sensible defaults — built-in tools,
+          separate memory for each channel, human-only triggers, and a prompt
+          that already knows how to triage alerts, answer questions, and do
           on-call handoffs. Here&apos;s how to take it for a spin.
         </p>
       </header>
@@ -39,7 +39,7 @@ export default async function DonePage({
         <Step
           number={1}
           title="Open Slack"
-          body="Go to your workspace where you installed agent-core."
+          body="Go to the Slack workspace where you installed Agent."
         />
         <Step
           number={2}
@@ -48,10 +48,10 @@ export default async function DonePage({
             <>
               Open any channel and type{" "}
               <code className="rounded bg-[color:var(--card)] px-1.5 py-0.5 font-mono text-xs">
-                /invite @agent-core
+                /invite @Agent
               </code>
-              . The bot sees channels it&apos;s been invited to, and
-              shares memory across all of them so context carries over.
+              . The bot sees channels it&apos;s been invited to and keeps
+              each channel&apos;s memory separate by default.
             </>
           }
         />
@@ -62,11 +62,11 @@ export default async function DonePage({
             <>
               In that channel, try{" "}
               <code className="rounded bg-[color:var(--card)] px-1.5 py-0.5 font-mono text-xs">
-                @agent-core what&apos;s open?
+                @Agent what&apos;s open?
               </code>{" "}
               or{" "}
               <code className="rounded bg-[color:var(--card)] px-1.5 py-0.5 font-mono text-xs">
-                @agent-core catch me up on this thread
+                @Agent catch me up on this thread
               </code>
               . The first reply may take a few seconds while the agent
               warms up.
@@ -75,29 +75,24 @@ export default async function DonePage({
         />
         <Step
           number={4}
-          title="Talk to the bot to configure it"
+          title="Tune the workspace"
           body={
             <>
-              Need to add a trusted bot, remember a team fact, or
-              restrict a skill to one channel? Just tell the bot in
-              Slack — e.g.{" "}
-              <code className="rounded bg-[color:var(--card)] px-1.5 py-0.5 font-mono text-xs">
-                @agent-core remember that the data team uses Snowflake
-              </code>
-              . It edits its own config and the change persists
-              immediately.
+              Open the workspace settings to adjust the prompt, trusted bots,
+              channel personas, skills, and escalation routes. Runtime
+              configuration changes from Slack stay read-only until an
+              operator explicitly assigns admin user IDs.
             </>
           }
         />
       </ol>
 
       <section className="mt-12 rounded-lg border border-[color:var(--border)] bg-[color:var(--card)] p-5">
-        <h2 className="mb-1 text-sm font-semibold">Prefer a GUI?</h2>
+        <h2 className="mb-1 text-sm font-semibold">Workspace settings</h2>
         <p className="mb-3 text-xs text-[color:var(--muted)]">
-          Most teams never come back here — the bot can edit its own
-          config from Slack. But if you want to tune the prompt,
-          per-channel overrides, skills, or bot policy by hand, the
-          settings live in your workspace.
+          Tune the prompt, per-channel overrides, skills, or bot policy from
+          the authenticated workspace UI. In-agent updates require an
+          operator-managed Slack admin allowlist.
         </p>
         <Link
           href={`/workspace/${encodeURIComponent(tenantId)}`}
@@ -125,7 +120,7 @@ function Step({
         {number}
       </div>
       <div className="min-w-0 flex-1">
-        <h3 className="mb-1 font-medium">{title}</h3>
+        <h2 className="mb-1 font-medium">{title}</h2>
         <p className="text-sm text-[color:var(--muted)]">{body}</p>
       </div>
     </li>

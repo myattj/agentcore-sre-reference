@@ -25,11 +25,15 @@ export default async function OpsLoginPage({
         it below.
       </p>
       <form method="POST" action="/ops/login/submit" className="space-y-4">
+        <label htmlFor="ops-secret" className="block text-sm font-medium">
+          Admin secret
+        </label>
         <input
+          id="ops-secret"
           type="password"
           name="secret"
-          placeholder="Admin secret"
-          autoComplete="off"
+          placeholder="Enter the admin secret"
+          autoComplete="current-password"
           required
           className="w-full rounded-md border border-[color:var(--border)] bg-white px-3 py-2 text-sm"
         />

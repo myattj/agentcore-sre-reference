@@ -28,7 +28,7 @@ from ._channels import discover_and_join
 from ._common import (
     RateLimitedPoster,
     configure_logging,
-    load_bot_token,
+    load_seeder_bot_token,
     make_slack_client,
     persona,
 )
@@ -165,7 +165,7 @@ def main() -> int:
 
     # Load auth + Slack client
     try:
-        bot_token = load_bot_token(args.tenant, region=args.region)
+        bot_token = load_seeder_bot_token()
     except RuntimeError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1

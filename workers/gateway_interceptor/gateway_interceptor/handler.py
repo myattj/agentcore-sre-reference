@@ -17,8 +17,8 @@ We:
      also lets us read the claims, which the interceptor payload does
      NOT expose.)
   2. Read the `tenant_id` claim from the verified JWT.
-  3. Inspect the JSON-RPC body. For `tools/call`, parse `params.name` and
-     enforce that the tool's target prefix matches the caller's tenant.
+  3. Inspect the JSON-RPC body. For `tools/call`, parse `params.name`,
+     decode the target's exact owner, and compare it with the caller's tenant.
      For `tools/list` and other meta methods, allow with logging.
   4. Pass through (return the input unchanged) on allow.
   5. On deny, return `transformedGatewayResponse` with a 403 status —
@@ -26,8 +26,11 @@ We:
 
 ## Tool / target naming convention
 
-The provisioner (chunk D) names targets `tenant-<tenant_id>-<integration>`
-(e.g. `tenant-slack-acme-datadog`). AgentCore Gateway is documented to
+The provisioner names targets `tenant-v1-<base32(tenant_id)>-<integration>`
+(e.g. `tenant-v1-onwgcy3lfvqwg3lf-datadog` for `slack-acme`). The Base32
+owner segment is lossless and cannot contain the hyphen that separates fields,
+so ownership is parsed and compared exactly. Legacy unversioned targets fail
+closed and must be reprovisioned. AgentCore Gateway is documented to
 namespace target tools so multiple targets can expose tools with the
 same internal name without collision; the exact prefix delimiter is not
 documented as of 2026-04, so we make it ENV-configurable
@@ -50,11 +53,15 @@ deny. Cold-start cost is one HTTP GET to the bridge's `/jwks.json`.
   INTERCEPTOR_TARGET_DELIMITER — delimiter between target name and tool name
                                  in MCP tool names (default: "___")
 """
+
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import logging
 import os
+import re
 import urllib.error
 import urllib.request
 from typing import Any
@@ -72,6 +79,7 @@ _jwks_keys_cache: dict[str, jwt.PyJWK] = {}
 # ----------------------------------------------------------------------------
 # JWKS fetching + caching
 # ----------------------------------------------------------------------------
+
 
 def _fetch_jwks() -> dict[str, jwt.PyJWK]:
     """Fetch the bridge's JWKS document and return a {kid: PyJWK} map.
@@ -127,6 +135,7 @@ def _reset_jwks_cache_for_tests() -> None:
 # JWT extraction + verification
 # ----------------------------------------------------------------------------
 
+
 def _extract_jwt_token(event: dict[str, Any]) -> str:
     """Pull the bearer token from the request's Authorization header.
 
@@ -134,11 +143,7 @@ def _extract_jwt_token(event: dict[str, Any]) -> str:
     interceptor configuration must have `passRequestHeaders=true` for
     headers to be present in the event payload at all (see chunk C).
     """
-    headers = (
-        event.get("mcp", {})
-        .get("gatewayRequest", {})
-        .get("headers", {})
-    )
+    headers = event.get("mcp", {}).get("gatewayRequest", {}).get("headers", {})
     if not headers:
         raise RuntimeError(
             "no headers in request payload — interceptor must be configured "
@@ -152,7 +157,7 @@ def _extract_jwt_token(event: dict[str, Any]) -> str:
         raise RuntimeError("missing Authorization header")
     if not auth.lower().startswith("bearer "):
         raise RuntimeError("Authorization header is not a Bearer token")
-    return auth[len("Bearer "):].strip()
+    return auth[len("Bearer ") :].strip()
 
 
 def _verify_jwt(token: str) -> dict[str, Any]:
@@ -188,13 +193,16 @@ def _verify_jwt(token: str) -> dict[str, Any]:
 # Request inspection + tenant matching
 # ----------------------------------------------------------------------------
 
+_TENANT_ID_RE = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*\Z")
+_INTEGRATION_RE = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*\Z")
+_MAX_TENANT_ID_LENGTH = 40
+_MAX_INTEGRATION_LENGTH = 24
+_TARGET_PREFIX = "tenant-v1-"
+
+
 def _request_method(event: dict[str, Any]) -> str:
     """Return the JSON-RPC method name (e.g. 'tools/call', 'tools/list')."""
-    body = (
-        event.get("mcp", {})
-        .get("gatewayRequest", {})
-        .get("body", {})
-    )
+    body = event.get("mcp", {}).get("gatewayRequest", {}).get("body", {})
     if isinstance(body, str):
         # Defensive: rawGatewayRequest.body is a string but we use the
         # parsed gatewayRequest.body which should be a dict. If it's a
@@ -208,11 +216,7 @@ def _request_method(event: dict[str, Any]) -> str:
 
 def _called_tool_name(event: dict[str, Any]) -> str:
     """For tools/call requests, return params.name. Empty string otherwise."""
-    body = (
-        event.get("mcp", {})
-        .get("gatewayRequest", {})
-        .get("body", {})
-    )
+    body = event.get("mcp", {}).get("gatewayRequest", {}).get("body", {})
     if not isinstance(body, dict):
         return ""
     params = body.get("params") or {}
@@ -221,23 +225,69 @@ def _called_tool_name(event: dict[str, Any]) -> str:
     return str(params.get("name", "") or "")
 
 
-def _expected_target_prefix(tenant_id: str) -> str:
-    """The prefix all of `tenant_id`'s targets share.
+def _valid_slug(value: object, *, pattern: re.Pattern[str], max_length: int) -> bool:
+    return bool(
+        isinstance(value, str)
+        and value
+        and len(value) <= max_length
+        and pattern.fullmatch(value)
+    )
 
-    Convention: targets are named `tenant-<tenant_id>-<integration>`. We
-    don't lock the integration name here; the prefix check confirms the
-    target name STARTS with the tenant-id portion.
+
+def _decode_target_owner(target_name: str) -> tuple[str, str] | None:
+    """Decode a canonical versioned target into `(tenant_id, integration)`.
+
+    This codec intentionally mirrors bridge.gateway_provisioner without a
+    cross-service import. Every structural or validation failure returns None
+    so unknown and legacy target names fail closed.
     """
-    return f"tenant-{tenant_id}-"
+    if not target_name.startswith(_TARGET_PREFIX):
+        return None
+
+    encoded_owner, separator, integration = target_name[
+        len(_TARGET_PREFIX) :
+    ].partition("-")
+    if (
+        not separator
+        or re.fullmatch(r"[a-z2-7]+", encoded_owner) is None
+        or not _valid_slug(
+            integration,
+            pattern=_INTEGRATION_RE,
+            max_length=_MAX_INTEGRATION_LENGTH,
+        )
+    ):
+        return None
+
+    padding = "=" * (-len(encoded_owner) % 8)
+    try:
+        tenant_id = base64.b32decode(
+            (encoded_owner.upper() + padding).encode("ascii")
+        ).decode("ascii")
+    except (binascii.Error, UnicodeDecodeError, ValueError):
+        return None
+
+    if not _valid_slug(
+        tenant_id,
+        pattern=_TENANT_ID_RE,
+        max_length=_MAX_TENANT_ID_LENGTH,
+    ):
+        return None
+
+    canonical_owner = (
+        base64.b32encode(tenant_id.encode("ascii")).decode("ascii").rstrip("=").lower()
+    )
+    if canonical_owner != encoded_owner:
+        return None
+    return tenant_id, integration
 
 
 def _check_tenant_match(claim_tenant: str, tool_name: str) -> tuple[bool, str]:
     """Decide whether `claim_tenant` is allowed to invoke `tool_name`.
 
     Returns (allowed, reason). The tool name is expected to look like
-    `tenant-<owner>-<integration>{delimiter}<inner_tool>`. We split on
-    the delimiter, take the left half as the target name, and check it
-    starts with the caller's expected prefix.
+    `tenant-v1-<encoded-owner>-<integration>{delimiter}<inner_tool>`. We
+    split on the delimiter, decode the target owner, and compare the complete
+    decoded tenant ID with the complete JWT claim.
 
     The delimiter is configurable to absorb whatever AgentCore Gateway
     actually uses to namespace tools per target — chunk C will confirm
@@ -246,16 +296,26 @@ def _check_tenant_match(claim_tenant: str, tool_name: str) -> tuple[bool, str]:
     if not tool_name:
         return False, "tool name missing from tools/call request"
 
+    if not _valid_slug(
+        claim_tenant,
+        pattern=_TENANT_ID_RE,
+        max_length=_MAX_TENANT_ID_LENGTH,
+    ):
+        return False, "tenant_id claim is not a valid tenant slug"
+
     delimiter = os.environ.get("INTERCEPTOR_TARGET_DELIMITER", "___")
-    if delimiter not in tool_name:
+    if not delimiter or delimiter not in tool_name:
         return False, (
             f"tool name {tool_name!r} has no delimiter {delimiter!r} — "
             "cannot identify target"
         )
 
     target_name, _, _ = tool_name.partition(delimiter)
-    expected = _expected_target_prefix(claim_tenant)
-    if not target_name.startswith(expected):
+    target_owner = _decode_target_owner(target_name)
+    if target_owner is None:
+        return False, f"tool target {target_name!r} has an invalid or legacy name"
+    owner_tenant, _integration = target_owner
+    if owner_tenant != claim_tenant:
         return False, (
             f"tool target {target_name!r} not owned by tenant {claim_tenant!r}"
         )
@@ -266,14 +326,11 @@ def _check_tenant_match(claim_tenant: str, tool_name: str) -> tuple[bool, str]:
 # Response shaping
 # ----------------------------------------------------------------------------
 
+
 def _allow(event: dict[str, Any]) -> dict[str, Any]:
     """Pass-through response: returns the request unchanged so the
     Gateway forwards it to the target."""
-    body = (
-        event.get("mcp", {})
-        .get("gatewayRequest", {})
-        .get("body", {})
-    )
+    body = event.get("mcp", {}).get("gatewayRequest", {}).get("body", {})
     return {
         "interceptorOutputVersion": "1.0",
         "mcp": {
@@ -311,6 +368,7 @@ def _deny(reason: str, status_code: int = 403) -> dict[str, Any]:
 # ----------------------------------------------------------------------------
 # Lambda entrypoint
 # ----------------------------------------------------------------------------
+
 
 def lambda_handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
     """AgentCore Gateway REQUEST interceptor entrypoint.

@@ -1,9 +1,9 @@
 """Shared helpers for the integration seeders.
 
-Each seeder needs a few common things:
+Seeders share some or all of these helpers:
 
   - Load credentials from Secrets Manager at ``agentcore/testenv/<name>``
-  - Mint a bridge session token (to call the /api/tenants/*/integrations/* routes)
+  - Mint a bridge session token for managed connector routes
   - A rate-limited HTTP client
   - State tracking for idempotency (so re-runs don't duplicate content)
 
@@ -42,7 +42,7 @@ if str(_BRIDGE_DIR) not in sys.path:
 log = logging.getLogger(__name__)
 
 DEFAULT_REGION = "us-west-2"
-DEFAULT_BRIDGE_URL = "https://agent.example.com"
+DEFAULT_BRIDGE_URL = "http://localhost:8000"
 
 
 # ----------------------------------------------------------------------------

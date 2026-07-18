@@ -1,18 +1,19 @@
 """Rich tenant config for the manual-test rig.
 
-``build_testenv_config(tenant_id, channel_map, github_org)`` returns a
-full dict matching the shape that ``PATCH /api/tenants/{tenant_id}``
-accepts. It's the substantive content that makes the test env feel like
+``build_testenv_config(channel_map, github_org)`` returns a
+tenant-safe dict matching the shape that ``PATCH /api/tenants/{tenant_id}``
+accepts. Operator-owned fields are handled separately by ``bootstrap.py``.
+It's the substantive content that makes the test env feel like
 a real customer: a fictional data-ops team ("Acme Data Co") with:
 
   - Custom system prompt naming the company, stack, and tone
-  - All 11 catalog tools enabled
+  - 13 catalog tools enabled
   - Per-channel personas for Q&A and alert-triage channels
   - Three escalation routes (sre, data-eng, security)
   - Three skills (runbook lookup, incident kickoff, oncall status)
   - Bot policy allowing any bot (for seeded PagerDuty/Datadog alerts)
-  - Codebases populated when a github_org + installation_id are given
-  - is_internal_testenv=True so the ops dashboard hides it
+  - Codebases populated after bootstrap approves the GitHub installation
+  - Shared memory across the synthetic lab's public channels
 
 The config is parameterized by ``channel_map`` (name → Slack channel id)
 because the escalation routes, bot_policy.open_channels, and channel
@@ -20,6 +21,7 @@ personas all need real IDs that don't exist until the channels are
 created in the test workspace. The bootstrap script creates/joins the
 channels first, then calls this.
 """
+
 from __future__ import annotations
 
 from typing import Any
@@ -40,7 +42,7 @@ TESTENV_CHANNELS = [
 ]
 
 
-_SYSTEM_PROMPT = """You are the AgentCore Reference ops assistant for **Acme Data Co**, a ~60-person data & platform team. You live in our Slack workspace and help with three things: triaging alerts and incidents, answering questions about how our systems work, and automating workflow handoffs. You have shared memory across all channels — what you learn in one channel is available in the others.
+_SYSTEM_PROMPT = """You are the Agent ops assistant for **Acme Data Co**, a ~60-person data & platform team. You live in our Slack workspace and help with three things: triaging alerts and incidents, answering questions about how our systems work, and automating workflow handoffs. You have shared memory across all channels — what you learn in one channel is available in the others.
 
 ## About Acme Data Co
 
@@ -87,7 +89,6 @@ Answer from the oncall escalation route. Taylor Kim is the current primary per o
 - `code_find_symbol` — find where a function/class/constant is defined
 - `post_to_channel` — cross-channel post (always tell the user where you posted)
 - `escalate` — hand off to sre / data-eng / security via the routing table
-- `manage_config` — change your own config when users ask ("remember that Priya prefers dbt over Airflow", "trust B123 as a bot", "isolate memory for #secret-project")
 
 ## Style
 
@@ -157,8 +158,12 @@ _CHANNEL_PERSONAS: dict[str, dict[str, Any]] = {
             "this at 3am."
         ),
         "allowed_tools": [
-            "search_team_history", "read_thread_context", "code_search",
-            "code_read_file", "escalate", "post_to_channel",
+            "search_team_history",
+            "read_thread_context",
+            "code_search",
+            "code_read_file",
+            "escalate",
+            "post_to_channel",
         ],
         "memory_rules": ["incident_learnings", "runbook_pointers", "service_owners"],
     },
@@ -171,8 +176,12 @@ _CHANNEL_PERSONAS: dict[str, dict[str, Any]] = {
             "reporting."
         ),
         "allowed_tools": [
-            "search_team_history", "read_thread_context", "code_search",
-            "code_read_file", "escalate", "post_to_channel",
+            "search_team_history",
+            "read_thread_context",
+            "code_search",
+            "code_read_file",
+            "escalate",
+            "post_to_channel",
         ],
         "memory_rules": ["incident_learnings", "runbook_pointers", "service_owners"],
     },
@@ -186,12 +195,13 @@ _CHANNEL_PERSONAS: dict[str, dict[str, Any]] = {
             "uncertain."
         ),
         "allowed_tools": [
-            "search_team_history", "read_thread_context", "code_search",
+            "search_team_history",
+            "read_thread_context",
+            "code_search",
             "escalate",
         ],
         "memory_rules": ["incident_learnings", "runbook_pointers"],
     },
-
     # Q&A channels: heavy on search, light on write.
     "ask-data": {
         "system_prompt": (
@@ -202,8 +212,11 @@ _CHANNEL_PERSONAS: dict[str, dict[str, Any]] = {
             "acme-runbooks. Cite your sources."
         ),
         "allowed_tools": [
-            "search_team_history", "code_search", "code_read_file",
-            "code_find_symbol", "read_thread_context",
+            "search_team_history",
+            "code_search",
+            "code_read_file",
+            "code_find_symbol",
+            "read_thread_context",
         ],
         "memory_rules": ["team_preferences", "faq_answers"],
     },
@@ -216,8 +229,11 @@ _CHANNEL_PERSONAS: dict[str, dict[str, Any]] = {
             "bound repos in parallel."
         ),
         "allowed_tools": [
-            "search_team_history", "code_search", "code_read_file",
-            "code_find_symbol", "read_thread_context",
+            "search_team_history",
+            "code_search",
+            "code_read_file",
+            "code_find_symbol",
+            "read_thread_context",
         ],
         "memory_rules": ["team_preferences", "faq_answers", "codebase_affinity"],
     },
@@ -230,12 +246,13 @@ _CHANNEL_PERSONAS: dict[str, dict[str, Any]] = {
             "or credential rotation."
         ),
         "allowed_tools": [
-            "search_team_history", "code_search", "code_read_file",
+            "search_team_history",
+            "code_search",
+            "code_read_file",
             "escalate",
         ],
         "memory_rules": ["team_preferences"],
     },
-
     # Incident channel: full context, all tools, post-heavy.
     "incidents": {
         "system_prompt": (
@@ -246,8 +263,12 @@ _CHANNEL_PERSONAS: dict[str, dict[str, Any]] = {
             "crisp; nobody wants filler during an incident."
         ),
         "allowed_tools": [
-            "read_thread_context", "search_team_history", "code_search",
-            "code_read_file", "code_find_symbol", "post_to_channel",
+            "read_thread_context",
+            "search_team_history",
+            "code_search",
+            "code_read_file",
+            "code_find_symbol",
+            "post_to_channel",
             "escalate",
         ],
         "memory_rules": ["incident_learnings", "runbook_pointers", "service_owners"],
@@ -256,26 +277,21 @@ _CHANNEL_PERSONAS: dict[str, dict[str, Any]] = {
 
 
 def build_testenv_config(
-    tenant_id: str,
     channel_map: dict[str, str],
     github_org: str | None = None,
-    github_installation_id: str | None = None,
 ) -> dict[str, Any]:
-    """Build the full Acme Data Co tenant config dict.
+    """Build the tenant-safe Acme Data Co PATCH payload.
 
     Args:
-      tenant_id: real tenant_id from OAuth (typically ``slack-<team_id>``).
       channel_map: name → Slack channel id for the ten TESTENV_CHANNELS.
-      github_org: GitHub org where the forked repos live. When None,
-        codebases stays disabled (no bindings populated).
-      github_installation_id: numeric install id from the GitHub App
-        post-install callback. When both ``github_org`` and this are
-        set, ``codebases.enabled`` flips to True.
+      github_org: Operator-approved GitHub org where the forked repos live.
+        When None, codebases stays disabled (no bindings populated).
 
     Returns:
       Dict ready to PATCH to /api/tenants/{id}. Every deep-mergeable
       section is present.
     """
+
     # Map channel name → id, falling back to the name itself if the id
     # isn't known. The seeder will refuse to run with unknown channels,
     # so by the time we're called here the map should be complete.
@@ -286,40 +302,72 @@ def build_testenv_config(
     # that's how the agent looks them up at runtime (from Slack event
     # channel_id).
     channels_dict = {
-        cid(name): persona for name, persona in _CHANNEL_PERSONAS.items()
+        cid(name): persona
+        for name, persona in _CHANNEL_PERSONAS.items()
         if name in channel_map
     }
 
-    # Codebases: only populated when both org + installation_id are
-    # known. Otherwise bindings stay empty and enabled=False — the
-    # tenant still functions without code tools until the user runs
-    # the GitHub App install.
-    if github_org and github_installation_id:
+    # The installation id is deliberately absent from this tenant PATCH. The
+    # bootstrap must approve it through the narrow operator endpoint first;
+    # this payload only enables repo bindings for that already-approved org.
+    if github_org:
         codebases = {
             "enabled": True,
-            "github_installation_id": str(github_installation_id),
             "default_repo": f"{github_org}/acme-data-api",
             "bindings": [
                 {
                     "repo": f"{github_org}/acme-data-api",
                     "default_branch": "main",
-                    "aliases": ["acme-data-api", "data-api", "api", "the api", "backend", "fastapi backend"],
-                    "channels": [cid("ask-data"), cid("ask-platform"), cid("incidents")],
+                    "aliases": [
+                        "acme-data-api",
+                        "data-api",
+                        "api",
+                        "the api",
+                        "backend",
+                        "fastapi backend",
+                    ],
+                    "channels": [
+                        cid("ask-data"),
+                        cid("ask-platform"),
+                        cid("incidents"),
+                    ],
                 },
                 {
                     "repo": f"{github_org}/acme-infra",
                     "default_branch": "main",
-                    "aliases": ["acme-infra", "infra", "terraform", "infrastructure", "eks config", "rds config"],
-                    "channels": [cid("ask-platform"), cid("alerts-sre"), cid("incidents")],
+                    "aliases": [
+                        "acme-infra",
+                        "infra",
+                        "terraform",
+                        "infrastructure",
+                        "eks config",
+                        "rds config",
+                    ],
+                    "channels": [
+                        cid("ask-platform"),
+                        cid("alerts-sre"),
+                        cid("incidents"),
+                    ],
                 },
                 {
                     "repo": f"{github_org}/acme-runbooks",
                     "default_branch": "main",
-                    "aliases": ["acme-runbooks", "runbooks", "the runbooks", "docs", "ops docs"],
+                    "aliases": [
+                        "acme-runbooks",
+                        "runbooks",
+                        "the runbooks",
+                        "docs",
+                        "ops docs",
+                    ],
                     "channels": [
-                        cid("alerts-sre"), cid("alerts-data"), cid("alerts-security"),
-                        cid("incidents"), cid("ask-platform"), cid("ask-data"),
-                        cid("ask-security"), cid("oncall"),
+                        cid("alerts-sre"),
+                        cid("alerts-data"),
+                        cid("alerts-security"),
+                        cid("incidents"),
+                        cid("ask-platform"),
+                        cid("ask-data"),
+                        cid("ask-security"),
+                        cid("oncall"),
                     ],
                 },
             ],
@@ -328,7 +376,6 @@ def build_testenv_config(
     else:
         codebases = {
             "enabled": False,
-            "github_installation_id": None,
             "default_repo": None,
             "bindings": [],
             "allow_learning": True,
@@ -355,19 +402,12 @@ def build_testenv_config(
             ],
             "tool_config": {},
         },
-        "byo": {
-            "enabled": False,
-            "gateway_endpoint": None,
-            "gateway_auth": None,
-            "connected_integrations": [],
-        },
         "memory": {
             "triggers": {
                 "message_count": 6,
                 "token_count": 1000,
                 "idle_timeout_seconds": 1800,
             },
-            "namespace": f"tenants/{tenant_id}",
             "extraction": {
                 "enabled": True,
                 "rules": [
@@ -381,15 +421,12 @@ def build_testenv_config(
                     "facts",
                 ],
             },
+            "shared_across_channels": True,
             "isolated_channels": [],
         },
         "heartbeat": {
             "busy_threshold": 1,
             "max_background_seconds": 3600,
-        },
-        "cost_cap": {
-            "monthly_limit_dollars": 100.0,
-            "enabled": True,
         },
         "channels": channels_dict,
         "bot_policy": {
@@ -446,5 +483,4 @@ def build_testenv_config(
             ],
         },
         "codebases": codebases,
-        "is_internal_testenv": True,
     }

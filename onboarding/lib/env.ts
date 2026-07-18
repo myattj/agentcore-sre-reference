@@ -11,6 +11,7 @@
  *
  * Required at runtime by every onboarding page that talks to the bridge:
  *   - BRIDGE_URL                       (server) base URL of the bridge API
+ *   - ONBOARDING_PUBLIC_URL             (server) canonical browser origin
  *   - BRIDGE_OAUTH_STATE_SECRET        (server) HMAC key shared with the bridge
  *   - NEXT_PUBLIC_BRIDGE_INSTALL_URL   (public) the /slack/install URL on the bridge
  *
@@ -19,6 +20,7 @@
 
 type RequiredEnvVar =
   | "BRIDGE_URL"
+  | "ONBOARDING_PUBLIC_URL"
   | "BRIDGE_OAUTH_STATE_SECRET"
   | "NEXT_PUBLIC_BRIDGE_INSTALL_URL";
 
@@ -37,12 +39,49 @@ export function getEnv(name: RequiredEnvVar): string {
 
 /** Server-only HMAC secret used to verify session tokens minted by the bridge. */
 export function getStateSecret(): string {
-  return getEnv("BRIDGE_OAUTH_STATE_SECRET");
+  const secret = getEnv("BRIDGE_OAUTH_STATE_SECRET");
+  if (secret.length < 32) {
+    throw new Error(
+      "BRIDGE_OAUTH_STATE_SECRET must contain at least 32 characters.",
+    );
+  }
+  return secret;
 }
 
 /** Server-only base URL of the bridge for API calls. */
 export function getBridgeUrl(): string {
   return getEnv("BRIDGE_URL").replace(/\/+$/, "");
+}
+
+/** Canonical public origin used for server-side redirects. */
+export function getOnboardingPublicOrigin(): string {
+  const configured = getEnv("ONBOARDING_PUBLIC_URL");
+  let url: URL;
+  try {
+    url = new URL(configured);
+  } catch {
+    throw new Error("ONBOARDING_PUBLIC_URL must be an absolute URL.");
+  }
+
+  if (
+    url.username ||
+    url.password ||
+    url.search ||
+    url.hash ||
+    (url.pathname !== "/" && url.pathname !== "")
+  ) {
+    throw new Error(
+      "ONBOARDING_PUBLIC_URL must contain only a scheme, host, and optional port.",
+    );
+  }
+
+  const loopback = ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
+  if (url.protocol !== "https:" && !(loopback && url.protocol === "http:")) {
+    throw new Error(
+      "ONBOARDING_PUBLIC_URL must use HTTPS except for a loopback development URL.",
+    );
+  }
+  return url.origin;
 }
 
 /** Public URL of the Slack install endpoint, embedded in the landing page. */
@@ -51,12 +90,12 @@ export function getBridgeInstallUrl(): string {
 }
 
 /**
- * GitHub App slug for the AgentCore Reference codebase-access App.
+ * GitHub App slug for the Agent codebase-access App.
  *
  * Returns ``null`` when unset — the onboarding UI should render a
  * disabled "GitHub App not configured" card instead of a broken link.
  * The slug is the URL-safe name of the App as it appears in its
- * github.com URL (e.g. the ``agentcore`` in ``github.com/apps/agentcore``).
+ * github.com URL (e.g. the ``agent`` in ``github.com/apps/agent``).
  *
  * Setting this env var requires:
  *   1. Creating the GitHub App at github.com/settings/apps/new

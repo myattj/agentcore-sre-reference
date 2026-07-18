@@ -1,4 +1,4 @@
-"""Seed content packs for the AgentCore Reference test-env rig.
+"""Seed content packs for the Agent test-env rig.
 
 Each pack exposes a ``build() -> list[SeedMessage]`` function. The
 seeder imports them in the order defined by

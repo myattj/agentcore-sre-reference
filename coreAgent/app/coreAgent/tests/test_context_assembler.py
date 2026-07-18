@@ -2,16 +2,23 @@
 and the assemble_context pipeline."""
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+import pytest
+from pydantic import ValidationError
 
 from context_assembler import (
-    AssembledContext,
-    SkillMatch,
+    _compiled_triggers,
     _build_integration_block,
     _match_skill,
+    _resolve_permalinks,
     assemble_context,
 )
-from tenant import ByoConfig, ContextAssemblyConfig, SkillDef
+from tenant import (
+    MAX_SKILL_MATCH_TEXT_LENGTH,
+    MAX_SKILL_TRIGGER_LENGTH,
+    ByoConfig,
+    ContextAssemblyConfig,
+    SkillDef,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -90,6 +97,39 @@ class TestMatchSkill:
         assert "C_TEST" in result.prompt_addition
         assert "1712345678.123456" in result.prompt_addition
 
+    def test_catastrophic_nested_repeat_is_rejected(self):
+        with pytest.raises(ValidationError, match="must not repeat a group"):
+            self._skill(trigger=r"(a+)+$")
+
+    def test_oversized_trigger_is_rejected(self):
+        with pytest.raises(ValidationError, match="at most 512 characters"):
+            self._skill(trigger="a" * (MAX_SKILL_TRIGGER_LENGTH + 1))
+
+    def test_match_text_is_bounded(self, sample_ctx, monkeypatch):
+        observed: list[str] = []
+
+        class RecordingMatcher:
+            def validate_python(self, value: str) -> str:
+                observed.append(value)
+                return value
+
+        skill = self._skill(trigger="bounded-input-trigger")
+        monkeypatch.setitem(
+            _compiled_triggers,
+            skill.trigger,
+            RecordingMatcher(),
+        )
+
+        result = _match_skill(
+            "bounded-input-trigger" + ("x" * 100_000),
+            [skill],
+            sample_ctx,
+        )
+
+        assert result is not None
+        assert len(observed) == 1
+        assert len(observed[0]) == MAX_SKILL_MATCH_TEXT_LENGTH
+
 
 # ---------------------------------------------------------------------------
 # _build_integration_block()
@@ -150,6 +190,227 @@ class TestBuildIntegrationBlock:
         # Datadog is known; Confluence is not in the monitoring map
         assert "Datadog" in block
         assert "Confluence" not in block
+
+
+# ---------------------------------------------------------------------------
+# _resolve_permalinks() authorization
+# ---------------------------------------------------------------------------
+
+
+class TestResolvePermalinksAuthorization:
+    def _config(self) -> ContextAssemblyConfig:
+        return ContextAssemblyConfig(max_permalinks=3)
+
+    def test_current_channel_allowed_without_requester_user(
+        self, monkeypatch
+    ) -> None:
+        import context_assembler
+
+        fetched: list[tuple[str, str]] = []
+        monkeypatch.setattr(
+            context_assembler.slack_api,
+            "get_bot_token",
+            lambda _tenant: "xoxb-test",
+        )
+        monkeypatch.setattr(
+            context_assembler.slack_api,
+            "parse_permalink",
+            lambda _url: ("C_CURRENT", "1.2"),
+        )
+        monkeypatch.setattr(
+            context_assembler.slack_api,
+            "is_user_member_of_channel",
+            lambda *_args: pytest.fail("current channel needs no membership lookup"),
+        )
+
+        def fetch(_token: str, channel: str, thread: str) -> str:
+            fetched.append((channel, thread))
+            return "Thread (1 messages):\n\n**U1**: current"
+
+        monkeypatch.setattr(
+            context_assembler.slack_api,
+            "fetch_thread_replies",
+            fetch,
+        )
+
+        result = _resolve_permalinks(
+            {
+                "channel_id": "C_CURRENT",
+                "permalinks": ["https://workspace.slack.com/archives/C_CURRENT/p1"],
+            },
+            self._config(),
+            "tenant-a",
+        )
+
+        assert fetched == [("C_CURRENT", "1.2")]
+        assert "Referenced Thread" in result
+
+    @pytest.mark.parametrize("membership", [False, None])
+    def test_cross_channel_denied_without_positive_membership(
+        self, monkeypatch, membership: bool | None
+    ) -> None:
+        import context_assembler
+
+        monkeypatch.setattr(
+            context_assembler.slack_api,
+            "get_bot_token",
+            lambda _tenant: "xoxb-test",
+        )
+        monkeypatch.setattr(
+            context_assembler.slack_api,
+            "parse_permalink",
+            lambda _url: ("C_TARGET", "1.2"),
+        )
+        monkeypatch.setattr(
+            context_assembler.slack_api,
+            "is_user_member_of_channel",
+            lambda *_args: membership,
+        )
+        monkeypatch.setattr(
+            context_assembler.slack_api,
+            "fetch_thread_replies",
+            lambda *_args: pytest.fail("unauthorized permalink must not be fetched"),
+        )
+
+        result = _resolve_permalinks(
+            {
+                "channel_id": "C_CURRENT",
+                "user_id": "U_REQUESTER",
+                "permalinks": ["https://workspace.slack.com/archives/C_TARGET/p1"],
+            },
+            self._config(),
+            "tenant-a",
+        )
+
+        assert result == ""
+
+    def test_cross_channel_denied_when_requester_is_missing(
+        self, monkeypatch
+    ) -> None:
+        import context_assembler
+
+        monkeypatch.setattr(
+            context_assembler.slack_api,
+            "get_bot_token",
+            lambda _tenant: "xoxb-test",
+        )
+        monkeypatch.setattr(
+            context_assembler.slack_api,
+            "parse_permalink",
+            lambda _url: ("C_TARGET", "1.2"),
+        )
+        monkeypatch.setattr(
+            context_assembler.slack_api,
+            "is_user_member_of_channel",
+            lambda *_args: pytest.fail("missing requester must skip membership lookup"),
+        )
+        monkeypatch.setattr(
+            context_assembler.slack_api,
+            "fetch_thread_replies",
+            lambda *_args: pytest.fail("unauthorized permalink must not be fetched"),
+        )
+
+        result = _resolve_permalinks(
+            {
+                "channel_id": "C_CURRENT",
+                "permalinks": ["https://workspace.slack.com/archives/C_TARGET/p1"],
+            },
+            self._config(),
+            "tenant-a",
+        )
+
+        assert result == ""
+
+    def test_cross_channel_membership_error_fails_closed(self, monkeypatch) -> None:
+        import context_assembler
+
+        monkeypatch.setattr(
+            context_assembler.slack_api,
+            "get_bot_token",
+            lambda _tenant: "xoxb-test",
+        )
+        monkeypatch.setattr(
+            context_assembler.slack_api,
+            "parse_permalink",
+            lambda _url: ("C_TARGET", "1.2"),
+        )
+
+        def fail_membership(*_args: str) -> bool:
+            raise OSError("Slack unavailable")
+
+        monkeypatch.setattr(
+            context_assembler.slack_api,
+            "is_user_member_of_channel",
+            fail_membership,
+        )
+        monkeypatch.setattr(
+            context_assembler.slack_api,
+            "fetch_thread_replies",
+            lambda *_args: pytest.fail("unauthorized permalink must not be fetched"),
+        )
+
+        result = _resolve_permalinks(
+            {
+                "channel_id": "C_CURRENT",
+                "user_id": "U_REQUESTER",
+                "permalinks": ["https://workspace.slack.com/archives/C_TARGET/p1"],
+            },
+            self._config(),
+            "tenant-a",
+        )
+
+        assert result == ""
+
+    def test_cross_channel_allowed_after_positive_membership(
+        self, monkeypatch
+    ) -> None:
+        import context_assembler
+
+        checks: list[tuple[str, str, str]] = []
+        fetched: list[tuple[str, str]] = []
+        monkeypatch.setattr(
+            context_assembler.slack_api,
+            "get_bot_token",
+            lambda _tenant: "xoxb-test",
+        )
+        monkeypatch.setattr(
+            context_assembler.slack_api,
+            "parse_permalink",
+            lambda _url: ("C_TARGET", "1.2"),
+        )
+
+        def member(token: str, channel: str, user: str) -> bool:
+            checks.append((token, channel, user))
+            return True
+
+        def fetch(_token: str, channel: str, thread: str) -> str:
+            fetched.append((channel, thread))
+            return "Thread (1 messages):\n\n**U1**: authorized"
+
+        monkeypatch.setattr(
+            context_assembler.slack_api,
+            "is_user_member_of_channel",
+            member,
+        )
+        monkeypatch.setattr(
+            context_assembler.slack_api,
+            "fetch_thread_replies",
+            fetch,
+        )
+
+        result = _resolve_permalinks(
+            {
+                "channel_id": "C_CURRENT",
+                "user_id": "U_REQUESTER",
+                "permalinks": ["https://workspace.slack.com/archives/C_TARGET/p1"],
+            },
+            self._config(),
+            "tenant-a",
+        )
+
+        assert checks == [("xoxb-test", "C_TARGET", "U_REQUESTER")]
+        assert fetched == [("C_TARGET", "1.2")]
+        assert "authorized" in result
 
 
 # ---------------------------------------------------------------------------

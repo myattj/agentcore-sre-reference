@@ -1,4 +1,4 @@
-# Phase B sandbox container (v2 — real Claude agent loop).
+# PR sandbox container with a Claude agent loop.
 #
 # Built by infra/data/lib/sandbox-stack.ts via DockerImageAsset (which
 # auto-creates an ECR repo and pushes on `cdk deploy`). The container
@@ -17,6 +17,14 @@
 
 FROM python:3.13-slim
 
+# Keep dependency resolution identical between local tests and the image.
+# Pin the installer itself and tell uv to use the Python already in the base
+# image rather than downloading another interpreter.
+COPY --from=ghcr.io/astral-sh/uv:0.11.24 /uv /uvx /bin/
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PYTHON_DOWNLOADS=never
+
 # git for clone/branch/commit/push.
 # ca-certificates for HTTPS to api.github.com, dynamodb, secretsmanager.
 # Everything else stays out of the image to keep it small and the
@@ -29,10 +37,12 @@ RUN apt-get update \
 
 WORKDIR /app
 
-# Install Python deps in their own layer so changes to entrypoint.py
-# don't bust the deps cache.
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Install runtime-only Python dependencies in their own layer so changes to
+# worker code do not invalidate the dependency cache. `--frozen` makes the
+# checked-in lock authoritative; the pytest extra is intentionally omitted.
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-dev --no-install-project
+ENV PATH="/app/.venv/bin:${PATH}"
 
 # scm_github.py is a MIRROR of coreAgent/app/coreAgent/scm_github.py
 # (gotcha #13: bridge/agent/sandbox each have their own venv, can't

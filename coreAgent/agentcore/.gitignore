@@ -8,8 +8,8 @@ cdk/node_modules/
 # CLI Internals
 .cli/*
 
+# Per-developer deployment target state
+aws-targets.json
+
 # Ephemeral Staging
 .cache/*
-
-# Exception: Commit the State
-!.cli/deployed-state.json

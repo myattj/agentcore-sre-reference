@@ -1,14 +1,20 @@
 # CI/CD pipeline for the AgentCore multi-tenant agent platform.
 #
 # CI gates (every PR + push to main):
+#   - Gitleaks full-history secret scan
 #   - Bridge pytest (Python 3.13)
-#   - Onboarding Next.js build (TypeScript check)
-#   - infra/data CDK synth (CloudFormation validation)
+#   - Core agent pytest + metrics tests (Python 3.13)
+#   - Gateway interceptor pytest (Python 3.13)
+#   - Sandbox unit tests (Python 3.13)
+#   - Onboarding auth tests + Next.js build (TypeScript check)
+#   - Generated AgentCore CDK build/test/format check
+#   - infra/data CDK synth for every optional stack
 #
-# Deploy (push to main only, after gates pass):
+# Deploy (manual workflow dispatch only, with deploy_production=true):
+#   - Data + observability stacks first
 #   - Agent runtime via `agentcore deploy`
 #   - Bridge + onboarding Fargate services via CDK
-#   - Sandbox container image + task def via CDK (after services)
+#   - Experimental PR sandbox only with a second explicit opt-in
 #
 # ── One-time setup ────────────────────────────────────────────────
 #
@@ -31,22 +37,31 @@
 #                "token.actions.githubusercontent.com:aud": "sts.amazonaws.com"
 #              },
 #              "StringLike": {
-#                "token.actions.githubusercontent.com:sub": "repo:myattj/agentcorePlayground:*"
+#                "token.actions.githubusercontent.com:sub": "repo:<OWNER>/<REPOSITORY>:environment:production"
 #              }
 #            }
 #          }]
 #        }
-#      Permissions: AdministratorAccess (tighten later once stable)
+#      Permissions: a reviewed least-privilege deployment policy for the
+#                   CloudFormation, CDK bootstrap, AgentCore, IAM pass-role,
+#                   ECR, ECS, DynamoDB, CloudWatch, and related resources used
+#                   by the stacks below. Do not use AdministratorAccess.
 #
 # 3. Add GitHub repository variables (Settings > Secrets and variables > Actions > Variables):
 #      AWS_DEPLOY_ROLE_ARN   = arn:aws:iam::<ACCOUNT>:role/github-actions-deploy
-#      AGENT_RUNTIME_ARN     = arn:aws:bedrock-agentcore:us-west-2:<ACCOUNT>:runtime/coreAgent_coreAgent-dyGFWRDGwJ
-#      CERTIFICATE_ARN       = arn:aws:acm:us-west-2:<ACCOUNT>:certificate/<id>
-#      DOMAIN_NAME           = agent.example.com
+#      AGENT_RUNTIME_ARN     = optional, exact ARN assertion/selector when more than one
+#                              runtime named coreAgent exists; normally auto-discovered
+#      CERTIFICATE_ARN       = required ACM certificate ARN for production HTTPS
+#      DOMAIN_NAME           = required production hostname covered by CERTIFICATE_ARN
 #      SLACK_SECRETS_ARN     = arn:aws:secretsmanager:us-west-2:<ACCOUNT>:secret:agentcore/services/slack-<suffix>
 #      BRIDGE_SECRETS_ARN    = arn:aws:secretsmanager:us-west-2:<ACCOUNT>:secret:agentcore/services/bridge-<suffix>
 #      SANDBOX_SECRETS_ARN   = arn:aws:secretsmanager:us-west-2:<ACCOUNT>:secret:agentcore/services/sandbox-<suffix>
 #      ANTHROPIC_SECRETS_ARN = arn:aws:secretsmanager:us-west-2:<ACCOUNT>:secret:agentcore/platform/anthropic_api_key-<suffix>
+#      PLATFORM_GITHUB_APP_ID   = numeric GitHub App ID used by bridge + sandbox
+#      PLATFORM_GITHUB_APP_SLUG = public GitHub App URL slug used by onboarding
+#      AGENTCORE_MEMORY_ID          = optional AgentCore Memory resource ID
+#      AGENTCORE_SEMANTIC_STRATEGY_ID = optional semantic-memory strategy ID
+#      AGENTCORE_USER_PREF_STRATEGY_ID = optional preference-memory strategy ID
 # ──────────────────────────────────────────────────────────────────
 
 name: CI/CD
@@ -55,18 +70,64 @@ on:
   pull_request:
   push:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      deploy_production:
+        description: Deploy production after all validation gates pass
+        required: true
+        default: false
+        type: boolean
+      deploy_experimental_sandbox:
+        description: Deploy the unsafe experimental PR sandbox (requires separate threat-model review)
+        required: true
+        default: false
+        type: boolean
 
 concurrency:
   group: cicd-${{ github.ref }}
-  # Cancel in-progress CI on PRs; queue deploys on main.
+  # Cancel in-progress CI on PRs; queue pushes and manual deploys.
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
-  id-token: write
 
 jobs:
   # ─── Test gates ──────────────────────────────────────
+
+  secret-scan:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0
+      # Scan every commit directly. The GitHub Action's push-range mode cannot
+      # address the nonexistent parent of a repository's first commit.
+      - name: Scan full Git history
+        run: >-
+          docker run --rm --volume "$GITHUB_WORKSPACE:/repo:ro"
+          ghcr.io/gitleaks/gitleaks:v8.30.1@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f
+          git /repo --redact --no-banner --verbose
+
+  tooling-tests:
+    name: Local tooling and synthetic lab
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.13"
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+      - name: Local setup helper tests
+        run: python -m unittest discover -s scripts/tests -v
+      - name: Synthetic incident seed tests
+        run: >-
+          uv run --python 3.13 --with requests==2.32.5
+          python -m unittest discover -s seed/tests -v
+      - name: Shell syntax
+        run: find scripts infra/data/scripts -type f -name '*.sh' -exec bash -n {} +
 
   bridge-tests:
     name: Bridge pytest
@@ -75,89 +136,426 @@ jobs:
       run:
         working-directory: bridge
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.13"
-      - uses: astral-sh/setup-uv@v4
-      - run: uv sync --extra dev
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+      - run: uv sync --frozen --extra dev
       - run: uv run pytest
 
+  core-agent-tests:
+    name: Core agent tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: coreAgent/app/coreAgent
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.13"
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+      - run: uv sync --frozen --extra test
+      - run: uv run pytest
+      - run: uv run python -m unittest test_metrics
+
+  interceptor-tests:
+    name: Gateway interceptor tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: workers/gateway_interceptor
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.13"
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+      - run: uv sync --frozen --extra dev
+      - run: uv run pytest
+
+  sandbox-tests:
+    name: Sandbox tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: infra/sandbox
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.13"
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+      - run: uv sync --frozen --extra test
+      - run: uv run --frozen python -m pytest -p no:cacheprovider tests
+
   onboarding-check:
-    name: Onboarding build
+    name: Onboarding test and build
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: onboarding
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: onboarding/package-lock.json
       - run: npm ci
+      - run: npm test
       # next build runs tsc and validates the full production build.
       - run: npm run build
         env:
           NEXT_PUBLIC_BRIDGE_INSTALL_URL: https://ci.test/slack/install
 
+  agentcore-cdk-check:
+    name: Generated AgentCore CDK check
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: coreAgent/agentcore/cdk
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: coreAgent/agentcore/cdk/package-lock.json
+      - name: Validate AgentCore project configuration
+        working-directory: coreAgent
+        run: |
+          cp agentcore/aws-targets.example.json agentcore/aws-targets.json
+          npx --yes @aws/agentcore@0.24.1 validate
+      - run: npm ci
+      - run: npm run build
+      - run: npm test -- --runInBand
+      - run: npm run format:check
+
   cdk-synth:
-    name: CDK synth
+    name: CDK synth (all stacks)
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: infra/data
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: infra/data/package-lock.json
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.13"
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+      - run: npm ci
+      - run: npm run build
+      # GatewayStack consumes this ignored build artifact. Build it from
+      # source so synth also works in a clean checkout.
+      - run: bash scripts/build_interceptor_zip.sh
+      # Dummy account; cdk.json supplies deterministic AZs so synth stays offline.
+      - run: npx cdk synth --quiet
+        env:
+          CDK_DEFAULT_ACCOUNT: "000000000000"
+      - name: Synth gateway stack
+        run: >-
+          npx cdk synth AgentCore-coreAgent-gateway-us-west-2 --quiet
+          --context bridgePublicUrl=https://bridge.example.test
+        env:
+          CDK_DEFAULT_ACCOUNT: "000000000000"
+      - name: Synth certificate-free services stack
+        run: >-
+          npx cdk synth AgentCore-coreAgent-services-us-west-2 --quiet
+          --context agentRuntimeArn=arn:aws:bedrock-agentcore:us-west-2:000000000000:runtime/example
+          --context slackSecretsArn=arn:aws:secretsmanager:us-west-2:000000000000:secret:slack-abc123
+          --context bridgeSecretsArn=arn:aws:secretsmanager:us-west-2:000000000000:secret:bridge-abc123
+        env:
+          CDK_DEFAULT_ACCOUNT: "000000000000"
+      - name: Synth HTTPS services stack
+        run: >-
+          npx cdk synth AgentCore-coreAgent-services-us-west-2 --quiet
+          --context agentRuntimeArn=arn:aws:bedrock-agentcore:us-west-2:000000000000:runtime/example
+          --context certificateArn=arn:aws:acm:us-west-2:000000000000:certificate/00000000-0000-0000-0000-000000000000
+          --context domainName=example.test
+          --context slackSecretsArn=arn:aws:secretsmanager:us-west-2:000000000000:secret:slack-abc123
+          --context bridgeSecretsArn=arn:aws:secretsmanager:us-west-2:000000000000:secret:bridge-abc123
+          --context sandboxSecretsArn=arn:aws:secretsmanager:us-west-2:000000000000:secret:sandbox-abc123
+        env:
+          CDK_DEFAULT_ACCOUNT: "000000000000"
+      - name: Synth sandbox stack
+        run: >-
+          npx cdk synth AgentCore-coreAgent-sandbox-us-west-2 --quiet
+          --context sandboxSecretsArn=arn:aws:secretsmanager:us-west-2:000000000000:secret:sandbox-abc123
+          --context sandboxVpcId=vpc-00000000000000000
+          --context sandboxAvailabilityZones=us-west-2a,us-west-2b
+          --context sandboxPublicSubnetIds=subnet-00000000000000001,subnet-00000000000000002
+          --context sandboxClusterName=example-cluster
+          --context sandboxClusterArn=arn:aws:ecs:us-west-2:000000000000:cluster/example-cluster
+          --context sandboxDomainName=example.test
+          --context sandboxGithubAppId=123456
+        env:
+          CDK_DEFAULT_ACCOUNT: "000000000000"
+
+  # ─── Deploy (explicit manual opt-in, after gates pass) ────────────
+
+  deploy-data:
+    name: Deploy data and observability
+    if: github.event_name == 'workflow_dispatch' && inputs.deploy_production == true && github.ref == 'refs/heads/main'
+    needs:
+      - secret-scan
+      - tooling-tests
+      - bridge-tests
+      - core-agent-tests
+      - interceptor-tests
+      - sandbox-tests
+      - onboarding-check
+      - agentcore-cdk-check
+      - cdk-synth
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Validate data deployment configuration
+        env:
+          AWS_DEPLOY_ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          CERTIFICATE_ARN: ${{ vars.CERTIFICATE_ARN }}
+          DOMAIN_NAME: ${{ vars.DOMAIN_NAME }}
+        run: |
+          missing=0
+          for name in AWS_DEPLOY_ROLE_ARN CERTIFICATE_ARN DOMAIN_NAME; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Missing required production variable: $name"
+              missing=1
+            fi
+          done
+          exit "$missing"
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: aws-actions/configure-aws-credentials@517a711dbcd0e402f90c77e7e2f81e849156e31d # v6.2.2
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: us-west-2
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: infra/data/package-lock.json
       - run: npm ci
-      - run: npm run build
-      # Dummy account — synth is purely local, no AWS calls.
-      - run: npx cdk synth --quiet
-        env:
-          CDK_DEFAULT_ACCOUNT: "000000000000"
-
-  # ─── Deploy (main only, after gates pass) ────────────
+        working-directory: infra/data
+      - name: CDK deploy data and observability
+        working-directory: infra/data
+        run: |
+          npm run build
+          npx cdk deploy \
+            AgentCore-coreAgent-data-us-west-2 \
+            AgentCore-coreAgent-observability-us-west-2 \
+            --require-approval never
 
   deploy-agent:
     name: Deploy agent
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-    needs: [bridge-tests, onboarding-check, cdk-synth]
+    if: github.event_name == 'workflow_dispatch' && inputs.deploy_production == true && github.ref == 'refs/heads/main'
+    needs: [deploy-data]
     runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      agent_runtime_arn: ${{ steps.resolve-runtime.outputs.arn }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: aws-actions/configure-aws-credentials@v4
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - name: Validate agent deployment configuration
+        env:
+          AWS_DEPLOY_ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          PLATFORM_GITHUB_APP_ID: ${{ vars.PLATFORM_GITHUB_APP_ID }}
+          DEPLOY_EXPERIMENTAL_SANDBOX: ${{ inputs.deploy_experimental_sandbox }}
+        run: |
+          if [ -z "$AWS_DEPLOY_ROLE_ARN" ]; then
+            echo "::error::Missing required repository variable: AWS_DEPLOY_ROLE_ARN"
+            exit 1
+          fi
+          if [ "$DEPLOY_EXPERIMENTAL_SANDBOX" = "true" ] && \
+             [ -z "$PLATFORM_GITHUB_APP_ID" ]; then
+            echo "::error::Experimental sandbox requires repository variable: PLATFORM_GITHUB_APP_ID"
+            exit 1
+          fi
+          if [ -n "$PLATFORM_GITHUB_APP_ID" ] && \
+             [[ ! "$PLATFORM_GITHUB_APP_ID" =~ ^[0-9]+$ ]]; then
+            echo "::error::PLATFORM_GITHUB_APP_ID must be numeric"
+            exit 1
+          fi
+      - uses: aws-actions/configure-aws-credentials@517a711dbcd0e402f90c77e7e2f81e849156e31d # v6.2.2
         with:
           role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
           aws-region: us-west-2
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: coreAgent/agentcore/cdk/package-lock.json
-      - run: npm install -g @aws/agentcore@0.6.0
+      - run: npm install -g @aws/agentcore@0.24.1
       - run: cd coreAgent/agentcore/cdk && npm ci
+      - name: Configure portable runtime environment
+        working-directory: coreAgent
+        env:
+          GITHUB_APP_ID: ${{ vars.PLATFORM_GITHUB_APP_ID }}
+          DOMAIN_NAME: ${{ vars.DOMAIN_NAME }}
+          AGENTCORE_MEMORY_ID: ${{ vars.AGENTCORE_MEMORY_ID }}
+          AGENTCORE_SEMANTIC_STRATEGY_ID: ${{ vars.AGENTCORE_SEMANTIC_STRATEGY_ID }}
+          AGENTCORE_USER_PREF_STRATEGY_ID: ${{ vars.AGENTCORE_USER_PREF_STRATEGY_ID }}
+          DEPLOY_EXPERIMENTAL_SANDBOX: ${{ inputs.deploy_experimental_sandbox }}
+        run: |
+          set -euo pipefail
+          account_id=$(aws sts get-caller-identity --query Account --output text)
+          jq --arg account "$account_id" \
+            '.[0].account = $account | .[0].region = "us-west-2"' \
+            agentcore/aws-targets.example.json > agentcore/aws-targets.json
+          add_env() {
+            local name="$1"
+            local value="$2"
+            if [ -n "$value" ]; then
+              jq --arg name "$name" --arg value "$value" \
+                '.runtimes[0].envVars = ((.runtimes[0].envVars // []) | map(select(.name != $name)) + [{name: $name, value: $value}])' \
+                agentcore/agentcore.json > agentcore/agentcore.json.tmp
+              mv agentcore/agentcore.json.tmp agentcore/agentcore.json
+            fi
+          }
+          add_env GITHUB_APP_ID "$GITHUB_APP_ID"
+          if [ -n "$DOMAIN_NAME" ]; then
+            add_env DASHBOARD_BASE_URL "https://$DOMAIN_NAME"
+          fi
+          add_env AGENTCORE_MEMORY_ID "$AGENTCORE_MEMORY_ID"
+          add_env AGENTCORE_SEMANTIC_STRATEGY_ID "$AGENTCORE_SEMANTIC_STRATEGY_ID"
+          add_env AGENTCORE_USER_PREF_STRATEGY_ID "$AGENTCORE_USER_PREF_STRATEGY_ID"
+          if [ "$DEPLOY_EXPERIMENTAL_SANDBOX" = "true" ]; then
+            add_env ENABLE_EXPERIMENTAL_PR_SANDBOX "1"
+          fi
+          jq -e . agentcore/agentcore.json >/dev/null
+          agentcore validate
       - name: agentcore deploy
         working-directory: coreAgent
         run: agentcore deploy
+      - name: Resolve deployed AgentCore Runtime ARN
+        id: resolve-runtime
+        env:
+          RUNTIME_ARN_OVERRIDE: ${{ vars.AGENT_RUNTIME_ARN }}
+          RUNTIME_NAME: coreAgent
+          AWS_REGION: us-west-2
+        run: |
+          set -euo pipefail
+          account_id=$(aws sts get-caller-identity --query Account --output text)
+          runtimes_json=$(aws bedrock-agentcore-control list-agent-runtimes \
+            --region "$AWS_REGION" \
+            --output json \
+            --no-cli-pager)
+          mapfile -t runtime_arns < <(
+            jq -r --arg name "$RUNTIME_NAME" \
+              '.agentRuntimes[]? | select(.agentRuntimeName == $name) | .agentRuntimeArn' \
+              <<<"$runtimes_json" | sort -u
+          )
+
+          expected_arn_pattern="^arn:aws:bedrock-agentcore:${AWS_REGION}:${account_id}:runtime/[A-Za-z][A-Za-z0-9_]{0,99}-[A-Za-z0-9]{10}$"
+          if [ -n "$RUNTIME_ARN_OVERRIDE" ]; then
+            if [[ ! "$RUNTIME_ARN_OVERRIDE" =~ $expected_arn_pattern ]]; then
+              echo "::error::AGENT_RUNTIME_ARN is not a Runtime ARN in the active account and region"
+              exit 1
+            fi
+            runtime_arn="$RUNTIME_ARN_OVERRIDE"
+            found=0
+            for candidate in "${runtime_arns[@]}"; do
+              if [ "$candidate" = "$runtime_arn" ]; then
+                found=1
+                break
+              fi
+            done
+            if [ "$found" -ne 1 ]; then
+              echo "::error::AGENT_RUNTIME_ARN does not identify a runtime named $RUNTIME_NAME"
+              exit 1
+            fi
+          elif [ "${#runtime_arns[@]}" -eq 1 ]; then
+            runtime_arn="${runtime_arns[0]}"
+          else
+            echo "::error::Expected exactly one runtime named $RUNTIME_NAME; found ${#runtime_arns[@]}. Set AGENT_RUNTIME_ARN to select an exact matching ARN."
+            exit 1
+          fi
+
+          if [[ ! "$runtime_arn" =~ $expected_arn_pattern ]]; then
+            echo "::error::Discovered runtime ARN has an unexpected account, region, or resource ID"
+            exit 1
+          fi
+          runtime_id="${runtime_arn##*/}"
+          runtime_json=$(aws bedrock-agentcore-control get-agent-runtime \
+            --agent-runtime-id "$runtime_id" \
+            --region "$AWS_REGION" \
+            --output json \
+            --no-cli-pager)
+          actual_arn=$(jq -r '.agentRuntimeArn // empty' <<<"$runtime_json")
+          actual_name=$(jq -r '.agentRuntimeName // empty' <<<"$runtime_json")
+          actual_status=$(jq -r '.status // empty' <<<"$runtime_json")
+          if [ "$actual_arn" != "$runtime_arn" ] || \
+             [ "$actual_name" != "$RUNTIME_NAME" ] || \
+             [ "$actual_status" != "READY" ]; then
+            echo "::error::Resolved runtime failed identity/readiness validation (name=$actual_name status=$actual_status)"
+            exit 1
+          fi
+
+          echo "Resolved $actual_name runtime: $runtime_arn"
+          echo "arn=$runtime_arn" >> "$GITHUB_OUTPUT"
+      - name: Attach data access policy to the runtime
+        run: bash infra/data/scripts/attach_agent_policy.sh
 
   deploy-services:
     name: Deploy services
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-    needs: [bridge-tests, onboarding-check, cdk-synth]
+    if: github.event_name == 'workflow_dispatch' && inputs.deploy_production == true && github.ref == 'refs/heads/main'
+    needs: [deploy-data, deploy-agent]
     runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: aws-actions/configure-aws-credentials@v4
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - name: Validate services deployment configuration
+        env:
+          AWS_DEPLOY_ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          AGENT_RUNTIME_ARN: ${{ needs.deploy-agent.outputs.agent_runtime_arn }}
+          CERTIFICATE_ARN: ${{ vars.CERTIFICATE_ARN }}
+          DOMAIN_NAME: ${{ vars.DOMAIN_NAME }}
+          SLACK_SECRETS_ARN: ${{ vars.SLACK_SECRETS_ARN }}
+          BRIDGE_SECRETS_ARN: ${{ vars.BRIDGE_SECRETS_ARN }}
+          SANDBOX_SECRETS_ARN: ${{ vars.SANDBOX_SECRETS_ARN }}
+          PLATFORM_GITHUB_APP_ID: ${{ vars.PLATFORM_GITHUB_APP_ID }}
+          PLATFORM_GITHUB_APP_SLUG: ${{ vars.PLATFORM_GITHUB_APP_SLUG }}
+          DEPLOY_EXPERIMENTAL_SANDBOX: ${{ inputs.deploy_experimental_sandbox }}
+        run: |
+          missing=0
+          for name in \
+            AWS_DEPLOY_ROLE_ARN AGENT_RUNTIME_ARN \
+            CERTIFICATE_ARN DOMAIN_NAME \
+            SLACK_SECRETS_ARN BRIDGE_SECRETS_ARN; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Missing required services configuration: $name"
+              missing=1
+            fi
+          done
+          if [ "$DEPLOY_EXPERIMENTAL_SANDBOX" = "true" ]; then
+            for name in \
+              SANDBOX_SECRETS_ARN PLATFORM_GITHUB_APP_ID PLATFORM_GITHUB_APP_SLUG; do
+              if [ -z "${!name}" ]; then
+                echo "::error::Experimental sandbox requires repository variable: $name"
+                missing=1
+              fi
+            done
+          fi
+          exit "$missing"
+      - uses: aws-actions/configure-aws-credentials@517a711dbcd0e402f90c77e7e2f81e849156e31d # v6.2.2
         with:
           role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
           aws-region: us-west-2
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: 22
           cache: npm
@@ -167,29 +565,77 @@ jobs:
       # updates Fargate task definitions, triggers rolling deploy.
       - name: CDK deploy services
         working-directory: infra/data
+        env:
+          AGENT_RUNTIME_ARN: ${{ needs.deploy-agent.outputs.agent_runtime_arn }}
+          CERTIFICATE_ARN: ${{ vars.CERTIFICATE_ARN }}
+          DOMAIN_NAME: ${{ vars.DOMAIN_NAME }}
+          SLACK_SECRETS_ARN: ${{ vars.SLACK_SECRETS_ARN }}
+          BRIDGE_SECRETS_ARN: ${{ vars.BRIDGE_SECRETS_ARN }}
+          SANDBOX_SECRETS_ARN: ${{ vars.SANDBOX_SECRETS_ARN }}
+          PLATFORM_GITHUB_APP_ID: ${{ vars.PLATFORM_GITHUB_APP_ID }}
+          PLATFORM_GITHUB_APP_SLUG: ${{ vars.PLATFORM_GITHUB_APP_SLUG }}
+          DEPLOY_EXPERIMENTAL_SANDBOX: ${{ inputs.deploy_experimental_sandbox }}
         run: |
+          set -euo pipefail
           npm run build
+          optional_context=()
+          if [ -n "$CERTIFICATE_ARN" ]; then
+            optional_context+=(--context "certificateArn=$CERTIFICATE_ARN")
+            optional_context+=(--context "domainName=$DOMAIN_NAME")
+          fi
+          if [ -n "$PLATFORM_GITHUB_APP_ID" ]; then
+            optional_context+=(--context "githubAppId=$PLATFORM_GITHUB_APP_ID")
+          fi
+          if [ -n "$PLATFORM_GITHUB_APP_SLUG" ]; then
+            optional_context+=(--context "githubAppSlug=$PLATFORM_GITHUB_APP_SLUG")
+          fi
+          if [ "$DEPLOY_EXPERIMENTAL_SANDBOX" = "true" ]; then
+            optional_context+=(--context "sandboxSecretsArn=$SANDBOX_SECRETS_ARN")
+          fi
           npx cdk deploy AgentCore-coreAgent-services-us-west-2 \
             --require-approval never \
-            --context agentRuntimeArn=${{ vars.AGENT_RUNTIME_ARN }} \
-            --context certificateArn=${{ vars.CERTIFICATE_ARN }} \
-            --context domainName=${{ vars.DOMAIN_NAME }} \
-            --context slackSecretsArn=${{ vars.SLACK_SECRETS_ARN }} \
-            --context bridgeSecretsArn=${{ vars.BRIDGE_SECRETS_ARN }} \
-            --context sandboxSecretsArn=${{ vars.SANDBOX_SECRETS_ARN }}
+            --context "agentRuntimeArn=$AGENT_RUNTIME_ARN" \
+            --context "slackSecretsArn=$SLACK_SECRETS_ARN" \
+            --context "bridgeSecretsArn=$BRIDGE_SECRETS_ARN" \
+            "${optional_context[@]}"
 
   deploy-sandbox:
-    name: Deploy sandbox
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    name: Deploy experimental sandbox
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      inputs.deploy_production == true &&
+      inputs.deploy_experimental_sandbox == true &&
+      github.ref == 'refs/heads/main'
     needs: [deploy-services]
     runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: aws-actions/configure-aws-credentials@v4
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - name: Validate experimental sandbox deployment configuration
+        env:
+          AWS_DEPLOY_ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          SANDBOX_SECRETS_ARN: ${{ vars.SANDBOX_SECRETS_ARN }}
+          DOMAIN_NAME: ${{ vars.DOMAIN_NAME }}
+          PLATFORM_GITHUB_APP_ID: ${{ vars.PLATFORM_GITHUB_APP_ID }}
+        run: |
+          missing=0
+          for name in \
+            AWS_DEPLOY_ROLE_ARN SANDBOX_SECRETS_ARN DOMAIN_NAME \
+            PLATFORM_GITHUB_APP_ID; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Missing required sandbox configuration: $name"
+              missing=1
+            fi
+          done
+          exit "$missing"
+      - uses: aws-actions/configure-aws-credentials@517a711dbcd0e402f90c77e7e2f81e849156e31d # v6.2.2
         with:
           role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
           aws-region: us-west-2
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: 22
           cache: npm
@@ -206,22 +652,50 @@ jobs:
               --query "Stacks[0].Outputs[?OutputKey=='$1'].OutputValue" \
               --output text
           }
-          echo "vpc_id=$(get VpcId)" >> "$GITHUB_OUTPUT"
-          echo "azs=$(get VpcAvailabilityZones)" >> "$GITHUB_OUTPUT"
-          echo "subnets=$(get VpcPublicSubnetIds)" >> "$GITHUB_OUTPUT"
-          echo "cluster_name=$(get ClusterName)" >> "$GITHUB_OUTPUT"
-          echo "cluster_arn=$(get ClusterArn)" >> "$GITHUB_OUTPUT"
+          {
+            echo "vpc_id=$(get VpcId)"
+            echo "azs=$(get VpcAvailabilityZones)"
+            echo "subnets=$(get VpcPublicSubnetIds)"
+            echo "cluster_name=$(get ClusterName)"
+            echo "cluster_arn=$(get ClusterArn)"
+          } >> "$GITHUB_OUTPUT"
       - name: CDK deploy sandbox
         working-directory: infra/data
+        env:
+          SANDBOX_SECRETS_ARN: ${{ vars.SANDBOX_SECRETS_ARN }}
+          SANDBOX_VPC_ID: ${{ steps.svc.outputs.vpc_id }}
+          SANDBOX_AVAILABILITY_ZONES: ${{ steps.svc.outputs.azs }}
+          SANDBOX_PUBLIC_SUBNET_IDS: ${{ steps.svc.outputs.subnets }}
+          SANDBOX_CLUSTER_NAME: ${{ steps.svc.outputs.cluster_name }}
+          SANDBOX_CLUSTER_ARN: ${{ steps.svc.outputs.cluster_arn }}
+          DOMAIN_NAME: ${{ vars.DOMAIN_NAME }}
+          PLATFORM_GITHUB_APP_ID: ${{ vars.PLATFORM_GITHUB_APP_ID }}
+          ANTHROPIC_SECRETS_ARN: ${{ vars.ANTHROPIC_SECRETS_ARN }}
         run: |
+          set -euo pipefail
+          for name in \
+            SANDBOX_VPC_ID SANDBOX_AVAILABILITY_ZONES SANDBOX_PUBLIC_SUBNET_IDS \
+            SANDBOX_CLUSTER_NAME SANDBOX_CLUSTER_ARN; do
+            if [ -z "${!name}" ] || [ "${!name}" = "None" ]; then
+              echo "::error::ServicesStack did not produce required sandbox input: $name"
+              exit 1
+            fi
+          done
           npm run build
+          optional_context=()
+          if [ -n "$ANTHROPIC_SECRETS_ARN" ]; then
+            optional_context+=(--context "anthropicSecretsArn=$ANTHROPIC_SECRETS_ARN")
+          fi
           npx cdk deploy AgentCore-coreAgent-sandbox-us-west-2 \
             --require-approval never \
-            --context sandboxSecretsArn=${{ vars.SANDBOX_SECRETS_ARN }} \
-            --context sandboxVpcId=${{ steps.svc.outputs.vpc_id }} \
-            --context sandboxAvailabilityZones=${{ steps.svc.outputs.azs }} \
-            --context sandboxPublicSubnetIds=${{ steps.svc.outputs.subnets }} \
-            --context sandboxClusterName=${{ steps.svc.outputs.cluster_name }} \
-            --context sandboxClusterArn=${{ steps.svc.outputs.cluster_arn }} \
-            --context sandboxDomainName=${{ vars.DOMAIN_NAME }} \
-            ${{ vars.ANTHROPIC_SECRETS_ARN && format('--context anthropicSecretsArn={0}', vars.ANTHROPIC_SECRETS_ARN) || '' }}
+            --context "sandboxSecretsArn=$SANDBOX_SECRETS_ARN" \
+            --context "sandboxVpcId=$SANDBOX_VPC_ID" \
+            --context "sandboxAvailabilityZones=$SANDBOX_AVAILABILITY_ZONES" \
+            --context "sandboxPublicSubnetIds=$SANDBOX_PUBLIC_SUBNET_IDS" \
+            --context "sandboxClusterName=$SANDBOX_CLUSTER_NAME" \
+            --context "sandboxClusterArn=$SANDBOX_CLUSTER_ARN" \
+            --context "sandboxDomainName=$DOMAIN_NAME" \
+            --context "sandboxGithubAppId=$PLATFORM_GITHUB_APP_ID" \
+            "${optional_context[@]}"
+      - name: Attach sandbox access policy to the runtime
+        run: ATTACH_SANDBOX_POLICY=1 bash infra/data/scripts/attach_agent_policy.sh

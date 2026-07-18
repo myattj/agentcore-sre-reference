@@ -2,7 +2,8 @@
 
 Every invocation and every catalog tool call produces a structured JSON line on
 stdout. CloudWatch Logs auto-parses those lines and publishes them as metrics
-under the ``AgentCore Reference/Agent`` namespace (configurable via ``METRICS_NAMESPACE``).
+under the fixed ``Agent/Runtime`` namespace consumed by the bridge and CDK
+observability stack.
 
 **Why EMF instead of ``cloudwatch:PutMetricData``?**
 
@@ -63,7 +64,7 @@ from pricing import compute_cost_cents
 
 log = logging.getLogger(__name__)
 
-DEFAULT_NAMESPACE = "AgentCore Reference/Agent"
+DEFAULT_NAMESPACE = "Agent/Runtime"
 
 
 class MetricsEmitter(Protocol):
@@ -196,7 +197,10 @@ class EMFMetricsEmitter:
     """
 
     def __init__(self, namespace: str | None = None) -> None:
-        self.namespace = namespace or os.getenv("METRICS_NAMESPACE", DEFAULT_NAMESPACE)
+        # Production readers and alarms share this fixed contract. The explicit
+        # argument remains useful for isolated unit tests, but runtime env cannot
+        # silently disconnect the emitter from those consumers.
+        self.namespace = namespace or DEFAULT_NAMESPACE
 
     def _emit_emf(
         self,

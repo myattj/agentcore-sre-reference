@@ -21,8 +21,8 @@ Required:
   - AWS creds active (`aws sts get-caller-identity` works)
   - Bedrock model access for Sonnet 4.6 in us-west-2
   - bridge/.venv and onboarding/node_modules already set up
-  - The shared Slack app already registered (week 2)
-  - The data layer deployed (`infra/data && npm run deploy` — week 1+2)
+  - The shared Slack app already registered
+  - The data layer deployed (`infra/data && npm run deploy`)
 
 First-run setup:
   The script prompts for SLACK_CLIENT_ID, SLACK_CLIENT_SECRET, and
@@ -121,7 +121,7 @@ def info(msg: str) -> None:
 
 
 def banner(title: str, lines: list[str], color: str = Color.CYAN) -> None:
-    width = max(len(title), max((len(l) for l in lines), default=0)) + 4
+    width = max(len(title), max((len(line) for line in lines), default=0)) + 4
     bar = "━" * width
     print(f"\n{color}{Color.BOLD}{bar}{Color.RESET}")
     print(f"{color}{Color.BOLD}  {title}{Color.RESET}")
@@ -373,7 +373,7 @@ def start_ngrok(reuse: bool) -> NgrokTunnel:
         if process:
             log_path = LOG_DIR / "ngrok.log"
             if log_path.exists():
-                info(f"ngrok log tail:")
+                info("ngrok log tail:")
                 for line in log_path.read_text().splitlines()[-10:]:
                     info(f"  {line}")
         sys.exit(1)
@@ -455,7 +455,7 @@ def sync_slack_manifest(public_url: str) -> tuple[str, str]:
         "ACTION REQUIRED — update the Slack app config",
         [
             f"{Color.BOLD}1.{Color.RESET} Go to: {Color.CYAN}https://api.slack.com/apps{Color.RESET}",
-            f"{Color.BOLD}2.{Color.RESET} Open your agent-core app",
+            f"{Color.BOLD}2.{Color.RESET} Open your Agent app",
             "",
             f"{Color.BOLD}3.{Color.RESET} {Color.BOLD}OAuth & Permissions{Color.RESET} → Redirect URLs → replace with:",
             f"     {Color.GREEN}{redirect_url}{Color.RESET}",
@@ -526,13 +526,13 @@ def start_services(
     bridge_env["ONBOARDING_BASE_URL"] = ONBOARDING_URL
     if public_url:
         bridge_env["SLACK_REDIRECT_URI"] = f"{public_url}/slack/oauth/callback"
-        # Week 4 chunk A: the bridge's JWT issuer URL must match the
-        # public origin so the Gateway's CUSTOM_JWT authorizer can
+        # The bridge's JWT issuer URL must match the public origin so
+        # the Gateway's CUSTOM_JWT authorizer can
         # verify tokens against the publicly-reachable JWKS endpoint.
         bridge_env["BRIDGE_PUBLIC_URL"] = public_url
 
-    # Week 4 chunk G: dev_up runs without LOCAL_DEV (production-DDB mode),
-    # so gateway_jwt.py requires an explicit RSA private key. Generate a
+    # dev_up runs without LOCAL_DEV (production-DDB mode), so
+    # gateway_jwt.py requires an explicit RSA private key. Generate a
     # session-stable one and pass it. The key lives only in this process's
     # memory — it's never written to disk.
     from cryptography.hazmat.primitives.asymmetric import rsa as _rsa
@@ -640,7 +640,7 @@ def stop_services(services: list[Service]) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Launch the full agent-core stack for a real-Slack onboarding demo.",
+        description="Launch the full Agent stack for a real-Slack onboarding demo.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
@@ -661,7 +661,7 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    print(f"{Color.BOLD}agent-core dev launcher{Color.RESET}")
+    print(f"{Color.BOLD}Agent dev launcher{Color.RESET}")
     print(f"{Color.GREY}repo: {REPO_ROOT}{Color.RESET}")
 
     use_ngrok = not args.no_slack
@@ -698,7 +698,7 @@ def main() -> int:
                 f"     1. Click {Color.BOLD}\"Add to Slack\"{Color.RESET}",
                 "     2. Authorize in your Slack workspace",
                 "     3. You'll land on the config page — edit the system prompt",
-                "     4. In Slack: /invite @agent-core, then @agent-core hi",
+                "     4. In Slack: /invite @Agent, then @Agent hi",
                 "",
                 f"{Color.BOLD}Watch the bridge log:{Color.RESET}",
                 f"     {Color.GREY}tail -f {(LOG_DIR / 'bridge.log').relative_to(REPO_ROOT)}{Color.RESET}",

@@ -208,7 +208,7 @@ def _bindings_block(
         ambiguous, framed as a UX nicety not a hard gate
     """
     listing = "\n".join(_render_binding_line(b) for b in bindings)
-    default_line = _render_default_line(default, reason, len(bindings))
+    default_line = _render_default_line(default, reason)
 
     guidance = (
         "**Picking the right one:** reason about it. Read the user's "
@@ -254,9 +254,7 @@ def _render_binding_line(b: CodebaseBinding) -> str:
     return "".join(parts)
 
 
-def _render_default_line(
-    default: CodebaseBinding, reason: str, binding_count: int
-) -> str:
+def _render_default_line(default: CodebaseBinding, reason: str) -> str:
     """One-line callout for the soft default + why."""
     repo = f"`{default.repo}`"
     if reason == "sole":

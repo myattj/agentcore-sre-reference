@@ -7,7 +7,7 @@
  * naming convention of the CLI-managed agent stack:
  *   AgentCore-coreAgent-data-<region>
  *
- * Override region via CDK_DEFAULT_REGION or by passing --context region=... .
+ * Override region by passing --context region=... .
  */
 import { App, Fn } from 'aws-cdk-lib';
 import { DataStack } from '../lib/data-stack';
@@ -18,11 +18,10 @@ import { ServicesStack } from '../lib/services-stack';
 
 const app = new App();
 
-// The project memory / BUILD_PLAN / CLAUDE.md all lock the region to
-// us-west-2 (widest AgentCore + Bedrock Memory availability). We do NOT
-// respect CDK_DEFAULT_REGION from the shell because developer shells often
-// have it set to a different region for unrelated work — we'd silently
-// deploy to the wrong region.
+// Default all related AgentCore, Bedrock Memory, and data resources to
+// us-west-2. We intentionally do not inherit CDK_DEFAULT_REGION because a
+// developer shell may set it for unrelated work and split the platform's
+// resources across regions.
 //
 // Override via: npx cdk deploy --context region=eu-west-1
 // (only do this if you know what you're doing; AgentCore Runtime may not
@@ -47,7 +46,7 @@ new DataStack(app, `AgentCore-coreAgent-data-${region}`, {
   },
 });
 
-// ObservabilityStack — post-week-7. CloudWatch dashboard + SNS alarms for
+// ObservabilityStack — CloudWatch dashboard + SNS alarms for
 // the platform-wide metrics the agent emits via EMF (see
 // coreAgent/app/coreAgent/metrics.py).
 //
@@ -71,7 +70,7 @@ new ObservabilityStack(app, `AgentCore-coreAgent-observability-${region}`, {
   alarmEmail: app.node.tryGetContext('alarmEmail') as string | undefined,
 });
 
-// GatewayStack — week 4 chunk C. Deploys the request interceptor Lambda
+// GatewayStack — deploys the request interceptor Lambda
 // and the IAM role the shared AgentCore Gateway assumes. The Gateway
 // resource itself is created by infra/data/scripts/provision_gateway.py
 // after this stack deploys (CDK has no L2 construct for AgentCore Gateway
@@ -110,18 +109,20 @@ if (bridgePublicUrl) {
   });
 }
 
-// ServicesStack — week 7. Deploys VPC + ECS cluster + ALB + two Fargate
+// ServicesStack — deploys VPC + ECS cluster + ALB + two Fargate
 // services (bridge + onboarding) with path-based routing.
 //
 // Required context:
 //   --context agentRuntimeArn=arn:aws:bedrock-agentcore:...
 //   --context slackSecretsArn=arn:aws:secretsmanager:...
 //   --context bridgeSecretsArn=arn:aws:secretsmanager:...
-//   --context sandboxSecretsArn=arn:aws:secretsmanager:... (Phase B)
+//   --context sandboxSecretsArn=arn:aws:secretsmanager:... (PR sandbox)
 //
 // Optional context:
 //   --context certificateArn=arn:aws:acm:... (HTTPS; omit for HTTP-only testing)
 //   --context domainName=app.agentcore.dev  (custom domain; omit to use ALB DNS)
+//   --context githubAppId=123456             (numeric GitHub App ID)
+//   --context githubAppSlug=my-agent-app     (GitHub App URL slug)
 //
 // Skipped silently when agentRuntimeArn is not set.
 const agentRuntimeArn = app.node.tryGetContext('agentRuntimeArn') as string | undefined;
@@ -143,12 +144,13 @@ if (agentRuntimeArn) {
     slackSecretsArn: app.node.tryGetContext('slackSecretsArn') as string,
     bridgeSecretsArn: app.node.tryGetContext('bridgeSecretsArn') as string,
     sandboxSecretsArn,
+    githubAppId: app.node.tryGetContext('githubAppId') as string | undefined,
+    githubAppSlug: app.node.tryGetContext('githubAppSlug') as string | undefined,
     bridgeDataAccessPolicyArn: Fn.importValue(`${dataStackName}-BridgeDataAccessPolicyArn`),
-    onboardingDataAccessPolicyArn: Fn.importValue(`${dataStackName}-OnboardingDataAccessPolicyArn`),
   });
 }
 
-// SandboxStack — Phase B. Deploys the Fargate task definition that opens
+// SandboxStack — deploys the Fargate task definition that opens
 // PRs via `propose_pr`, plus the sandbox_jobs DDB table and the
 // AgentCoreSandboxAccess managed policy.
 //
@@ -162,9 +164,9 @@ if (agentRuntimeArn) {
 //   --context sandboxClusterArn=arn:aws:ecs:...
 //   --context sandboxDomainName=agent.example.com  (used to build the
 //     SANDBOX_CALLBACK_URL the sandbox container POSTs back to)
+//   --context sandboxGithubAppId=123456  (numeric ID for your GitHub App)
 //
 // Optional:
-//   --context sandboxGithubAppId=123456  (defaults to the prod app)
 //   --context anthropicSecretsArn=arn:aws:secretsmanager:...  (Anthropic
 //     API key for the inner Claude agent loop — without it the sandbox
 //     still deploys but propose_pr fails at runtime with a clean error)
@@ -182,8 +184,9 @@ if (sandboxSecretsArn && sandboxVpcId) {
   const sandboxClusterName = app.node.tryGetContext('sandboxClusterName') as string | undefined;
   const sandboxClusterArn = app.node.tryGetContext('sandboxClusterArn') as string | undefined;
   const sandboxDomainName = app.node.tryGetContext('sandboxDomainName') as string | undefined;
-  const sandboxGithubAppId =
-    (app.node.tryGetContext('sandboxGithubAppId') as string | undefined) ?? '123456';
+  const sandboxGithubAppId = app.node.tryGetContext('sandboxGithubAppId') as
+    | string
+    | undefined;
 
   const missing: string[] = [];
   if (!sandboxAvailabilityZones?.length) missing.push('sandboxAvailabilityZones');
@@ -191,6 +194,7 @@ if (sandboxSecretsArn && sandboxVpcId) {
   if (!sandboxClusterName) missing.push('sandboxClusterName');
   if (!sandboxClusterArn) missing.push('sandboxClusterArn');
   if (!sandboxDomainName) missing.push('sandboxDomainName');
+  if (!sandboxGithubAppId) missing.push('sandboxGithubAppId');
   if (missing.length) {
     throw new Error(
       `SandboxStack: missing required context: ${missing.join(', ')}. ` +
@@ -203,7 +207,7 @@ if (sandboxSecretsArn && sandboxVpcId) {
   new SandboxStack(app, `AgentCore-coreAgent-sandbox-${region}`, {
     env: { account, region },
     description:
-      'Phase B: Fargate sandbox task def + sandbox_jobs DDB + ' +
+      'PR sandbox Fargate task definition + sandbox_jobs DDB + ' +
       'AgentCoreSandboxAccess managed policy for the propose_pr tool.',
     tags: {
       'agentcore:project-name': 'coreAgent',
@@ -215,7 +219,7 @@ if (sandboxSecretsArn && sandboxVpcId) {
     clusterName: sandboxClusterName!,
     clusterArn: sandboxClusterArn!,
     sandboxSecretsArn: sandboxSecretsArn!,
-    githubAppId: sandboxGithubAppId,
+    githubAppId: sandboxGithubAppId!,
     callbackUrl: `https://${sandboxDomainName}/internal/sandbox_complete`,
     anthropicSecretsArn:
       (app.node.tryGetContext('anthropicSecretsArn') as string | undefined) || undefined,

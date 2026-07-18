@@ -26,7 +26,6 @@ from fastapi.testclient import TestClient
 # setup needed here.
 from bridge.adapters.core import InboundMessage
 from bridge.slack_interactions import (
-    InteractivityPayload,
     build_codebase_pick_synthetic_message,
     extract_payload_json,
     is_codebase_pick_action,
@@ -55,8 +54,8 @@ def _sample_payload(
     return {
         "type": "block_actions",
         "team": {"id": team_id, "domain": "acme"},
-        "user": {"id": "U_JOSH", "name": "josh"},
-        "api_app_id": "A_AGENTCORE",
+        "user": {"id": "U_TEST", "name": "test-user"},
+        "api_app_id": "A_AGENT",
         "token": "deprecated",
         "container": {
             "type": "message",
@@ -118,7 +117,7 @@ class TestParseInteractivityPayload:
         parsed = parse_interactivity_payload(_sample_payload())
         assert parsed is not None
         assert parsed.team_id == "T_ACME"
-        assert parsed.user_id == "U_JOSH"
+        assert parsed.user_id == "U_TEST"
         assert parsed.channel_id == "C_ONCALL"
         assert parsed.message_ts == "1712345678.123456"
         assert parsed.thread_ts == "1712345670.100000"
@@ -221,7 +220,7 @@ class TestBuildSyntheticMessage:
         assert synthetic.thread_id == "1712345670.100000"
         assert synthetic.channel_id == "C_ONCALL"
         assert synthetic.workspace_id == "T_ACME"
-        assert synthetic.user_id == "U_JOSH"
+        assert synthetic.user_id == "U_TEST"
 
     def test_metadata_event_type(self) -> None:
         parsed = parse_interactivity_payload(_sample_payload())

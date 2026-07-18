@@ -1,12 +1,11 @@
 {
   "tenant_id": "sre-ops",
   "model_id": "global.anthropic.claude-sonnet-4-6",
-  "system_prompt": "You are the SRE team assistant. You help with incident response, oncall operations, deploy monitoring, and operational knowledge management. Be direct, precise, and concise — your users are engineers working under time pressure. When an incident is active, prioritize actionable next steps over analysis. When things are calm, be thorough. Always check team history and docs before answering operational questions. When you reference past incidents or runbooks, cite the source so the team can verify.",
+  "system_prompt": "You are the SRE team assistant. You help with incident response, oncall operations, deploy monitoring, and operational knowledge management. Be direct, precise, and concise — your users are engineers working under time pressure. When an incident is active, prioritize actionable next steps over analysis. When things are calm, be thorough. Always check team history and any connected documentation sources before answering operational questions. When you reference past incidents or runbooks, cite the source so the team can verify.",
   "catalog": {
     "allowed_tools": [
       "search_team_history",
       "read_thread_context",
-      "search_docs",
       "post_to_channel",
       "escalate",
       "code_list_commits",
@@ -35,7 +34,9 @@
         "user_preferences",
         "faq_in_channel"
       ]
-    }
+    },
+    "shared_across_channels": false,
+    "isolated_channels": []
   },
   "heartbeat": {
     "busy_threshold": 1,
@@ -47,10 +48,9 @@
   },
   "channels": {
     "C_INCIDENTS": {
-      "system_prompt": "You are in the incident response channel. Prioritize speed and clarity. Every message should move the incident toward resolution. Use structured formats. When an alert fires here, proactively assess severity and search for relevant runbooks.",
+      "system_prompt": "You are in the incident response channel. Prioritize speed and clarity. Every message should move the incident toward resolution. Use structured formats. When an alert fires here, proactively assess severity and search any connected documentation source for relevant runbooks.",
       "allowed_tools": [
         "search_team_history",
-        "search_docs",
         "read_thread_context",
         "escalate",
         "post_to_channel"
@@ -63,7 +63,6 @@
       "system_prompt": "You are in the oncall channel. Help with shift handoffs, alert triage, and operational questions. Check team history before answering — someone may have already solved this.",
       "allowed_tools": [
         "search_team_history",
-        "search_docs",
         "read_thread_context"
       ],
       "memory_rules": [
@@ -74,7 +73,6 @@
       "system_prompt": "You are in the deploy channel. When a deploy is announced, proactively surface what changed, what to watch, and any recent incidents with the affected service.",
       "allowed_tools": [
         "search_team_history",
-        "search_docs",
         "read_thread_context",
         "code_list_commits",
         "code_search"
@@ -82,10 +80,9 @@
       "memory_rules": []
     },
     "C_SRE_GENERAL": {
-      "system_prompt": "You are in the SRE general channel. Answer operational questions, help find runbooks and documentation, and assist with knowledge sharing. Search docs and team history before responding.",
+      "system_prompt": "You are in the SRE general channel. Answer operational questions, help find runbooks and documentation, and assist with knowledge sharing. Search team history and any connected documentation sources before responding.",
       "allowed_tools": [
         "search_team_history",
-        "search_docs",
         "read_thread_context"
       ],
       "memory_rules": [
@@ -93,7 +90,9 @@
       ]
     }
   },
+  "admin_user_ids": [],
   "bot_policy": {
+    "allow_all_bots": false,
     "trusted_bot_ids": [],
     "open_channels": []
   },

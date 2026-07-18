@@ -1,13 +1,13 @@
 {
-  "_comment": "Slack app manifest for the AgentCore Reference shared production app. Paste this into api.slack.com \u2192 (existing app) \u2192 App Manifest to apply, or \u2192 Create New App \u2192 From an app manifest to bootstrap a fresh one. For local dev, replace https://agent.example.com with your ngrok hostname before pasting. Keep oauth_config.scopes.bot in sync with bridge/bridge/slack_oauth.py::_SCOPES \u2014 the bridge rebuilds its authorize URL from that constant, so any drift here silently breaks new installs. Keep interactivity.request_url in sync with bridge/bridge/main.py::slack_interactions \u2014 interactivity must be enabled for assistant.threads.setStatus thinking indicators and for the confirm/deny action buttons.",
+  "_comment": "Template for a self-hosted Agent Slack app. Replace every https://agent.example.com value with the public HTTPS origin of your bridge before importing this manifest at api.slack.com. Keep oauth_config.scopes.bot in sync with bridge/bridge/slack_oauth.py::_SCOPES, and keep interactivity.request_url in sync with bridge/bridge/main.py::slack_interactions.",
   "display_information": {
-    "name": "agentcore",
+    "name": "agent",
     "description": "Internal-ops AI agent for alert triage, team Q&A, and workflow automation.",
     "background_color": "#0b1021"
   },
   "features": {
     "bot_user": {
-      "display_name": "agentcore",
+      "display_name": "Agent",
       "always_online": true
     },
     "assistant_view": {
@@ -24,10 +24,8 @@
         "app_mentions:read",
         "assistant:write",
         "chat:write",
-        "chat:write.customize",
         "channels:history",
         "channels:read",
-        "channels:join",
         "groups:history",
         "groups:read",
         "im:history",

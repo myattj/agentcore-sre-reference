@@ -75,7 +75,7 @@ export default async function OpsRosterPage({
 
   return (
     <div>
-      <header className="mb-8 flex items-start justify-between gap-6">
+      <header className="mb-8 flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between sm:gap-6">
         <div>
           <h1 className="mb-2 text-2xl font-semibold tracking-tight">
             Platform roster
@@ -93,7 +93,7 @@ export default async function OpsRosterPage({
             ) : null}
           </p>
         </div>
-        <div className="flex flex-col items-end gap-2">
+        <div className="flex flex-col items-start gap-2 sm:items-end">
           <div className="flex gap-1 rounded-md border border-[color:var(--border)] p-1">
             {WINDOWS.map((w) => (
               <Link
@@ -135,8 +135,13 @@ export default async function OpsRosterPage({
         />
       </div>
 
-      <div className="mb-6 rounded-lg border border-[color:var(--border)] bg-white">
-        <table className="w-full text-sm">
+      <div
+        aria-label="Tenant metrics roster"
+        className="mb-6 overflow-x-auto rounded-lg border border-[color:var(--border)] bg-white"
+        role="region"
+        tabIndex={0}
+      >
+        <table className="min-w-[680px] w-full text-sm">
           <thead>
             <tr className="border-b border-[color:var(--border)] text-left text-xs uppercase tracking-wider text-[color:var(--muted)]">
               <th className="px-4 py-3">Tenant</th>

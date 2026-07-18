@@ -10,14 +10,14 @@ use the smoke-test flow described in CLAUDE.md.
 """
 from __future__ import annotations
 
-import os
-import re
 import sys
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
 import pytest
+from pydantic import ValidationError
+from pydantic_core import SchemaValidator, ValidationError as CoreValidationError
 
 # Inject coreAgent onto sys.path so we can import tenant.py and slack_api.py
 # WITHOUT the agent's full venv. These modules only need pydantic (which the
@@ -27,8 +27,12 @@ if _AGENT_CODE not in sys.path:
     sys.path.insert(0, _AGENT_CODE)
 
 # Now we can import the agent modules that have no heavy deps.
-from slack_api import parse_permalink  # type: ignore[import-not-found]
-from tenant import SkillDef  # type: ignore[import-not-found]
+from slack_api import parse_permalink  # type: ignore[import-not-found]  # noqa: E402
+from tenant import (  # type: ignore[import-not-found]  # noqa: E402
+    MAX_SKILL_MATCH_TEXT_LENGTH,
+    SkillDef,
+    compile_skill_trigger,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -80,7 +84,7 @@ class TestParsePermalink:
 # This replicates the core matching logic from context_assembler._match_skill
 # to verify the algorithm works correctly.
 
-_compiled_triggers: dict[str, re.Pattern[str]] = {}
+_compiled_triggers: dict[str, SchemaValidator] = {}
 
 
 def _match_skill(
@@ -92,21 +96,26 @@ def _match_skill(
     text = user_message.strip()
     if not text or not skills:
         return None
+    match_text = text[:MAX_SKILL_MATCH_TEXT_LENGTH]
 
     for skill in skills:
         trigger = skill.trigger
         if trigger.startswith("/"):
-            if text.lower().startswith(trigger.lower()):
+            if match_text.lower().startswith(trigger.lower()):
                 return _build_match(skill, ctx)
         else:
-            pattern = _compiled_triggers.get(trigger)
-            if pattern is None:
+            matcher = _compiled_triggers.get(trigger)
+            if matcher is None:
                 try:
-                    pattern = re.compile(trigger, re.IGNORECASE)
-                except re.error:
+                    matcher = compile_skill_trigger(trigger)
+                except ValueError:
                     continue
-                _compiled_triggers[trigger] = pattern
-            if pattern.search(text):
+                _compiled_triggers[trigger] = matcher
+            try:
+                matcher.validate_python(match_text)
+            except CoreValidationError:
+                continue
+            else:
                 return _build_match(skill, ctx)
     return None
 
@@ -208,15 +217,9 @@ class TestSkillMatching:
         assert "U123" in match["prompt_addition"]
         assert "C456" in match["prompt_addition"]
 
-    def test_bad_regex_skipped(self) -> None:
-        """Invalid regex in a trigger is skipped, not fatal."""
-        skills = [
-            SkillDef(trigger="[invalid", name="bad", prompt_template="x"),
-            SkillDef(trigger="hello", name="good", prompt_template="y"),
-        ]
-        match = _match_skill("hello", skills, self.CTX)
-        assert match is not None
-        assert match["name"] == "good"
+    def test_bad_regex_rejected_at_config_boundary(self) -> None:
+        with pytest.raises(ValidationError, match="safe regex subset"):
+            SkillDef(trigger="[invalid", name="bad", prompt_template="x")
 
     def test_unknown_placeholder_left_empty(self) -> None:
         """Placeholders not in ctx resolve to empty string, not KeyError."""
@@ -243,9 +246,8 @@ class TestTenantConfigNewFields:
         from tenant import build_default_config  # type: ignore[import-not-found]
 
         config = build_default_config("test")
-        # New tenants default to fully open bot policy — the "magical
-        # default" for PagerDuty/Datadog auto-triage.
-        assert config.bot_policy.allow_all_bots is True
+        # New tenants default to humans-only.
+        assert config.bot_policy.allow_all_bots is False
         assert config.bot_policy.trusted_bot_ids == []
         assert config.bot_policy.open_channels == []
         assert config.context_assembly.resolve_permalinks is True

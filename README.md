@@ -1,96 +1,306 @@
-# agentcorePlayground
+# Agent: a multi-tenant AI SRE on AWS Bedrock AgentCore
 
-Multi-tenant agent platform built on AWS Bedrock AgentCore. Two services in this monorepo:
+[![CI/CD](https://github.com/myattj/agentcore-sre-reference/actions/workflows/ci-cd.yml/badge.svg)](https://github.com/myattj/agentcore-sre-reference/actions/workflows/ci-cd.yml)
+[![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 
-- **`coreAgent/`** — AgentCore Runtime agent (Strands + Claude Sonnet 4.6 via Bedrock). Stateless, multi-tenant. Owns tools, memory, heartbeat. Tenant behavior is hydrated from config at invocation time.
-- **`bridge/`** — FastAPI server. Transports client events (Slack first, more adapters later) into agent invocations. Handles tenant resolution and the ack-then-post async pattern. Calls AgentCore Runtime via boto3.
+**An archived reference implementation of a multi-tenant AI SRE for Slack on AWS Bedrock AgentCore.**
+
+> [!IMPORTANT]
+> Agent is no longer an active product. This repository is published as a learning resource and creative systems-design example. It is not maintained as a hosted service, has not been independently security-audited, and is not production-ready without substantial review.
+
+Agent started with a simple provocation: what if the alert in Slack could become the investigation, the proposed fix, and the artifact the team shares afterward?
+
+Most incident bots stop at a summary. Agent was designed to carry the thread further:
+
+1. An alert lands in Slack.
+2. The agent assembles tenant-specific context, channel history, memory, and runbooks.
+3. AgentCore Gateway tools pull evidence from observability and operational systems.
+4. GitHub tools correlate symptoms with code, commits, and recent deploys.
+5. A one-shot Fargate sandbox can work on an isolated branch and open a pull request.
+6. The agent can turn results into a short-lived interactive dashboard and post the link back to the thread.
+
+That complete arc—**alert → evidence → code → change → shared understanding**—is the creative center of the project.
+
+![Agent turns an incident into a structured investigation dashboard](./docs/assets/agent-investigation-dashboard.png)
 
 ## Architecture
 
-```
-[Slack/etc.] → [bridge/]  → [coreAgent/]
-                  ↑              ↓
-            tenant config    catalog tools (in-process)
-                             BYO tools (via AgentCore Gateway / MCP)
-                             memory (self-managed contract)
-                             heartbeat (HealthyBusy)
-```
+Agent deliberately separates transport from reasoning. The bridge owns Slack and fast acknowledgements; the agent owns tools, memory, investigation, and actions.
 
-Each customer (tenant) has a `TenantConfig` defining: model, system prompt, allowed catalog tools, BYO Gateway endpoint, memory rules, and heartbeat thresholds. Examples in `examples/tenants/`.
+~~~mermaid
+flowchart LR
+    Slack["Slack alert, question, or incident thread"] --> Bridge["Bridge<br/>FastAPI, OAuth, tenant resolution, async replies"]
+    Bridge --> Runtime["AgentCore Runtime<br/>Strands agent"]
+    Runtime --> Bridge
+    Bridge --> Slack
 
-## Prereqs
+    Config["DynamoDB<br/>tenant config, audit, spend, jobs"] <--> Runtime
+    Memory["AgentCore Memory<br/>tenant and channel namespaces"] <--> Runtime
+    Runtime <--> Gateway["AgentCore Gateway<br/>observability, docs, ticketing, BYO tools"]
+    Runtime <--> GitHub["GitHub App<br/>code search, files, symbols, commits"]
+    Runtime --> Sandbox["One-shot Fargate sandbox<br/>isolated branch, agent loop, pull request"]
+    Runtime --> Dashboard["Ephemeral dashboard spec<br/>charts, tables, stats, text"]
+    Dashboard --> Web["Next.js renderer<br/>unguessable bearer URL, 7-day TTL"]
+~~~
 
-- Node 20+ (verified: v22)
-- Python 3.13 via uv (`uv python install 3.13`)
-- AWS CLI v2, AWS CDK v2, AgentCore CLI (`@aws/agentcore`)
-- AWS credentials configured (`aws configure` or SSO)
-- Bedrock model access for `anthropic.claude-sonnet-4-6` in `us-west-2`
+The runtime hydrates a fresh <code>TenantConfig</code> for every invocation. A tenant can select its model, persona, catalog tools, Gateway integrations, memory behavior, channel personas, skills, escalation routes, cost caps, and connected codebases without changing the shared agent deployment.
 
-## Local development
+## What is here
 
-Two terminals. `LOCAL_DEV=1` selects the JSON-file fallbacks for tenant
-config and workspace mapping so you don't need any AWS resources to run
-the local loop.
+This is a reference tree, not a claim that every subsystem is equally mature.
 
-```bash
-# Terminal 1 — agent
+| Capability | Status in this repository | Important limit |
+|---|---|---|
+| Slack transport, OAuth, signature checks, retry dedup, async reply path | Implemented and covered by bridge tests | You must create and configure your own Slack app |
+| Per-tenant prompts, tools, channel personas, skills, escalation, cost caps, audit | Implemented | Isolation is enforced by application code over shared AWS resources; review it for your threat model |
+| AgentCore Runtime and Memory integration | Implemented | Requires your AWS account, model access, IAM, and memory provisioning |
+| AgentCore Gateway integrations | Implemented as connector and provisioning patterns | Shared-Gateway tool metadata is not tenant-private; use per-tenant Gateways if target names or schemas are sensitive |
+| Incident/runbook/on-call/deploy skills | Implemented as built-in prompt-driven workflows | Output quality depends on connected data and the selected model |
+| GitHub code and commit correlation | Implemented through a GitHub App | Requires installation permissions, careful repository scoping, and an operator-approved installation-to-tenant binding |
+| Autonomous PR sandbox | Experimental reference; disabled by default | The current worker exposes in-task credentials to model-generated shell commands. Use only with disposable credentials while redesigning the trust boundary; see the sandbox warning |
+| Ephemeral interactive dashboards | Experimental reference implementation | Links are bearer capabilities: anyone with the URL can view until the 7-day expiry |
+| Onboarding, workspace settings, and operator views | Implemented reference UI | Authentication and RBAC are not a finished multi-user product |
+| Discord/Teams transports, billing, marketplace, durable dashboards | Not implemented | These remain design directions, not hidden features |
+
+No public Agent endpoint or cloud environment is part of this archive.
+
+## Why it may be useful
+
+The interesting reusable patterns are larger than this particular product:
+
+- A thin, transport-only Slack bridge that acknowledges within Slack's deadline and dispatches agent work asynchronously.
+- One shared runtime whose behavior is hydrated from tenant configuration on every invocation.
+- Tenant-whitelisted in-process tools plus customer-specific tools behind AgentCore Gateway.
+- Channel-aware context assembly, memory namespaces, runbook triggers, escalation routes, and bot-to-bot policy.
+- Code investigation and long-running write actions split across trust boundaries.
+- Healthy/busy lifecycle tracking for background work.
+- Audit and spend records designed so observability failures never break the user path.
+- Conversation-native output that can become a temporary interactive artifact.
+
+## Try it locally — no cloud account required
+
+The shortest path to the interesting part of Agent is three commands:
+
+~~~bash
+make doctor
+make setup
+make demo
+~~~
+
+Open the printed URL to see a realistic investigation dashboard backed by the
+real FastAPI bridge and Next.js renderer. The sample tells a small incident
+story—latency spike, correlated cache collapse, evidence trail, and recommended
+mitigation—without requiring AWS credentials, AgentCore, Bedrock, Slack,
+Docker, or an API key. Press <kbd>Ctrl</kbd>+<kbd>C</kbd> once to stop both
+processes cleanly.
+
+<code>make setup</code> installs all four isolated Python environments and all
+three Node environments from checked-in lockfiles. It also creates
+<code>bridge/.env.local</code> and
+<code>onboarding/.env.local</code> from their tracked examples, gives both the
+same cryptographically random local session secret, and sets their mode to
+<code>0600</code>. Existing env files are never replaced; if their secrets
+disagree, setup stops with a repair instruction instead of guessing.
+
+You need Git, Python **3.13**, [uv](https://docs.astral.sh/uv/), Node.js **22+**,
+and npm. <code>make doctor</code> checks each one, distinguishes required tools
+from optional cloud tooling, and prints an exact install path for anything
+missing. The scripts support <code>--help</code> and work with the Bash versions
+shipped by current macOS and mainstream Linux distributions.
+Make is only a convenience wrapper: if it is not installed, run the matching
+<code>./scripts/doctor.sh</code>, <code>./scripts/setup.sh</code>,
+<code>./scripts/demo.sh</code>, or <code>./scripts/check.sh</code> entrypoint
+directly.
+
+To prove the demo can boot and shut down without opening a browser:
+
+~~~bash
+scripts/demo.sh --check
+~~~
+
+## Validate the repository
+
+After <code>make setup</code>, one command runs the local equivalents of the CI
+gates: service and synthetic-incident Python suites, the sandbox tests,
+onboarding authentication tests and production build, generated CDK tests and
+formatting, every hand-authored CDK synth variant, shell/tooling tests, an
+optional local gitleaks scan, and a no-cloud service startup check.
+
+~~~bash
+make check
+~~~
+
+For a faster edit loop, <code>scripts/check.sh --quick</code> skips CDK synth and
+the live demo startup. Neither command deploys resources or calls AWS, Slack, or
+GitHub APIs.
+
+## Prerequisites for the full AgentCore path
+
+For the AgentCore loop or an AWS deployment:
+
+- The [Amazon Bedrock AgentCore CLI](https://github.com/aws/agentcore-cli), installed with <code>npm install -g @aws/agentcore@0.24.1</code>
+- AWS CLI v2 and credentials for your own account
+- AWS CDK v2
+- Access to a compatible Bedrock model in your chosen region
+- A Slack app if you want to exercise the real transport
+
+The checked-in infrastructure defaults to <code>us-west-2</code>. If you choose another region, update all region-dependent configuration consistently and verify AgentCore and model availability there. A region choice is not, by itself, a privacy or compliance guarantee.
+
+## Full local AgentCore loop
+
+Local mode uses JSON fixtures in <code>examples/</code> for tenant data and workspace mapping. The two local flags have intentionally different names:
+
+- Agent: <code>AGENT_LOCAL_STORES=1</code>
+- Bridge: <code>LOCAL_DEV=1</code>
+
+The AgentCore CLI reserves <code>LOCAL_DEV</code> internally, so using it as the agent's store flag causes confusing behavior.
+
+Run <code>make setup</code> first. The service directories still have independent
+environments; do not import the bridge package from the agent or vice versa.
+
+AgentCore also requires an ignored, developer-specific deployment target file.
+Create it from the sanitized template; the placeholder account is sufficient
+for local validation, but replace it with your own AWS account ID before any
+deployment:
+
+~~~bash
+test -e coreAgent/agentcore/aws-targets.json || \
+  cp coreAgent/agentcore/aws-targets.example.json \
+     coreAgent/agentcore/aws-targets.json
+~~~
+
+Then start three terminals from the repository root:
+
+~~~bash
+# Terminal 1 — agent on :8080
 cd coreAgent
-uv sync                          # creates .venv with Python 3.13
-LOCAL_DEV=1 agentcore dev        # local server on 0.0.0.0:8080
+AGENT_LOCAL_STORES=1 agentcore dev --logs
+~~~
 
-# Terminal 2 — bridge
+~~~bash
+# Terminal 2 — bridge on :8000
 cd bridge
-uv sync
-LOCAL_DEV=1 LOCAL_AGENT_URL=http://localhost:8080 \
-  uvicorn bridge.main:app --reload
-```
+# make setup already created .env.local with local routing + shared secret.
+uv run uvicorn bridge.main:app --reload --port 8000 --env-file .env.local
+~~~
 
-Test the bridge → agent flow without Slack:
+~~~bash
+# Terminal 3 — Next.js UI on :3000
+cd onboarding
+# make setup already created .env.local with the shared local secret.
+npm run dev
+~~~
 
-```bash
+With the bridge in <code>LOCAL_DEV=1</code>, its debug transport is available:
+
+~~~bash
 curl -X POST http://localhost:8000/debug/message \
-  -H "Content-Type: application/json" \
-  -d '{"workspace_id":"demo-ws","user_id":"u1","text":"echo hello"}'
-```
+  -H 'Content-Type: application/json' \
+  -d '{"workspace_id":"demo-ws","user_id":"u1","text":"Investigate the latest alert"}'
+~~~
 
-## Layout
+That final request invokes the model and therefore needs valid AWS credentials and Bedrock access. For a browserless smoke test that starts all three services but skips the live Bedrock request:
 
-```
-agentcorePlayground/
-├── coreAgent/                   # AgentCore Runtime agent
-│   ├── agentcore/               # CLI-managed config + CDK (don't edit cdk/)
-│   └── app/coreAgent/
-│       ├── main.py              # @app.entrypoint, builds per-invocation Agent
-│       ├── tenant.py            # TenantStore (JSON | DynamoDB)
-│       ├── tools.py             # CATALOG: @audited_tool registry
-│       ├── audit.py             # AuditStore (Null | InMemory | Dynamo)
-│       ├── request_context.py   # ContextVar for per-invocation context
-│       ├── ping.py              # custom @app.ping (HealthyBusy)
-│       ├── memory_store.py      # MemoryStore protocol + InMemoryStore
-│       ├── model/load.py        # Bedrock model loader (tenant-driven)
-│       └── mcp_client/client.py # BYO via AgentCore Gateway (MCP client)
-├── bridge/                      # FastAPI bridge
-│   └── bridge/
-│       ├── main.py              # routes
-│       ├── client.py            # boto3 invoke wrapper
-│       ├── tenant_resolver.py   # WorkspaceResolver (JSON | DynamoDB)
-│       ├── async_dispatcher.py  # ack-then-post
-│       └── adapters/{core,slack,debug}.py
-├── infra/                       # hand-authored infra (not CLI-managed)
-│   └── data/                    # CDK: DynamoDB tables + IAM managed policy
-└── examples/                    # LOCAL_DEV=1 fixtures
-    ├── tenants/demo.json
-    └── workspace_to_tenant.json
-```
+~~~bash
+scripts/smoke.sh --no-agent
+~~~
 
-## Infrastructure
+The smoke harness still requires the AgentCore CLI. It temporarily updates local
+fixtures and restores them on exit. For the zero-cloud, two-service experience,
+use <code>make demo</code> instead.
 
-Hand-authored CDK for the shared data layer (DynamoDB tables + IAM managed
-policy) lives at [`infra/data/`](./infra/data/README.md). Deploy once per
-environment before running `agentcore deploy`; see that README for the
-runbook.
+## Synthetic incident lab
 
-## Status
+The repository includes two ways to explore the idea with synthetic data:
 
-Scaffold + week-1 hosted-agent infra in progress. Follows the plan at
-[`BUILD_PLAN.md`](./BUILD_PLAN.md).
+- [<code>seed/</code>](./seed/README.md) creates a focused N+1-query incident across Datadog metrics and Slack threads.
+- [<code>scripts/testenv/</code>](./scripts/testenv/README.md) builds a larger, persistent Acme-shaped tenant with channels, history, runbooks, codebases, and repeatable alert scenarios.
+
+Both labs write to external systems. Use disposable workspaces, accounts, repositories, and narrowly scoped credentials. Inspect the scripts before running them; the larger test environment is intentionally closer to a real deployment than a unit-test fixture.
+
+## Deploying the reference stack
+
+There is no single safe <code>deploy everything</code> command. A real deployment crosses several security and billing boundaries:
+
+1. Review and synthesize the shared data and IAM stacks in [<code>infra/data/</code>](./infra/data/README.md).
+2. Configure and deploy the AgentCore runtime from [<code>coreAgent/</code>](./coreAgent/README.md); the runtime source is [<code>coreAgent/app/coreAgent/</code>](./coreAgent/app/coreAgent/).
+3. Create your own Slack app from [<code>bridge/slack_manifest.json</code>](./bridge/slack_manifest.json), then configure OAuth, signing, redirect, and event URLs. Set <code>CERTIFICATE_ARN</code> and <code>DOMAIN_NAME</code>; the production workflow refuses to deploy without them. Route the bridge callback and onboarding UI through that one HTTPS public origin so the host-scoped HttpOnly onboarding cookie survives the redirect without putting a bearer in the URL.
+4. If you enable GitHub App code access, explicitly bind each numeric installation ID to the intended tenant through the privileged approval endpoint. Tenant sessions cannot create or change <code>codebases.github_installation_id</code>.
+5. Provision Gateway targets and credentials for only the integrations you intend to expose.
+6. Treat the Fargate PR sandbox in [<code>infra/sandbox/</code>](./infra/sandbox/) as hostile code execution and harden it before enabling <code>propose_pr</code>.
+7. Set an HTTPS <code>DASHBOARD_BASE_URL</code> if you enable dashboards.
+
+The checked-in helper performs the GitHub account check and exclusive tenant
+binding without putting the operator secret on the command line:
+
+~~~bash
+read -rsp 'Operator secret: ' ADMIN_SECRET
+printf '\n'
+export ADMIN_SECRET
+python3.13 scripts/approve_github_installation.py \
+  tenant-id 123456 expected-github-owner \
+  --bridge-url https://agent.example.com
+unset ADMIN_SECRET
+~~~
+
+Agent-side <code>manage_config</code> writes are also read-only by default because
+<code>admin_user_ids</code> starts empty. If you intentionally enable them, add
+the exact Slack user IDs through reviewed operator tooling or directly to the
+tenant's DynamoDB configuration—not through the tenant PATCH API—and audit that
+change like any other privilege grant.
+
+> [!WARNING]
+> Pull requests and pushes run validation only. Cloud deployment is gated behind a manual GitHub Actions dispatch with an explicit <code>deploy_production=true</code> input. The PR sandbox additionally requires <code>deploy_experimental_sandbox=true</code>, remains unsafe for production even when enabled, and should use only disposable credentials. Review the workflow and IAM scope before adding credentials to a fork.
+
+### Cost and cleanup
+
+Deploying this architecture can create billable AgentCore, Bedrock, Gateway, ECS/Fargate, load balancer, CloudWatch, Secrets Manager, ECR, and DynamoDB usage. Model calls and sandbox runs add variable cost.
+
+Some DynamoDB resources use retention policies. Destroying a CDK stack may intentionally leave data behind, so verify both CloudFormation state and the underlying resources when cleaning up. Set AWS Budgets and service-level caps before testing with real traffic.
+
+### Security boundaries to revisit
+
+Before any production use:
+
+- Replace every example secret and rotate any credential ever used during development.
+- Keep secrets in a secret manager; never commit <code>.env</code> files, Slack tokens, API keys, GitHub keys, or deployment state.
+- Validate Slack signatures and keep the debug route disabled outside <code>LOCAL_DEV=1</code>.
+- Keep bridge OAuth callbacks and onboarding on one HTTPS public origin; never put onboarding session tokens in URLs.
+- Re-audit tenant authorization for every DynamoDB, Gateway, Slack, memory, dashboard, and GitHub access path.
+- Treat each GitHub App installation ID as an operator-approved tenant binding, not a tenant-editable setting.
+- Narrow IAM policies and GitHub App permissions to the resources each component actually needs.
+- Add explicit human approval and stronger isolation around model-generated code changes.
+- Do not place sensitive data in ephemeral dashboards; their URLs are bearer credentials.
+- Review [<code>SECURITY.md</code>](./SECURITY.md) and run your own threat model.
+
+## Repository map
+
+~~~text
+.
+├── bridge/                         Slack/OAuth transport and AgentCore client
+├── coreAgent/
+│   ├── agentcore/                  AgentCore CLI configuration
+│   └── app/coreAgent/              Strands runtime, tools, memory, tenant config
+├── onboarding/                     Next.js onboarding, workspace, ops, dashboards
+├── workers/gateway_interceptor/    Gateway JWT and tenant-isolation interceptor
+├── infra/
+│   ├── data/                       Hand-authored CDK: data, services, Gateway, IAM
+│   └── sandbox/                    One-shot agentic PR worker + frozen Python lock
+├── examples/                       Local tenant and workspace fixtures
+├── seed/                           Focused synthetic incident generator
+└── scripts/testenv/                Persistent integration-testing lab
+~~~
+
+The authoritative tenant schema is <code>coreAgent/app/coreAgent/tenant.py</code>. Its API and UI mirrors live in the bridge and onboarding packages; changes must remain synchronized.
+
+## Project status
+
+Agent is archived. Issues and pull requests may be useful to future readers, but there is no roadmap, hosted service, support SLA, or promise of dependency updates.
+
+- Read [<code>NORTH_STAR.md</code>](./NORTH_STAR.md) for the archived product thesis.
+- See [<code>CONTRIBUTING.md</code>](./CONTRIBUTING.md) before proposing a change.
+- Read [<code>SUPPORT.md</code>](./SUPPORT.md) for the archive's support boundaries.
+- Report vulnerabilities through [<code>SECURITY.md</code>](./SECURITY.md).
+- Review the [<code>CHANGELOG.md</code>](./CHANGELOG.md) for the open-source archive snapshot.
+
+Released under the [MIT License](./LICENSE).

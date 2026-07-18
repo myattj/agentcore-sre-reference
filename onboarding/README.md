@@ -1,59 +1,135 @@
-# onboarding
+# Onboarding and operations UI
 
-Next.js 16 onboarding UI for the agent-core multi-tenant Slack agent
-platform. Customers land here after the bridge OAuth callback to
-configure their tenant before chatting with the bot in Slack.
+This Next.js application provides the human-facing setup and operations surfaces
+for the archived AgentCore reference project. It talks to the bridge API and
+does not access DynamoDB or the agent runtime directly.
 
-This is the third service in the monorepo, after `bridge/` (Python
-FastAPI) and `coreAgent/` (Python Strands). It's TypeScript-only and has
-its own `package.json` / `node_modules`. See `CLAUDE.md` at the repo
-root for the architecture overview and the gotchas (especially #21–25
-covering the onboarding service).
+See the [root README](../README.md) for project status and the end-to-end local
+demo.
 
-## Run locally
+## Included surfaces
 
-Three terminals, in this order:
+| Route | Purpose |
+|---|---|
+| <code>/</code> | Public Slack installation entry point |
+| <code>/onboarding/[tenantId]</code> | Integrations, completion, and error flow |
+| <code>/workspace/[tenantId]</code> | Tenant overview, prompt, channels, skills, automations, and metrics |
+| <code>/ops</code> | Operator login, tenant roster, and tenant detail views |
+| <code>/d/[token]</code> | Experimental public dashboard addressed by a short-lived bearer token |
+| <code>/github/installed</code> | GitHub App installation return handler with session-bound CSRF state |
 
-```bash
-# 1. agent
-cd ../coreAgent && AGENT_LOCAL_STORES=1 agentcore dev --logs
+The UI supports Slack channel settings, GitHub, and optional managed connectors
+for Confluence, Notion, Jira, Linear, and PagerDuty. Its Datadog surface is
+content-only guidance because the bridge deliberately rejects Datadog's unsafe
+two-secret direct connector shape.
 
-# 2. bridge (real Slack creds + ngrok URL)
-cd ../bridge && \
-  LOCAL_DEV=1 \
-  LOCAL_AGENT_URL=http://localhost:8081 \
-  ONBOARDING_BASE_URL=http://localhost:3000 \
-  BRIDGE_OAUTH_STATE_SECRET=dev-shared-secret \
-  SLACK_CLIENT_ID=... SLACK_CLIENT_SECRET=... SLACK_SIGNING_SECRET=... \
-  SLACK_REDIRECT_URI=https://<ngrok>/slack/oauth/callback \
-  .venv/bin/uvicorn bridge.main:app --port 8000 --reload
+## Local development
 
-# 3. onboarding (this service)
-cp .env.example .env.local
-# edit .env.local: BRIDGE_OAUTH_STATE_SECRET MUST match the bridge's value
+Node.js 22 is recommended.
+
+The easiest complete local path is <code>make setup && make demo</code> from the
+repository root. It starts this UI and the bridge with a synthetic incident
+dashboard, then shuts down both on one <kbd>Ctrl</kbd>+<kbd>C</kbd>. No AgentCore,
+AWS, Slack, or API keys are involved.
+
+To work on this component by itself:
+
+~~~bash
+cd onboarding
+../scripts/setup.sh --env-only
+npm ci
 npm run dev
-```
+~~~
 
-Open <http://localhost:3000>, click "Add to Slack", finish the OAuth
-consent. The bridge mints a session token, redirects here, and you land
-on the config form.
+The app is then available at <http://localhost:3000>. Start the bridge on port
+8000 before using flows that read or update tenant data.
 
-## Architecture in one paragraph
+The tracked [.env.example](.env.example) documents the intended local values:
 
-All bridge calls happen server-side from Next.js (server components +
-server actions). The browser never talks to the bridge directly — no
-CORS, no exposed session token. The session is an HMAC-signed cookie on
-this origin. The bridge mints session tokens; this service only verifies
-them. Cross-tenant isolation is enforced on the bridge side (the
-`/api/tenants/*` route asserts the URL tenant_id matches the token's
-embedded tenant_id). See `lib/session.ts` and `bridge/bridge/api.py` for
-the contract.
+| Variable | Purpose |
+|---|---|
+| <code>BRIDGE_URL</code> | Server-side bridge API base URL |
+| <code>ONBOARDING_PUBLIC_URL</code> | Canonical browser origin for safe server-side redirects |
+| <code>BRIDGE_OAUTH_STATE_SECRET</code> | HMAC secret for bridge-minted onboarding sessions |
+| <code>NEXT_PUBLIC_BRIDGE_INSTALL_URL</code> | Public Slack install URL rendered by the browser |
+| <code>ADMIN_SECRET</code> | Optional operator login secret |
+| <code>GITHUB_APP_SLUG</code> | Optional GitHub App slug for installation links |
 
-## What's here vs week 4
+Use the same onboarding shared secret in the bridge's local environment. Do not
+commit real credentials.
 
-This week ships: landing, config (system prompt + catalog tools),
-channels (read-only), integrations (disabled stubs), done. Week 4 wires
-up the real integration OAuth flows + AgentCore Gateway provisioning,
-adds `channels:read` to the Slack manifest, and ships per-channel
-personas. Don't add `@aws-sdk/*` deps here — all AWS access flows
-through the bridge by design (CLAUDE.md gotcha #24).
+## OAuth and GitHub trust handoffs
+
+The Slack OAuth callback is the only component that mints an onboarding session.
+It sets <code>tenant_session</code> as an HttpOnly cookie and redirects to a clean
+onboarding URL; the bearer never belongs in a query parameter. In production,
+route the bridge callback and onboarding UI through one HTTPS public origin so
+the host-scoped cookie reaches the UI. The local two-port setup works because
+both services use the same <code>localhost</code> host. The signed OAuth state is
+additionally bound to a short-lived HttpOnly, SameSite browser cookie that the
+callback consumes.
+
+The GitHub install link sends GitHub a short-lived, session-bound CSRF state,
+not the onboarding bearer. Repository access remains disabled until a
+privileged operator binds the returned numeric installation ID to
+<code>codebases.github_installation_id</code> on the matching tenant row. The
+tenant settings API cannot set or change that field; this prevents one tenant
+from claiming another tenant's GitHub App installation.
+
+Run the operator approval from the repository root after GitHub redirects back
+with the pending installation:
+
+~~~bash
+read -rsp 'Operator secret: ' ADMIN_SECRET
+printf '\n'
+export ADMIN_SECRET
+python3.13 scripts/approve_github_installation.py \
+  tenant-id 123456 expected-github-owner \
+  --bridge-url https://agent.example.com
+unset ADMIN_SECRET
+~~~
+
+The UI keeps the integration pending until that verified, exclusive binding
+exists. Agent-side configuration writes are separately read-only unless an
+operator grants exact Slack user IDs through the non-tenant-editable
+<code>admin_user_ids</code> field.
+
+## Validation
+
+~~~bash
+cd onboarding
+npm ci
+BRIDGE_OAUTH_STATE_SECRET=$(openssl rand -hex 32) npm test
+NEXT_PUBLIC_BRIDGE_INSTALL_URL=https://ci.test/slack/install npm run build
+~~~
+
+## Reference deployment
+
+The optional Services CDK stack builds and runs this app as an ECS Fargate
+service behind an Application Load Balancer. It is enabled only when the
+required runtime and secret contexts are supplied. See
+[infra/data/README.md](../infra/data/README.md).
+
+Keep the reference stack's shared public-origin routing for the bridge and this
+UI. A split-host deployment needs a separately reviewed one-time code exchange
+or explicit cookie-domain design; never pass the onboarding session in a URL.
+
+The production GitHub Actions workflow is manual-only, requires explicit
+confirmation, and refuses to deploy without a domain and TLS certificate.
+Configure secrets, least-privilege IAM policies, and budget controls before
+deploying.
+
+## Layout
+
+~~~text
+onboarding/
+├── app/
+│   ├── onboarding/[tenantId]/  # Tenant setup flow
+│   ├── workspace/[tenantId]/   # Tenant configuration workspace
+│   ├── ops/                    # Operator console
+│   ├── d/[token]/              # Temporary public dashboards
+│   └── github/installed/       # GitHub App callback surface
+├── lib/                        # Bridge client, sessions, and shared types
+├── public/                     # Static assets
+└── .env.example               # Safe local configuration template
+~~~

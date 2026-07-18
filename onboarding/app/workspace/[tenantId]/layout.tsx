@@ -37,21 +37,21 @@ export default async function WorkspaceLayout({
   return (
     <div className="flex flex-1 flex-col">
       <header className="border-b border-[color:var(--border)] bg-white">
-        <div className="mx-auto flex max-w-6xl items-center justify-between px-6 py-4">
+        <div className="mx-auto flex max-w-6xl items-center justify-between gap-4 px-4 py-4 sm:px-6">
           <Link href="/" className="font-semibold tracking-tight">
-            agent-core
+            Agent
           </Link>
-          <span className="font-mono text-xs text-[color:var(--muted)]">
+          <span className="max-w-[70vw] truncate font-mono text-xs text-[color:var(--muted)] sm:max-w-none">
             tenant: {tenantId}
           </span>
         </div>
       </header>
-      <div className="mx-auto flex w-full max-w-6xl flex-1 gap-12 px-6 py-12">
-        <nav className="w-56 shrink-0">
+      <div className="mx-auto flex w-full max-w-6xl flex-1 flex-col gap-8 px-4 py-8 sm:px-6 md:flex-row md:gap-12 md:py-12">
+        <nav className="w-full md:w-56 md:shrink-0">
           <p className="mb-4 text-xs font-semibold uppercase tracking-wider text-[color:var(--muted)]">
             Settings
           </p>
-          <ul className="space-y-1">
+          <ul className="grid grid-cols-2 gap-1 sm:grid-cols-3 md:grid-cols-1">
             {SETTINGS_NAV.map((item) => (
               <li key={item.slug || "overview"}>
                 <Link
@@ -66,9 +66,9 @@ export default async function WorkspaceLayout({
               </li>
             ))}
           </ul>
-          <p className="mt-6 px-3 text-[10px] leading-relaxed text-[color:var(--muted)]">
-            Most of this is also editable by talking to the bot in
-            Slack — it can update its own config.
+          <p className="mt-6 px-3 text-xs leading-relaxed text-[color:var(--muted)]">
+            Runtime configuration updates from Slack require an explicitly
+            authorized admin user. This UI remains the default editing path.
           </p>
         </nav>
         <main className="min-w-0 flex-1">{children}</main>

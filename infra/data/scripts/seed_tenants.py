@@ -7,11 +7,10 @@ by `infra/data/lib/data-stack.ts`. Idempotent: re-running refreshes
 `updated_at` but preserves the original `created_at` via a conditional
 update.
 
-The tenant-row write path goes through `coreAgent.tenant.DynamoTenantStore.upsert`,
-which is the same primitive the Slack OAuth callback (week 2) and the
-onboarding UI (week 3) use. **Edit the row shape there, not here.**
-The workspace-mapping write is local to this script for now; it'll move
-into a shared bridge helper when the OAuth callback lands.
+The tenant-row write path goes through the authoritative
+`coreAgent.tenant.DynamoTenantStore.upsert`. Slack OAuth and the onboarding
+UI mirror that schema in `bridge/bridge/tenant_write.py`; keep both shapes
+in sync. Workspace mappings use the same DynamoDB row shape as OAuth.
 
 Usage:
     # Dry-run (no writes, just prints what would change):
@@ -53,7 +52,7 @@ def find_repo_root() -> Path:
             return parent
     raise FileNotFoundError(
         f"Could not find examples/tenants/ above {current}. "
-        f"Run this script from within the agentcorePlayground repo."
+        "Run this script from within the agent repo."
     )
 
 

@@ -1,8 +1,7 @@
 """Slack OAuth install + callback flow.
 
-Model A onboarding (see CLAUDE.md / BUILD_PLAN.md): one shared Slack app
-on the marketplace, OAuth into many workspaces, per-workspace bot tokens
-stored in Secrets Manager.
+The onboarding model uses one shared Slack app installed into many
+workspaces, with per-workspace bot tokens stored in Secrets Manager.
 
 Two responsibilities:
 
@@ -14,28 +13,30 @@ Two responsibilities:
    `code` query param for a bot token via Slack's `oauth.v2.access`
    endpoint, then provision the tenant: write a default tenant row,
    store the bot token in Secrets Manager, and add the workspace
-   mapping. Finally, mint a **session token** and 302-redirect to the
-   onboarding UI (`${ONBOARDING_BASE_URL}/onboarding/<id>/welcome?t=...`).
+   mapping. Finally, mint a **session token**, set it as an HttpOnly cookie,
+   and 302-redirect to a clean onboarding URL. The bearer token never enters
+   a URL, proxy log, Referer header, or browser history entry.
 
 State vs session tokens (both HMAC-SHA256 over the same secret):
 
     State token   — `{nonce}.{ts}.{hmac}` (3 parts, 10-min TTL)
-                    Used for the Slack consent redirect only; bound to
-                    a single install click.
+                    Used for the Slack consent redirect only. Its nonce is
+                    also stored in a short-lived HttpOnly, SameSite cookie,
+                    binding the callback to the browser that started OAuth.
     Session token — `{tenant_id}.{nonce}.{ts}.{hmac}` (4 parts, 60-min TTL)
                     Bound to a specific tenant. Issued by the OAuth
-                    callback, stored as an HttpOnly cookie on the Next.js
-                    onboarding origin, and forwarded as `Authorization:
+                    callback, set as an HttpOnly cookie by the bridge on the
+                    shared public origin, and forwarded as `Authorization:
                     Bearer <token>` when Next.js's server calls bridge
                     `/api/tenants/*` routes. The `/api` router's
                     `require_session_token` dependency asserts the
                     embedded tenant_id matches the URL path — this is
                     our cross-tenant isolation.
 
-The state secret comes from `BRIDGE_OAUTH_STATE_SECRET` if set, otherwise
-falls back to `SLACK_SIGNING_SECRET`. Both token types share the same
-secret — rotating it invalidates all in-flight installs AND all active
-onboarding sessions.
+Both token types use the dedicated `BRIDGE_OAUTH_STATE_SECRET`. Slack's
+request-signing secret is deliberately not reused as an application session
+key. Rotating the OAuth state secret invalidates all in-flight installs and
+active onboarding sessions.
 
 Tenant IDs minted by `_tenant_id_for_workspace` are guaranteed period-free
 (`slack-<team_id.lower()>`), which is what lets the session token use `.`
@@ -60,6 +61,7 @@ from urllib.parse import quote, urlencode
 
 from fastapi.responses import RedirectResponse
 
+from .public_origin import OAuthPublicConfig, load_oauth_public_config
 from .slack_token_store import invalidate_token_cache
 from .tenant_write import (
     upsert_default_tenant_row,
@@ -69,16 +71,14 @@ from .tenant_write import (
 log = logging.getLogger(__name__)
 
 
-# OAuth scopes for the shared Slack app (Model A). Match BUILD_PLAN.md
-# week-2 entry. Add new scopes here as features land.
+# OAuth scopes for the shared Slack app (Model A). Keep these synchronized
+# with bridge/slack_manifest.json.
 _SCOPES = ",".join([
     "app_mentions:read",
     "assistant:write",  # required for assistant.threads.setStatus (thinking indicator)
     "chat:write",
-    "chat:write.customize",  # post with per-message username/icon (scripts/testenv seeder)
     "channels:history",
     "channels:read",  # required for users.conversations on public channels
-    "channels:join",  # conversations.join on public channels (scripts/testenv seeder)
     "groups:history",
     "groups:read",    # required for users.conversations on private channels
     "im:history",
@@ -91,11 +91,15 @@ _SCOPES = ",".join([
 # State token validity window. 10 minutes is comfortable for users
 # clicking through Slack's consent screen.
 _STATE_TTL_SECONDS = 600
+_MAX_CLOCK_SKEW_SECONDS = 30
+_STATE_COOKIE_NAME = "slack_oauth_state"
+_STATE_COOKIE_PATH = "/slack/oauth/callback"
 
 # Session token validity window. 60 minutes is enough for a single
 # onboarding sitting; if the user idles out, they re-run /slack/install.
 # See CLAUDE.md gotcha #22.
 _SESSION_TTL_SECONDS = 3600
+_SESSION_COOKIE_NAME = "tenant_session"
 
 
 # ----------------------------------------------------------------------------
@@ -105,14 +109,14 @@ _SESSION_TTL_SECONDS = 3600
 def _state_secret() -> str:
     """Get the secret used to sign state + session tokens.
 
-    Prefers `BRIDGE_OAUTH_STATE_SECRET`; falls back to
-    `SLACK_SIGNING_SECRET` if unset (so first-time deployments don't
-    need a new env var). Raises if neither is set."""
-    secret = os.getenv("BRIDGE_OAUTH_STATE_SECRET") or os.getenv("SLACK_SIGNING_SECRET")
+    The key is independent from Slack request signing and must contain at
+    least 32 characters. Local setup generates a 64-character value."""
+    secret = os.getenv("BRIDGE_OAUTH_STATE_SECRET", "")
     if not secret:
+        raise RuntimeError("OAuth state signing requires BRIDGE_OAUTH_STATE_SECRET.")
+    if len(secret) < 32:
         raise RuntimeError(
-            "OAuth state signing requires BRIDGE_OAUTH_STATE_SECRET "
-            "(or SLACK_SIGNING_SECRET as fallback). Neither is set."
+            "BRIDGE_OAUTH_STATE_SECRET must contain at least 32 characters."
         )
     return secret
 
@@ -138,22 +142,28 @@ def make_state_token() -> str:
     return f"{nonce}.{ts}.{sig}"
 
 
-def verify_state_token(token: str) -> bool:
-    """Validate a state token: signature matches AND it isn't stale."""
-    if not token:
+def verify_state_token(token: str, browser_nonce: str) -> bool:
+    """Validate a state token against the browser that started OAuth."""
+    if not token or not browser_nonce:
         return False
     parts = token.split(".")
     if len(parts) != 3:
         return False
     nonce, ts_str, sig = parts
+    if not ts_str.isdigit():
+        return False
     try:
         ts = int(ts_str)
     except ValueError:
         return False
-    if abs(time.time() - ts) > _STATE_TTL_SECONDS:
+    now = time.time()
+    if ts > now + _MAX_CLOCK_SKEW_SECONDS or now - ts > _STATE_TTL_SECONDS:
         return False
     expected = _sign_state(nonce, ts)
-    return hmac.compare_digest(expected, sig)
+    return hmac.compare_digest(expected, sig) and hmac.compare_digest(
+        nonce,
+        browser_nonce,
+    )
 
 
 # ----------------------------------------------------------------------------
@@ -204,11 +214,14 @@ def verify_session_token(token: str) -> str | None:
     tenant_id, nonce, ts_str, sig = parts
     if not tenant_id:
         return None
+    if not ts_str.isdigit():
+        return None
     try:
         ts = int(ts_str)
     except ValueError:
         return None
-    if abs(time.time() - ts) > _SESSION_TTL_SECONDS:
+    now = time.time()
+    if ts > now + _MAX_CLOCK_SKEW_SECONDS or now - ts > _SESSION_TTL_SECONDS:
         return None
     expected = _sign_session(tenant_id, nonce, ts)
     if not hmac.compare_digest(expected, sig):
@@ -227,49 +240,62 @@ def build_install_redirect() -> RedirectResponse:
       - SLACK_CLIENT_ID    (the shared app's client ID)
       - SLACK_REDIRECT_URI (the public URL of /slack/oauth/callback)
     """
+    # Validate the cookie/redirect trust boundary before minting state or
+    # sending the browser to Slack. Invalid public URL configuration must
+    # never produce an authorization request.
+    public_config = load_oauth_public_config()
     client_id = os.getenv("SLACK_CLIENT_ID")
-    redirect_uri = os.getenv("SLACK_REDIRECT_URI")
-    if not client_id or not redirect_uri:
+    if not client_id:
         raise RuntimeError(
-            "Slack install requires SLACK_CLIENT_ID and SLACK_REDIRECT_URI env vars."
+            "Slack install requires the SLACK_CLIENT_ID env var."
         )
 
+    state = make_state_token()
     params = {
         "client_id": client_id,
         "scope": _SCOPES,
-        "redirect_uri": redirect_uri,
-        "state": make_state_token(),
+        "redirect_uri": public_config.slack_redirect_uri,
+        "state": state,
     }
     url = "https://slack.com/oauth/v2/authorize?" + urlencode(params)
-    return RedirectResponse(url=url, status_code=302)
+    response = RedirectResponse(url=url, status_code=302)
+    response.set_cookie(
+        key=_STATE_COOKIE_NAME,
+        value=state.split(".", 1)[0],
+        max_age=_STATE_TTL_SECONDS,
+        httponly=True,
+        secure=public_config.bridge_origin.startswith("https://"),
+        samesite="lax",
+        path=_STATE_COOKIE_PATH,
+    )
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    return response
 
 
 # ----------------------------------------------------------------------------
 # /slack/oauth/callback — code exchange + tenant provisioning + redirect
 # ----------------------------------------------------------------------------
 
-def _onboarding_base_url() -> str:
-    """Public base URL of the onboarding Next.js service.
-
-    Default `http://localhost:3000` for LOCAL_DEV. Production deployments
-    must set `ONBOARDING_BASE_URL` to the real onboarding origin (e.g.
-    `https://onboarding.example.com`)."""
-    url = os.getenv("ONBOARDING_BASE_URL", "http://localhost:3000")
-    return url.rstrip("/")
-
-
-def _onboarding_welcome_url(tenant_id: str, token: str) -> str:
-    # `tenant_id` is path-safe (we control the format) but `token` is
-    # hex/dot only — still percent-encode both as a belt-and-suspenders
-    # measure.
+def _onboarding_integrations_url(
+    tenant_id: str,
+    public_config: OAuthPublicConfig | None = None,
+) -> str:
+    # `tenant_id` is path-safe (we control the format), but percent-encode it
+    # as a belt-and-suspenders measure.
     return (
-        f"{_onboarding_base_url()}/onboarding/{quote(tenant_id, safe='')}"
-        f"/welcome?t={quote(token, safe='')}"
+        f"{(public_config or load_oauth_public_config()).onboarding_origin}"
+        f"/onboarding/{quote(tenant_id, safe='')}"
+        "/integrations"
     )
 
 
-def _onboarding_error_url(reason: str) -> str:
-    return f"{_onboarding_base_url()}/onboarding/error?reason={quote(reason, safe='')}"
+def _onboarding_error_url(
+    reason: str,
+    public_config: OAuthPublicConfig | None = None,
+) -> str:
+    origin = (public_config or load_oauth_public_config()).onboarding_origin
+    return f"{origin}/onboarding/error?reason={quote(reason, safe='')}"
 
 
 def _tenant_id_for_workspace(team_id: str) -> str:
@@ -309,28 +335,57 @@ def _store_bot_token(tenant_id: str, bot_token: str, region: str) -> None:
             raise
 
 
-async def handle_oauth_callback(code: str, state: str) -> RedirectResponse:
+def _callback_redirect(url: str, public_config: OAuthPublicConfig) -> RedirectResponse:
+    """Build a no-store callback redirect and consume browser-bound state."""
+    response = RedirectResponse(url, status_code=302)
+    response.delete_cookie(
+        key=_STATE_COOKIE_NAME,
+        httponly=True,
+        secure=public_config.bridge_origin.startswith("https://"),
+        samesite="lax",
+        path=_STATE_COOKIE_PATH,
+    )
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    return response
+
+
+async def handle_oauth_callback(
+    code: str,
+    state: str,
+    browser_nonce: str,
+) -> RedirectResponse:
     """Exchange the OAuth `code` for a bot token, provision the tenant,
     and 302-redirect to the onboarding UI welcome page.
 
-    Success → `{ONBOARDING_BASE_URL}/onboarding/{tenant_id}/welcome?t=<session_token>`
+    Success → a session cookie plus the clean URL
+    `{ONBOARDING_BASE_URL}/onboarding/{tenant_id}/integrations`
     Any error → `{ONBOARDING_BASE_URL}/onboarding/error?reason=<slug>`
 
     Errors are logged internally and surface as a human-readable slug —
     we deliberately don't echo exception text to the browser.
     """
-    if not verify_state_token(state):
+    # A callback can be invoked directly, so repeat the same trust-boundary
+    # validation as the install endpoint before any Slack API call.
+    public_config = load_oauth_public_config()
+
+    if not verify_state_token(state, browser_nonce):
         log.warning("oauth_callback: invalid or expired state token")
-        return RedirectResponse(_onboarding_error_url("invalid_state"), status_code=302)
+        return _callback_redirect(
+            _onboarding_error_url("invalid_state", public_config),
+            public_config,
+        )
 
     client_id = os.getenv("SLACK_CLIENT_ID")
     client_secret = os.getenv("SLACK_CLIENT_SECRET")
-    redirect_uri = os.getenv("SLACK_REDIRECT_URI")
-    if not client_id or not client_secret or not redirect_uri:
+    if not client_id or not client_secret:
         log.error(
-            "oauth_callback: missing SLACK_CLIENT_ID/SLACK_CLIENT_SECRET/SLACK_REDIRECT_URI"
+            "oauth_callback: missing SLACK_CLIENT_ID/SLACK_CLIENT_SECRET"
         )
-        return RedirectResponse(_onboarding_error_url("not_configured"), status_code=302)
+        return _callback_redirect(
+            _onboarding_error_url("not_configured", public_config),
+            public_config,
+        )
 
     # Exchange code → tokens. slack-sdk's AsyncWebClient handles this.
     try:
@@ -341,22 +396,36 @@ async def handle_oauth_callback(code: str, state: str) -> RedirectResponse:
             client_id=client_id,
             client_secret=client_secret,
             code=code,
-            redirect_uri=redirect_uri,
+            redirect_uri=public_config.slack_redirect_uri,
         )
     except Exception as e:  # noqa: BLE001
         log.exception("oauth_callback: code exchange failed: %s", e)
-        return RedirectResponse(_onboarding_error_url("exchange_failed"), status_code=302)
+        return _callback_redirect(
+            _onboarding_error_url("exchange_failed", public_config),
+            public_config,
+        )
 
     if not oauth_response.get("ok"):
-        log.warning("oauth_callback: oauth.v2.access returned not-ok: %s", oauth_response.data)
-        return RedirectResponse(_onboarding_error_url("exchange_failed"), status_code=302)
+        # Slack responses can contain bearer credentials alongside an error.
+        # Log only the documented error slug, never the full response payload.
+        log.warning(
+            "oauth_callback: oauth.v2.access returned not-ok: %s",
+            oauth_response.get("error", "unknown_error"),
+        )
+        return _callback_redirect(
+            _onboarding_error_url("exchange_failed", public_config),
+            public_config,
+        )
 
     team = oauth_response.get("team") or {}
     team_id = team.get("id")
     bot_token = oauth_response.get("access_token")
     if not team_id or not bot_token:
         log.warning("oauth_callback: response missing team.id or access_token")
-        return RedirectResponse(_onboarding_error_url("missing_fields"), status_code=302)
+        return _callback_redirect(
+            _onboarding_error_url("missing_fields", public_config),
+            public_config,
+        )
 
     tenant_id = _tenant_id_for_workspace(team_id)
     region = os.getenv("AWS_REGION", "us-west-2")
@@ -372,11 +441,27 @@ async def handle_oauth_callback(code: str, state: str) -> RedirectResponse:
             tenant_id,
             e,
         )
-        return RedirectResponse(_onboarding_error_url("provisioning_failed"), status_code=302)
+        return _callback_redirect(
+            _onboarding_error_url("provisioning_failed", public_config),
+            public_config,
+        )
 
     log.info("oauth_callback: provisioned tenant_id=%s for team_id=%s", tenant_id, team_id)
     session_token = make_session_token(tenant_id)
-    return RedirectResponse(
-        _onboarding_welcome_url(tenant_id, session_token),
-        status_code=302,
+    response = _callback_redirect(
+        _onboarding_integrations_url(tenant_id, public_config),
+        public_config,
     )
+    # The reference deployment routes bridge and onboarding paths through one
+    # public origin. Setting the cookie here keeps the bearer out of every URL.
+    # Local HTTP remains usable; production HTTPS gets the Secure attribute.
+    response.set_cookie(
+        key=_SESSION_COOKIE_NAME,
+        value=session_token,
+        max_age=_SESSION_TTL_SECONDS,
+        httponly=True,
+        secure=public_config.onboarding_origin.startswith("https://"),
+        samesite="lax",
+        path="/",
+    )
+    return response

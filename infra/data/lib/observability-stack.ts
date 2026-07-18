@@ -3,7 +3,7 @@
  *
  * Consumes metrics the agent emits via CloudWatch Embedded Metric Format
  * (see `coreAgent/app/coreAgent/metrics.py`). Metrics are auto-published
- * by CloudWatch Logs under the `AgentCore Reference/Agent` namespace with dimensions
+ * by CloudWatch Logs under the `Agent/Runtime` namespace with dimensions
  * `tenant_id`, `model_id`, and `tool_name`.
  *
  * Resources:
@@ -18,7 +18,7 @@
  *   - Can be destroyed/recreated without touching DDB tables.
  *   - Keeps the data stack focused on stateful primitives.
  *
- * **Metric namespace** is fixed at `AgentCore Reference/Agent` to match the agent code.
+ * **Metric namespace** is fixed at `Agent/Runtime` to match the agent code.
  * Changing it requires an agent redeploy, so a CfnParameter would be
  * misleading; it's hardcoded here and in `metrics.py`'s `DEFAULT_NAMESPACE`.
  *
@@ -56,7 +56,7 @@ import { Construct } from 'constructs';
  * `coreAgent/app/coreAgent/metrics.py`. Changing it here without changing
  * the agent will produce an empty dashboard.
  */
-const METRIC_NAMESPACE = 'AgentCore Reference/Agent';
+const METRIC_NAMESPACE = 'Agent/Runtime';
 
 export interface ObservabilityStackProps extends StackProps {
   /**
@@ -79,7 +79,7 @@ export class ObservabilityStack extends Stack {
     // --------------------------------------------------------------------
     this.alarmTopic = new Topic(this, 'OperatorAlarmsTopic', {
       topicName: 'agentcore-operator-alarms',
-      displayName: 'AgentCore Reference AgentCore operator alarms',
+      displayName: 'Agent Runtime operator alarms',
     });
 
     if (props.alarmEmail) {
@@ -343,7 +343,7 @@ export class ObservabilityStack extends Stack {
         markdown: [
           '## Operator notes',
           '',
-          '**Namespace:** `AgentCore Reference/Agent` — populated via EMF from the agent (see `coreAgent/app/coreAgent/metrics.py`).',
+          '**Namespace:** `Agent/Runtime` — populated via EMF from the agent (see `coreAgent/app/coreAgent/metrics.py`).',
           '',
           '**Dimensions:** `tenant_id`, `model_id`, `tool_name`. Non-dimension properties (`invocation_id`, `channel_id`, `workspace_id`) are queryable in CloudWatch Logs Insights.',
           '',

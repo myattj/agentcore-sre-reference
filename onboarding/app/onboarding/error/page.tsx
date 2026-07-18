@@ -21,19 +21,19 @@ const REASONS: Record<string, { title: string; body: string }> = {
   },
   not_configured: {
     title: "Server not configured",
-    body: "The bridge is missing required Slack credentials. Contact support — this is on our side, not yours.",
+    body: "The bridge is missing required Slack credentials. Ask the deployment operator to verify the bridge configuration and logs before retrying.",
   },
   missing_fields: {
     title: "Unexpected response from Slack",
-    body: "Slack returned an install response we couldn't parse. Please try again or contact support.",
+    body: "Slack returned an install response we couldn't parse. Please try again; if it repeats, ask the deployment operator to inspect the bridge logs.",
   },
   provisioning_failed: {
     title: "Could not finish install",
-    body: "Slack accepted the install but we couldn't write your tenant configuration. Please contact support — your workspace was not charged.",
+    body: "Slack accepted the install but we couldn't write your tenant configuration. Ask the deployment operator to inspect the bridge logs and data-store permissions before retrying.",
   },
   no_session: {
     title: "Session required",
-    body: "You need to install agent-core in your Slack workspace before you can edit your configuration.",
+    body: "You need to install Agent in your Slack workspace before you can edit your configuration.",
   },
   bad_session: {
     title: "Session expired",

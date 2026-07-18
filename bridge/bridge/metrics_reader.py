@@ -1,4 +1,4 @@
-"""CloudWatch metrics reader — queries the AgentCore Reference/Agent namespace.
+"""CloudWatch metrics reader — queries the Agent/Runtime namespace.
 
 Powers two onboarding surfaces:
   1. The tenant-scoped metrics page (`/workspace/[tenantId]/metrics`) —
@@ -18,7 +18,7 @@ to this module so unit tests can monkey-patch.
 Must match ``coreAgent/app/coreAgent/metrics.py``. Changes there must be
 mirrored here.
 
-  - Namespace: ``AgentCore Reference/Agent``
+  - Namespace: ``Agent/Runtime``
   - Per-tenant counters: dim set ``[tenant_id]`` on Invocations,
     InvocationErrors, InvocationDurationMs
   - Per-(tenant, model) economics: dim set ``[tenant_id, model_id]`` on
@@ -50,7 +50,7 @@ from typing import Any
 
 log = logging.getLogger(__name__)
 
-NAMESPACE = "AgentCore Reference/Agent"
+NAMESPACE = "Agent/Runtime"
 
 
 # ---------------------------------------------------------------------------

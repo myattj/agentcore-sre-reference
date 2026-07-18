@@ -20,10 +20,16 @@ Some long-lived connections (especially the `reporting-worker` pool) can hold th
 ### 1. Generate + store the new password
 
 ```bash
-new_pw=$(openssl rand -base64 32 | tr -d '/+=')
+umask 077
+RDS_SECRET_FILE=$(mktemp)
+trap 'rm -f "$RDS_SECRET_FILE"' EXIT
+python3 - <<'PY' >"$RDS_SECRET_FILE"
+import json, secrets
+print(json.dumps({"password": secrets.token_urlsafe(32)}))
+PY
 aws secretsmanager put-secret-value \
   --secret-id agentcore/services/rds-prod \
-  --secret-string "{\"password\":\"$new_pw\"}" \
+  --secret-string "file://$RDS_SECRET_FILE" \
   --version-stages AWSPENDING
 ```
 
@@ -48,7 +54,7 @@ The healthz endpoint returns `{"db": "ok"}` only if the new secret is actually i
 aws secretsmanager update-secret-version-stage \
   --secret-id agentcore/services/rds-prod \
   --version-stage AWSCURRENT \
-  --move-to-version-id <new-version-id>
+  --move-to-version-id "$NEW_VERSION_ID"
 ```
 
 ### 5. Wait 24h
@@ -60,7 +66,7 @@ Seriously. See top of file.
 ```bash
 aws secretsmanager update-secret-version-stage \
   --secret-id agentcore/services/rds-prod \
-  --remove-from-version-id <old-version-id> \
+  --remove-from-version-id "$OLD_VERSION_ID" \
   --version-stage AWSPREVIOUS
 ```
 

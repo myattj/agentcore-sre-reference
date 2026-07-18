@@ -153,7 +153,7 @@ def _issuer_url() -> str:
 
     In LOCAL_DEV defaults to http://localhost:8000. In production this
     must be set to the bridge's public origin (e.g. an ngrok URL during
-    testing, or the load balancer URL once the bridge runs on Fargate).
+    testing or the deployed load balancer URL).
     """
     return os.getenv("BRIDGE_PUBLIC_URL", "http://localhost:8000").rstrip("/")
 

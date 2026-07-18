@@ -1,0 +1,45 @@
+name: Reference-improvement proposal
+description: Propose a larger change that belongs in the archived reference implementation
+title: "[Proposal]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Agent is archived and has no active product roadmap. A proposal should make the reference safer, clearer, easier to run, or more reusable without turning it back into a hosted product.
+  - type: textarea
+    id: use_case
+    attributes:
+      label: Use case
+      description: Who benefits, what are they trying to learn or reuse, and why is the current repository insufficient?
+    validations:
+      required: true
+  - type: textarea
+    id: approach
+    attributes:
+      label: Proposed approach
+      description: Describe the smallest complete change and the components it would affect.
+    validations:
+      required: true
+  - type: textarea
+    id: boundaries
+    attributes:
+      label: Security and operational boundaries
+      description: Cover tenant isolation, authentication, IAM, data retention, external services, cloud cost, and migration impact where relevant.
+    validations:
+      required: true
+  - type: textarea
+    id: archive_fit
+    attributes:
+      label: Why this belongs in the archive
+      description: Explain why this should land here instead of living in a fork or a new product.
+    validations:
+      required: true
+  - type: textarea
+    id: verification
+    attributes:
+      label: Verification plan
+      description: List the tests, synthetic scenarios, and documentation updates that would prove the change works.
+    validations:
+      required: true

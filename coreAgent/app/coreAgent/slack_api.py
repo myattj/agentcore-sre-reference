@@ -18,6 +18,7 @@ tool call within the same invocation. The cache is bounded at 64 entries
 (tenants) which is plenty for single-process ``agentcore dev`` and for the
 AgentCore Runtime's per-session process model.
 """
+
 from __future__ import annotations
 
 import json
@@ -35,6 +36,7 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Token retrieval
 # ---------------------------------------------------------------------------
+
 
 @lru_cache(maxsize=64)
 def get_bot_token(tenant_id: str) -> str | None:
@@ -69,6 +71,7 @@ def get_bot_token(tenant_id: str) -> str | None:
 # ---------------------------------------------------------------------------
 # Slack API calls
 # ---------------------------------------------------------------------------
+
 
 def _slack_get(token: str, method: str, params: dict[str, Any]) -> dict[str, Any]:
     """Call a Slack Web API method via GET and return the parsed JSON."""
@@ -141,19 +144,22 @@ def fetch_channel_history(
     text search on ``conversations.history``.
     """
     # Fetch up to 100 recent messages to filter from
-    data = _slack_get(token, "conversations.history", {
-        "channel": channel_id,
-        "limit": 100,
-    })
+    data = _slack_get(
+        token,
+        "conversations.history",
+        {
+            "channel": channel_id,
+            "limit": 100,
+        },
+    )
     if not data.get("ok"):
         return f"Error fetching channel history: {data.get('error', 'unknown')}"
 
     messages = data.get("messages", [])
     query_lower = query.lower()
-    matches = [
-        m for m in messages
-        if query_lower in (m.get("text", "")).lower()
-    ][:limit]
+    matches = [m for m in messages if query_lower in (m.get("text", "")).lower()][
+        :limit
+    ]
 
     if not matches:
         return f"No messages matching '{query}' found in recent channel history."
@@ -177,11 +183,15 @@ def fetch_thread_replies(
     Uses ``conversations.replies`` (requires ``channels:history`` /
     ``groups:history`` scopes).
     """
-    data = _slack_get(token, "conversations.replies", {
-        "channel": channel_id,
-        "ts": thread_ts,
-        "limit": 100,
-    })
+    data = _slack_get(
+        token,
+        "conversations.replies",
+        {
+            "channel": channel_id,
+            "ts": thread_ts,
+            "limit": 100,
+        },
+    )
     if not data.get("ok"):
         return f"Error fetching thread: {data.get('error', 'unknown')}"
 
@@ -206,11 +216,15 @@ def fetch_thread_replies_raw(
     """Fetch raw reply dicts from a Slack thread. Used by context_assembler
     which needs the raw message list (to filter, truncate, etc.) rather
     than a pre-formatted string."""
-    data = _slack_get(token, "conversations.replies", {
-        "channel": channel_id,
-        "ts": thread_ts,
-        "limit": limit,
-    })
+    data = _slack_get(
+        token,
+        "conversations.replies",
+        {
+            "channel": channel_id,
+            "ts": thread_ts,
+            "limit": limit,
+        },
+    )
     if not data.get("ok"):
         return []
     return data.get("messages", [])
@@ -257,6 +271,60 @@ def get_user_info(
         return None
     user = data.get("user")
     return user if isinstance(user, dict) else None
+
+
+def is_user_member_of_channel(
+    token: str,
+    channel_id: str,
+    user_id: str,
+) -> bool | None:
+    """Return whether ``user_id`` is a member of ``channel_id``.
+
+    ``None`` means membership could not be determined (API error, malformed
+    response, or an unexpectedly large result set). Authorization callers
+    must treat both ``False`` and ``None`` as denial. Results are paginated so
+    membership is not inferred from only the first page of a large channel.
+    """
+    if not token or not channel_id or not user_id:
+        return None
+
+    cursor = ""
+    for _page in range(100):
+        try:
+            data = _slack_get(
+                token,
+                "conversations.members",
+                {
+                    "channel": channel_id,
+                    "limit": 200,
+                    "cursor": cursor or None,
+                },
+            )
+        except Exception:
+            log.warning(
+                "conversations.members failed for channel=%s",
+                channel_id,
+                exc_info=True,
+            )
+            return None
+
+        if not data.get("ok"):
+            return None
+        members = data.get("members")
+        if not isinstance(members, list):
+            return None
+        if user_id in members:
+            return True
+
+        metadata = data.get("response_metadata")
+        if metadata is not None and not isinstance(metadata, dict):
+            return None
+        cursor = str((metadata or {}).get("next_cursor") or "").strip()
+        if not cursor:
+            return False
+
+    # Do not guess after the defensive pagination ceiling.
+    return None
 
 
 def post_message(

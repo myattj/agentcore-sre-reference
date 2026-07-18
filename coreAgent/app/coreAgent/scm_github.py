@@ -1,6 +1,6 @@
 """GitHub App installation-token minting.
 
-Auth primitive for the codebase-access layer. AgentCore Reference owns ONE GitHub App;
+Auth primitive for the codebase-access layer. Agent uses ONE GitHub App;
 customers install it on their GitHub org. Each install gets an
 ``installation_id`` which we store on the tenant row
 (``codebases.github_installation_id``). This module exchanges that id for a
@@ -32,7 +32,7 @@ managed policies in ``infra/data/lib/data-stack.ts`` grant
 ``PlatformSecretsRead`` statement). After a ``cdk deploy`` of the data
 stack, the agent and bridge roles can both read this secret. The
 secret itself must still be created out-of-band by an operator —
-see the step-3 warm-start docs for the ``put-secret-value`` command.
+store the private key directly in Secrets Manager and never commit it.
 
 ## Caching
 
@@ -118,7 +118,7 @@ def _get_app_id() -> str:
     if not app_id:
         raise RuntimeError(
             "GITHUB_APP_ID env var is not set. Set it to the numeric ID of "
-            "the AgentCore Reference GitHub App (visible on the App's settings page)."
+            "the Agent GitHub App (visible on the App's settings page)."
         )
     return app_id
 
@@ -130,8 +130,8 @@ def _get_private_key_pem() -> str:
     ``GITHUB_APP_PRIVATE_KEY_FILE`` (path).
 
     Production: fetch from Secrets Manager at
-    ``agentcore/platform/github_app/private_key``. Requires IAM grant —
-    see module docstring TODO.
+    ``agentcore/platform/github_app/private_key``. Requires the IAM grant
+    described in this module's ``Secrets`` section.
     """
     if os.getenv("AGENT_LOCAL_STORES") == "1":
         inline = os.getenv("GITHUB_APP_PRIVATE_KEY_PEM")
@@ -214,7 +214,7 @@ def _exchange_jwt_for_installation_token(
             "Authorization": f"Bearer {app_jwt}",
             "Accept": "application/vnd.github+json",
             "X-GitHub-Api-Version": "2022-11-28",
-            "User-Agent": "AgentCore Reference-Agent/1.0",
+            "User-Agent": "Agent-Runtime/1.0",
         },
     )
     try:

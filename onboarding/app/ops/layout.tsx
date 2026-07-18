@@ -22,7 +22,7 @@ export default function OpsLayout({
         <div className="mx-auto flex max-w-6xl items-center justify-between px-6 py-4">
           <div className="flex items-center gap-6">
             <Link href="/ops" className="font-semibold tracking-tight">
-              agent-core ops
+              Agent ops
             </Link>
             <span className="rounded bg-amber-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-amber-800">
               operator

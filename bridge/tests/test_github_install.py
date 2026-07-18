@@ -19,7 +19,6 @@ import pytest
 from fastapi.testclient import TestClient
 
 from bridge.github_install import (
-    WarmStartResult,
     rank_repos,
     repos_to_bindings,
     run_install_warm_start,
@@ -109,6 +108,9 @@ def stub_tenant_store(monkeypatch: pytest.MonkeyPatch) -> dict[str, dict[str, An
     store: dict[str, dict[str, Any]] = {
         "acme": build_default_config_dict("acme"),
     }
+    # GitHub installation IDs are operator-approved trust bindings, not
+    # tenant-editable settings. Most tests exercise the approved happy path.
+    store["acme"]["codebases"]["github_installation_id"] = "12345"
 
     def fake_get(tenant_id: str, _region: str) -> dict[str, Any]:
         if tenant_id not in store:
@@ -123,6 +125,10 @@ def stub_tenant_store(monkeypatch: pytest.MonkeyPatch) -> dict[str, dict[str, An
 
     monkeypatch.setattr("bridge.github_install.get_tenant_row", fake_get)
     monkeypatch.setattr("bridge.github_install.update_tenant_row", fake_update)
+    monkeypatch.setattr(
+        "bridge.github_install.find_tenant_by_github_installation",
+        lambda _installation_id, _region: "acme",
+    )
     return store
 
 
@@ -209,6 +215,43 @@ def test_run_install_warm_start_tenant_not_found(
     assert result.ok is False
     assert result.error is not None
     assert "ghost" in result.error
+
+
+def test_run_install_warm_start_rejects_unapproved_installation_before_mint(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_tenant_store: dict[str, dict[str, Any]],
+) -> None:
+    stub_tenant_store["acme"]["codebases"]["github_installation_id"] = None
+    minted: list[str] = []
+    monkeypatch.setattr(
+        "bridge.github_install.get_installation_token",
+        lambda installation_id: minted.append(installation_id),
+    )
+
+    result = run_install_warm_start("acme", "12345", "us-west-2")
+
+    assert result.ok is False
+    assert result.pending_approval is True
+    assert "operator-approved" in (result.error or "")
+    assert minted == []
+
+
+def test_run_install_warm_start_rejects_other_tenants_installation_before_mint(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_tenant_store: dict[str, dict[str, Any]],
+) -> None:
+    minted: list[str] = []
+    monkeypatch.setattr(
+        "bridge.github_install.get_installation_token",
+        lambda installation_id: minted.append(installation_id),
+    )
+
+    result = run_install_warm_start("acme", "99999", "us-west-2")
+
+    assert result.ok is False
+    assert result.pending_approval is False
+    assert "not approved" in (result.error or "")
+    assert minted == []
 
 
 def test_run_install_warm_start_token_mint_fails(
@@ -309,6 +352,7 @@ def test_install_endpoint_happy_path(
     assert body["installation_id"] == "12345"
     assert body["default_repo"] == "acme/platform"
     assert body["total_repos_available"] == 3
+    assert body["pending_approval"] is False
     assert len(body["bindings"]) == 3
     assert body["bindings"][0] == {"repo": "acme/platform", "default_branch": "main"}
 
@@ -344,6 +388,38 @@ def test_install_endpoint_rejects_empty_installation_id(
         headers=_auth("acme"),
     )
     assert r.status_code == 422  # Pydantic min_length=1
+
+
+@pytest.mark.parametrize(
+    "installation_id",
+    [0, -1, "abc", 2**63, 12345.0, True],
+)
+def test_install_endpoint_rejects_invalid_installation_id(
+    client: TestClient,
+    stub_tenant_store: dict[str, dict[str, Any]],
+    installation_id: Any,
+) -> None:
+    r = client.post(
+        "/api/tenants/acme/codebases/github/install",
+        json={"installation_id": installation_id},
+        headers=_auth("acme"),
+    )
+    assert r.status_code == 422
+
+
+def test_install_endpoint_returns_pending_operator_approval(
+    client: TestClient,
+    stub_tenant_store: dict[str, dict[str, Any]],
+) -> None:
+    stub_tenant_store["acme"]["codebases"]["github_installation_id"] = None
+    r = client.post(
+        "/api/tenants/acme/codebases/github/install",
+        json={"installation_id": 12345},
+        headers=_auth("acme"),
+    )
+    assert r.status_code == 200
+    assert r.json()["ok"] is False
+    assert r.json()["pending_approval"] is True
 
 
 def test_install_endpoint_rejects_extra_fields(

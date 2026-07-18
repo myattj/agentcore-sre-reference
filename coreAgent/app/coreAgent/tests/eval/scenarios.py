@@ -54,7 +54,7 @@ SCENARIO_CPU_SPIKE_DEPLOY = EvalScenario(
         "**U_SRE1**: started spiking ~2 mins ago, right after the deploy"
     ),
     available_tools=[
-        "read_thread_context", "search_team_history", "search_docs",
+        "read_thread_context", "search_team_history",
         "escalate", "query_metrics", "get_recent_alerts",
         "code_search", "code_read_file", "code_list_commits",
         "code_find_symbol",
@@ -144,7 +144,7 @@ SCENARIO_LATENCY_NO_DEPLOY = EvalScenario(
         "**U_SRE1**: seeing high connection pool usage on the primary DB too"
     ),
     available_tools=[
-        "read_thread_context", "search_team_history", "search_docs",
+        "read_thread_context", "search_team_history",
         "escalate", "query_metrics", "search_logs",
         "code_search", "code_read_file", "code_list_commits",
         "code_find_symbol",
@@ -223,7 +223,7 @@ SCENARIO_AMBIGUOUS_REPO = EvalScenario(
         "**U_SRE1**: both services started erroring at the same time, ~11:30"
     ),
     available_tools=[
-        "read_thread_context", "search_team_history", "search_docs",
+        "read_thread_context", "search_team_history",
         "escalate", "query_metrics", "get_recent_alerts",
         "code_search", "code_read_file", "code_list_commits",
         "code_find_symbol", "ask_codebase_choice",
@@ -271,7 +271,7 @@ SCENARIO_SPARSE_CONTEXT = EvalScenario(
         "**U_SRE3**: p1\n"
     ),
     available_tools=[
-        "read_thread_context", "search_team_history", "search_docs",
+        "read_thread_context", "search_team_history",
         "escalate",
     ],
     mock_tool_responses={
@@ -312,6 +312,16 @@ SCENARIO_FALSE_POSITIVE = EvalScenario(
         "code_search", "code_read_file", "code_list_commits",
     ],
     mock_tool_responses={
+        # This scenario explicitly simulates an external Gateway/MCP server
+        # that advertises search_docs. It is not part of the in-process catalog.
+        "search_docs": {
+            "results": [
+                {
+                    "title": "Nightly ETL operations",
+                    "summary": "Expected memory usage is 80-90% from 02:00-04:00 UTC.",
+                },
+            ],
+        },
         "query_metrics": {
             "series": [
                 {"metric": "system.mem.used_pct", "values": [

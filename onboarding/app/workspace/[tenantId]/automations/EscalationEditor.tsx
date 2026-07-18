@@ -147,9 +147,9 @@ export default function EscalationEditor({ tenantId, initial, channels }: Props)
 
       {editingIndex !== null ? (
         <div className="rounded-lg border border-[color:var(--accent)]/30 bg-white p-5 shadow-sm">
-          <h4 className="mb-4 text-sm font-semibold">
+          <h3 className="mb-4 text-sm font-semibold">
             {editingIndex >= routes.length ? "New escalation route" : "Edit route"}
-          </h4>
+          </h3>
           <div className="space-y-4">
             <label className="block">
               <span className="mb-1 block text-xs font-medium">Team name</span>
@@ -213,7 +213,7 @@ export default function EscalationEditor({ tenantId, initial, channels }: Props)
 
             <div>
               <span className="mb-1 block text-xs font-medium">Contacts</span>
-              <p className="mb-2 text-[10px] text-[color:var(--muted)]">
+              <p className="mb-2 text-xs text-[color:var(--muted)]">
                 Slack user IDs to @mention in escalation messages (e.g. U0123456789).
               </p>
               {draft.contacts.length > 0 ? (
@@ -225,6 +225,7 @@ export default function EscalationEditor({ tenantId, initial, channels }: Props)
                     >
                       {id}
                       <button
+                        aria-label={`Remove contact ${id}`}
                         type="button"
                         onClick={() => removeContact(id)}
                         className="text-[color:var(--muted)] hover:text-red-600"
@@ -237,6 +238,7 @@ export default function EscalationEditor({ tenantId, initial, channels }: Props)
               ) : null}
               <div className="flex gap-2">
                 <input
+                  aria-label="Slack contact user ID"
                   type="text"
                   value={contactInput}
                   onChange={(e) => setContactInput(e.target.value)}
@@ -317,10 +319,12 @@ export default function EscalationEditor({ tenantId, initial, channels }: Props)
           + Add team
         </button>
         {status.kind === "saved" ? (
-          <span className="text-sm text-green-600">Saved.</span>
+          <span aria-live="polite" className="text-sm text-green-600" role="status">
+            Saved.
+          </span>
         ) : null}
         {status.kind === "error" ? (
-          <span className="text-sm text-red-600">
+          <span aria-live="assertive" className="text-sm text-red-600" role="alert">
             Couldn&apos;t save: {status.message}
           </span>
         ) : null}
