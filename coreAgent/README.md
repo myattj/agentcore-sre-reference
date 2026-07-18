@@ -67,7 +67,7 @@ Important environment variables include:
 | <code>AGENTCORE_SEMANTIC_STRATEGY_ID</code> / <code>AGENTCORE_USER_PREF_STRATEGY_ID</code> | Optional memory strategies |
 | <code>GITHUB_APP_ID</code> | GitHub App used by codebase workflows |
 | <code>SANDBOX_JOBS_TABLE</code> | Sandbox job coordination table |
-| <code>DASHBOARDS_TABLE</code> / <code>DASHBOARD_BASE_URL</code> | Temporary dashboard publishing |
+| <code>DASHBOARDS_TABLE</code> / <code>DOMAIN_NAME</code> (deploy wrapper) / <code>DASHBOARD_BASE_URL</code> (runtime) | Temporary dashboard publishing; the wrapper derives the HTTPS runtime URL from the domain |
 | <code>AWS_REGION</code> | AWS region for Bedrock and AgentCore resources |
 
 Never put private keys or tokens in <code>agentcore.json</code>. Use AWS Secrets

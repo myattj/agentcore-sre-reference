@@ -27,7 +27,8 @@ make check   # full local validation suite
 ~~~
 
 The root [README](./README.md#try-it-locally--no-cloud-account-required)
-explains what each command does. Every script also supports <code>--help</code>.
+explains what each command does. The main setup, doctor, demo, and check
+entrypoints also support <code>--help</code>.
 Make is a convenience wrapper; <code>./scripts/setup.sh</code> and its sibling
 entrypoints work directly when Make is unavailable.
 

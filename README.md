@@ -105,8 +105,9 @@ disagree, setup stops with a repair instruction instead of guessing.
 You need Git, Python **3.13**, [uv](https://docs.astral.sh/uv/), Node.js **22+**,
 and npm. <code>make doctor</code> checks each one, distinguishes required tools
 from optional cloud tooling, and prints an exact install path for anything
-missing. The scripts support <code>--help</code> and work with the Bash versions
-shipped by current macOS and mainstream Linux distributions.
+missing. The four developer entrypoints listed below support <code>--help</code>
+and work with the Bash versions shipped by current macOS and mainstream Linux
+distributions.
 Make is only a convenience wrapper: if it is not installed, run the matching
 <code>./scripts/doctor.sh</code>, <code>./scripts/setup.sh</code>,
 <code>./scripts/demo.sh</code>, or <code>./scripts/check.sh</code> entrypoint
@@ -267,7 +268,8 @@ There is no single safe <code>deploy everything</code> command. A real deploymen
 4. If you enable GitHub App code access, explicitly bind each numeric installation ID to the intended tenant through the privileged approval endpoint. Tenant sessions cannot create or change <code>codebases.github_installation_id</code>.
 5. Provision Gateway targets and credentials for only the integrations you intend to expose.
 6. Treat the Fargate PR sandbox in [<code>infra/sandbox/</code>](./infra/sandbox/) as hostile code execution and harden it before enabling <code>propose_pr</code>.
-7. Set an HTTPS <code>DASHBOARD_BASE_URL</code> if you enable dashboards.
+7. Set <code>DOMAIN_NAME</code> if you enable dashboards; the deployment wrapper
+   injects its HTTPS origin as <code>DASHBOARD_BASE_URL</code> for the runtime.
 
 For GitHub Actions deployment, set the repository variable
 <code>AWS_REGION</code> to the same region as the configured OIDC role and every
