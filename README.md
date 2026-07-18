@@ -132,7 +132,9 @@ make check
 
 For a faster edit loop, <code>scripts/check.sh --quick</code> skips CDK synth and
 the live demo startup. Neither command deploys resources or calls AWS, Slack, or
-GitHub APIs.
+GitHub APIs. The check also works from GitHub source archives, where there is no
+Git index: generated local env files, dependencies, and build output are kept
+out of the source-only secret scan.
 
 ## Prerequisites for the full AgentCore path
 
@@ -144,7 +146,27 @@ For the AgentCore loop or an AWS deployment:
 - Access to a compatible Bedrock model in your chosen region
 - A Slack app if you want to exercise the real transport
 
-The checked-in infrastructure defaults to <code>us-west-2</code>. If you choose another region, update all region-dependent configuration consistently and verify AgentCore and model availability there. A region choice is not, by itself, a privacy or compliance guarantee.
+AWS authentication uses the standard AWS CLI/SDK credential chain, including
+named profiles, SSO sessions, environment credentials, and workload roles. One
+selected region is threaded through AgentCore, CDK, the bridge, deployment
+scripts, and the manual GitHub Actions release jobs. The fallback for examples
+and credential-free synth is <code>us-west-2</code>.
+
+This does not mean every AWS partition and region has the same service set. The
+full reference path supports any commercial AWS account in a region accepted
+by the pinned AgentCore CLI where Runtime, the chosen Bedrock model, Gateway,
+Memory, and the other enabled features are available. The exact release
+allowlist is tracked in
+[<code>scripts/agentcore_regions.txt</code>](./scripts/agentcore_regions.txt);
+it is intentionally narrower than the set of syntactically valid AWS region
+names. The CDK policies are partition-aware and can synthesize
+for GovCloud, but the default global Bedrock model and optional AgentCore
+features must be replaced or disabled there. AWS China is not a supported full
+deployment target; neither are isolated or other sovereign partitions outside
+commercial AWS and GovCloud. Check the current
+[AgentCore region matrix](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/agentcore-regions.html)
+before spending money. A region choice is not, by itself, a privacy or
+compliance guarantee.
 
 ## Full local AgentCore loop
 
@@ -158,16 +180,28 @@ The AgentCore CLI reserves <code>LOCAL_DEV</code> internally, so using it as the
 Run <code>make setup</code> first. The service directories still have independent
 environments; do not import the bridge package from the agent or vice versa.
 
-AgentCore also requires an ignored, developer-specific deployment target file.
-Create it from the sanitized template; the placeholder account is sufficient
-for local validation, but replace it with your own AWS account ID before any
-deployment:
+AgentCore requires an ignored, developer-specific deployment target file. Do
+not edit account IDs into tracked configuration. Select the same profile and
+region you will use for development, verify the live STS identity and AgentCore
+control plane, and generate the target from that identity:
 
 ~~~bash
-test -e coreAgent/agentcore/aws-targets.json || \
-  cp coreAgent/agentcore/aws-targets.example.json \
-     coreAgent/agentcore/aws-targets.json
+export AWS_PROFILE=my-sandbox-profile  # omit for the default credential chain
+export AWS_REGION=eu-west-1
+make aws-doctor
+make aws-configure
 ~~~
+
+<code>make aws-doctor</code> is read-only. <code>make aws-configure</code> writes
+only <code>coreAgent/agentcore/aws-targets.json</code>, with mode 0600. It refuses
+to replace a different account or region unless you explicitly pass
+<code>AWS_CONFIGURE_ARGS="--force"</code>. The script also reports whether the
+selected account/region has been CDK-bootstrapped.
+AWS CLI calls time out after 30 seconds by default; set
+<code>AGENTCORE_AWS_CLI_TIMEOUT_SECONDS</code> when an SSO or credential helper
+needs a different bound.
+The preflight rejects regions outside the pinned CLI's release allowlist before
+contacting STS or writing the target file.
 
 Then start three terminals from the repository root:
 
@@ -229,6 +263,18 @@ There is no single safe <code>deploy everything</code> command. A real deploymen
 5. Provision Gateway targets and credentials for only the integrations you intend to expose.
 6. Treat the Fargate PR sandbox in [<code>infra/sandbox/</code>](./infra/sandbox/) as hostile code execution and harden it before enabling <code>propose_pr</code>.
 7. Set an HTTPS <code>DASHBOARD_BASE_URL</code> if you enable dashboards.
+
+For GitHub Actions deployment, set the repository variable
+<code>AWS_REGION</code> to the same region as the configured OIDC role and every
+regional ARN. It defaults to <code>us-west-2</code>. The workflow rejects a
+runtime ARN from a different account, partition, or region, and CDK validates
+the supplied AgentCore, ACM, ECS, and Secrets Manager ARNs before synthesis.
+Because the [AWS control-plane API](https://docs.aws.amazon.com/bedrock-agentcore-control/latest/APIReference/API_GetAgentRuntime.html)
+and [runtime developer guidance](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/runtime-security-best-practices.html)
+currently contain both versioned
+<code>agent/&lt;uuid&gt;:&lt;version&gt;</code> and legacy
+<code>runtime/&lt;id&gt;</code> AgentCore ARN resources, discovery and validation
+accept both shapes while still requiring the live control-plane ID and version.
 
 The checked-in helper performs the GitHub account check and exclusive tenant
 binding without putting the operator secret on the command line:
@@ -298,6 +344,7 @@ The authoritative tenant schema is <code>coreAgent/app/coreAgent/tenant.py</code
 Agent is archived. Issues and pull requests may be useful to future readers, but there is no roadmap, hosted service, support SLA, or promise of dependency updates.
 
 - Read [<code>NORTH_STAR.md</code>](./NORTH_STAR.md) for the archived product thesis.
+- Browse the component guides for the [bridge](./bridge/README.md), [core agent](./coreAgent/README.md), [onboarding UI](./onboarding/README.md), [AWS infrastructure](./infra/data/README.md), and [PR sandbox](./infra/sandbox/README.md).
 - See [<code>CONTRIBUTING.md</code>](./CONTRIBUTING.md) before proposing a change.
 - Read [<code>SUPPORT.md</code>](./SUPPORT.md) for the archive's support boundaries.
 - Report vulnerabilities through [<code>SECURITY.md</code>](./SECURITY.md).

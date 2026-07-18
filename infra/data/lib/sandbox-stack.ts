@@ -34,6 +34,7 @@
 import * as path from 'node:path';
 
 import {
+  ArnFormat,
   CfnOutput,
   RemovalPolicy,
   Stack,
@@ -133,6 +134,19 @@ export class SandboxStack extends Stack {
 
   constructor(scope: Construct, id: string, props: SandboxStackProps) {
     super(scope, id, props);
+
+    const githubAppSecretsArn = this.formatArn({
+      service: 'secretsmanager',
+      resource: 'secret',
+      resourceName: 'agentcore/platform/github_app/*',
+      arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+    });
+    const sandboxSsmParametersArn = this.formatArn({
+      service: 'ssm',
+      resource: 'parameter',
+      resourceName: 'agentcore/sandbox/*',
+      arnFormat: ArnFormat.SLASH_RESOURCE_NAME,
+    });
 
     if (props.availabilityZones.length !== props.publicSubnetIds.length) {
       throw new Error(
@@ -250,9 +264,7 @@ export class SandboxStack extends Stack {
       sid: 'GitHubAppKeyRead',
       effect: iam.Effect.ALLOW,
       actions: ['secretsmanager:GetSecretValue'],
-      resources: [
-        `arn:aws:secretsmanager:${this.region}:${this.account}:secret:agentcore/platform/github_app/*`,
-      ],
+      resources: [githubAppSecretsArn],
     }));
 
     sandboxSecret.grantRead(taskRole);
@@ -434,9 +446,7 @@ export class SandboxStack extends Stack {
             'ssm:GetParameters',
             'ssm:GetParametersByPath',
           ],
-          resources: [
-            `arn:aws:ssm:${this.region}:${this.account}:parameter/agentcore/sandbox/*`,
-          ],
+          resources: [sandboxSsmParametersArn],
         }),
         new iam.PolicyStatement({
           sid: 'WriteSandboxJobs',

@@ -47,23 +47,51 @@ access policies. The sandbox stack adds its own access policy.
 - AWS Secrets Manager entries for Slack and bridge secrets
 
 AgentCore, Bedrock model, Gateway, and Memory availability varies by AWS region.
-Verify current support and pricing before choosing a region.
+Verify current support and pricing before choosing a region. The reference
+validates commercial AWS and GovCloud targets; AWS China, isolated, and other
+sovereign partitions are outside its supported deployment boundary. The full
+deployment workflow also requires a region listed in
+[<code>scripts/agentcore_regions.txt</code>](../../scripts/agentcore_regions.txt),
+matching the pinned AgentCore CLI schema.
+
+From the repository root, select and verify the AWS identity once. Named
+profiles, AWS SSO, environment credentials, and workload roles all use the
+standard AWS credential chain:
+
+~~~bash
+export AWS_PROFILE=my-sandbox-profile  # omit for the default credential chain
+export AWS_REGION=eu-west-1
+make aws-doctor
+make aws-configure
+~~~
+
+Keep those exports in the shell used for every CDK, AgentCore, and helper-script
+command. Mixing profiles or regions is rejected when an ARN no longer matches
+the active account, partition, or region.
+
+The reference uses account-global IAM names and fixed regional resource names.
+Treat it as one installation per AWS account, deployed into one selected region,
+unless you first introduce and review a deployment-name prefix across the
+stacks, runtime configuration, and scripts.
 
 ## Build and synthesize
 
 ~~~bash
 cd infra/data
 npm ci
-npm run build
+npm test
 bash scripts/build_interceptor_zip.sh
-CDK_DEFAULT_ACCOUNT=000000000000 npx cdk synth --quiet
+npx cdk synth --quiet \
+  --app 'env CDK_DEFAULT_ACCOUNT=000000000000 CDK_DEFAULT_REGION=us-west-2 node dist/bin/data.js' \
+  -c region=us-west-2
 ~~~
 
-The default synth covers <code>AgentCore-coreAgent-data-us-west-2</code> and
-<code>AgentCore-coreAgent-observability-us-west-2</code>. Add context values to
-inspect optional stacks; the CI workflow contains reproducible synthetic
-examples. If you set <code>-c region=...</code>, replace the region suffix in
-the stack names below.
+That credential-free example intentionally covers the synthetic
+<code>us-west-2</code> stacks and forces the child CDK app to ignore any active
+profile's account or region. With real credentials, CDK inherits the active
+profile region. An explicit <code>-c region=...</code> wins. Add context values
+to inspect optional stacks; the CI workflow contains reproducible commercial
+and GovCloud synthetic examples.
 
 ## Deploy the base stacks
 
@@ -71,8 +99,9 @@ the stack names below.
 cd infra/data
 npx cdk bootstrap
 npx cdk deploy \
-  AgentCore-coreAgent-data-us-west-2 \
-  AgentCore-coreAgent-observability-us-west-2
+  "AgentCore-coreAgent-data-${AWS_REGION}" \
+  "AgentCore-coreAgent-observability-${AWS_REGION}" \
+  -c "region=${AWS_REGION}"
 ~~~
 
 Set <code>-c alarmEmail=you@example.com</code> if you want alarm email
@@ -94,9 +123,10 @@ Gateway and its SSM coordinates separately:
 ~~~bash
 cd infra/data
 bash scripts/build_interceptor_zip.sh
-npx cdk deploy AgentCore-coreAgent-gateway-us-west-2 \
+npx cdk deploy "AgentCore-coreAgent-gateway-${AWS_REGION}" \
+  -c "region=${AWS_REGION}" \
   -c bridgePublicUrl=https://agent.example.com
-uv run --with boto3 python scripts/provision_gateway.py
+uv run --with boto3 python scripts/provision_gateway.py --region "$AWS_REGION"
 ~~~
 
 ### Bridge and onboarding services
@@ -105,6 +135,9 @@ uv run --with boto3 python scripts/provision_gateway.py
 <code>agentRuntimeArn</code> plus Slack and bridge shared-secret ARNs. A
 certificate and domain are optional only for local/synthetic stack validation;
 the production workflow requires both and refuses an HTTP deployment. The
+runtime ARN may use either the current versioned
+<code>agent/&lt;uuid&gt;:&lt;version&gt;</code> resource or the legacy
+<code>runtime/&lt;id&gt;</code> form still present in AWS developer guidance. The
 reference stack routes the bridge and onboarding service
 through one public origin because the Slack OAuth callback sets the
 host-scoped HttpOnly onboarding cookie. GitHub App and sandbox contexts are

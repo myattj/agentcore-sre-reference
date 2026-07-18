@@ -2,8 +2,10 @@
 set -eu
 
 ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+. "$ROOT_DIR/scripts/offline_aws_env.sh"
 QUICK=0
 PYTHON_BIN=""
+SYNTH_APP="env CDK_DEFAULT_ACCOUNT=000000000000 CDK_DEFAULT_REGION=us-west-2 node dist/bin/data.js"
 
 usage() {
   cat <<'EOF'
@@ -45,6 +47,51 @@ run_in() {
   (cd "$ROOT_DIR/$directory" && "$@")
 }
 
+run_offline_cdk() {
+  label=$1
+  shift
+  printf '\n==> %s\n' "$label"
+  (
+    cd "$ROOT_DIR/infra/data"
+    run_offline_aws "$@"
+  )
+}
+
+cleanup_source_scan() {
+  if [ -n "${SOURCE_SCAN_WORK:-}" ] && [ -d "$SOURCE_SCAN_WORK" ]; then
+    rm -r -- "$SOURCE_SCAN_WORK"
+  fi
+  SOURCE_SCAN_WORK=""
+}
+
+scan_source_archive() {
+  SOURCE_SCAN_WORK=$(mktemp -d "${TMPDIR:-/tmp}/agent-source-scan.XXXXXX")
+  source_scan_tree="$SOURCE_SCAN_WORK/tree"
+  mkdir "$source_scan_tree"
+  trap cleanup_source_scan EXIT
+  trap 'cleanup_source_scan; exit 130' HUP INT TERM
+
+  # A downloaded source archive has no Git index to distinguish source from
+  # files created by setup and build commands. Copy only source-like content
+  # into a temporary tree so generated local secrets and dependency/build
+  # artifacts cannot become false positives. Keep .env.example files: they are
+  # documentation and should still be scanned.
+  (
+    cd "$ROOT_DIR"
+    tar -cf "$SOURCE_SCAN_WORK/source.tar" \
+      --exclude-from="$ROOT_DIR/.source-scan-excludes" \
+      .
+  )
+  tar -xf "$SOURCE_SCAN_WORK/source.tar" -C "$source_scan_tree"
+  rm -f -- "$SOURCE_SCAN_WORK/source.tar"
+
+  source_scan_status=0
+  gitleaks dir --redact --no-banner "$source_scan_tree" || source_scan_status=$?
+  cleanup_source_scan
+  trap - EXIT HUP INT TERM
+  return "$source_scan_status"
+}
+
 if [ ! -x "$ROOT_DIR/bridge/.venv/bin/pytest" ] || [ ! -d "$ROOT_DIR/onboarding/node_modules" ]; then
   printf 'check: dependencies are missing; run make setup first.\n' >&2
   exit 1
@@ -64,7 +111,13 @@ run "shell syntax" bash -n \
   "$ROOT_DIR/scripts/setup.sh" \
   "$ROOT_DIR/scripts/doctor.sh" \
   "$ROOT_DIR/scripts/demo.sh" \
-  "$ROOT_DIR/scripts/check.sh"
+  "$ROOT_DIR/scripts/check.sh" \
+  "$ROOT_DIR/scripts/offline_aws_env.sh" \
+  "$ROOT_DIR/scripts/resolve_agent_runtime.sh" \
+  "$ROOT_DIR/infra/data/scripts/aws_region.sh" \
+  "$ROOT_DIR/infra/data/scripts/attach_agent_policy.sh" \
+  "$ROOT_DIR/infra/data/scripts/check_portability.sh" \
+  "$ROOT_DIR/infra/data/scripts/deploy_sandbox.sh"
 run_in "bridge tests" bridge uv run --frozen pytest
 run_in "core agent tests" coreAgent/app/coreAgent uv run --frozen pytest
 run_in "core metrics tests" coreAgent/app/coreAgent uv run --frozen python -m unittest test_metrics
@@ -77,28 +130,39 @@ run_in "generated AgentCore CDK build" coreAgent/agentcore/cdk npm run build
 run_in "generated AgentCore CDK tests" coreAgent/agentcore/cdk npm test -- --runInBand
 run_in "generated AgentCore CDK format" coreAgent/agentcore/cdk npm run format:check
 run_in "hand-authored CDK build" infra/data npm run build
+run_in "hand-authored CDK tests" infra/data npm test
 
 if [ "$QUICK" -eq 0 ]; then
   run_in "Gateway interceptor bundle" infra/data bash scripts/build_interceptor_zip.sh
-  run_in "base CDK synth" infra/data env CDK_DEFAULT_ACCOUNT=000000000000 npx cdk synth --quiet
-  run_in "Gateway CDK synth" infra/data env CDK_DEFAULT_ACCOUNT=000000000000 \
+  run_offline_cdk "base CDK synth" npx cdk synth --quiet \
+    --app "$SYNTH_APP" \
+    --context region=us-west-2
+  run_offline_cdk "Gateway CDK synth" \
     npx cdk synth AgentCore-coreAgent-gateway-us-west-2 --quiet \
+    --app "$SYNTH_APP" \
+    --context region=us-west-2 \
     --context bridgePublicUrl=https://bridge.example.test
-  run_in "certificate-free services CDK synth" infra/data env CDK_DEFAULT_ACCOUNT=000000000000 \
+  run_offline_cdk "certificate-free services CDK synth" \
     npx cdk synth AgentCore-coreAgent-services-us-west-2 --quiet \
-    --context agentRuntimeArn=arn:aws:bedrock-agentcore:us-west-2:000000000000:runtime/example \
+    --app "$SYNTH_APP" \
+    --context region=us-west-2 \
+    --context agentRuntimeArn=arn:aws:bedrock-agentcore:us-west-2:000000000000:agent/00000000-0000-0000-0000-000000000001:1 \
     --context slackSecretsArn=arn:aws:secretsmanager:us-west-2:000000000000:secret:slack-abc123 \
     --context bridgeSecretsArn=arn:aws:secretsmanager:us-west-2:000000000000:secret:bridge-abc123
-  run_in "HTTPS services CDK synth" infra/data env CDK_DEFAULT_ACCOUNT=000000000000 \
+  run_offline_cdk "HTTPS services CDK synth" \
     npx cdk synth AgentCore-coreAgent-services-us-west-2 --quiet \
-    --context agentRuntimeArn=arn:aws:bedrock-agentcore:us-west-2:000000000000:runtime/example \
+    --app "$SYNTH_APP" \
+    --context region=us-west-2 \
+    --context agentRuntimeArn=arn:aws:bedrock-agentcore:us-west-2:000000000000:agent/00000000-0000-0000-0000-000000000001:1 \
     --context certificateArn=arn:aws:acm:us-west-2:000000000000:certificate/00000000-0000-0000-0000-000000000000 \
     --context domainName=example.test \
     --context slackSecretsArn=arn:aws:secretsmanager:us-west-2:000000000000:secret:slack-abc123 \
     --context bridgeSecretsArn=arn:aws:secretsmanager:us-west-2:000000000000:secret:bridge-abc123 \
     --context sandboxSecretsArn=arn:aws:secretsmanager:us-west-2:000000000000:secret:sandbox-abc123
-  run_in "sandbox CDK synth" infra/data env CDK_DEFAULT_ACCOUNT=000000000000 \
+  run_offline_cdk "sandbox CDK synth" \
     npx cdk synth AgentCore-coreAgent-sandbox-us-west-2 --quiet \
+    --app "$SYNTH_APP" \
+    --context region=us-west-2 \
     --context sandboxSecretsArn=arn:aws:secretsmanager:us-west-2:000000000000:secret:sandbox-abc123 \
     --context sandboxVpcId=vpc-00000000000000000 \
     --context sandboxAvailabilityZones=us-west-2a,us-west-2b \
@@ -107,6 +171,8 @@ if [ "$QUICK" -eq 0 ]; then
     --context sandboxClusterArn=arn:aws:ecs:us-west-2:000000000000:cluster/example-cluster \
     --context sandboxDomainName=example.test \
     --context sandboxGithubAppId=123456
+
+  run_in "partition portability CDK synth" infra/data bash scripts/check_portability.sh
   run "no-cloud demo startup" "$ROOT_DIR/scripts/demo.sh" --check --no-open
 fi
 
@@ -120,8 +186,7 @@ if command -v gitleaks >/dev/null 2>&1; then
   if [ "$REPO_HAS_GIT" -eq 1 ]; then
     run_in "gitleaks secret scan (full history)" . gitleaks git --redact --no-banner
   else
-    run "gitleaks secret scan (source tree)" \
-      gitleaks dir --redact --no-banner "$ROOT_DIR"
+    run "gitleaks secret scan (source tree)" scan_source_archive
   fi
 else
   printf '\n==> gitleaks secret scan\n'

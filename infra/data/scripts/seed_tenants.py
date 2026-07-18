@@ -38,6 +38,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from aws_region import resolve_default_region
+
+
+DEFAULT_REGION = resolve_default_region()
+
 
 def iso_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
@@ -124,7 +129,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--tenants-table", default="tenants")
     parser.add_argument("--workspace-table", default="workspace_to_tenant")
-    parser.add_argument("--region", default="us-west-2")
+    parser.add_argument("--region", default=DEFAULT_REGION)
     parser.add_argument("--dry-run", action="store_true",
                         help="Print what would be written; don't actually call DynamoDB.")
     args = parser.parse_args()

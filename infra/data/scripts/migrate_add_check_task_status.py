@@ -26,7 +26,10 @@ from datetime import datetime, timezone
 
 import boto3
 
+from aws_region import resolve_default_region
+
 TOOL_NAME = "check_task_status"
+DEFAULT_REGION = resolve_default_region()
 
 
 def main() -> int:
@@ -35,7 +38,7 @@ def main() -> int:
     )
     parser.add_argument("--dry-run", action="store_true", help="Print changes without writing")
     parser.add_argument("--table", default="tenants", help="DDB table name (default: tenants)")
-    parser.add_argument("--region", default="us-west-2")
+    parser.add_argument("--region", default=DEFAULT_REGION)
     args = parser.parse_args()
 
     table = boto3.resource("dynamodb", region_name=args.region).Table(args.table)

@@ -20,7 +20,8 @@
 #   bash infra/data/scripts/attach_agent_policy.sh
 #
 # Environment:
-#   REGION        — default us-west-2
+#   REGION        — defaults to AWS_REGION/AWS_DEFAULT_REGION, the active
+#                   AWS profile region, then us-west-2
 #   AGENT_STACK   — default AgentCore-coreAgent-default  (see aws-targets.json)
 #   DATA_STACK    — default AgentCore-coreAgent-data-<region>
 #   SANDBOX_STACK — default AgentCore-coreAgent-sandbox-<region>
@@ -33,7 +34,10 @@
 
 set -euo pipefail
 
-REGION="${REGION:-us-west-2}"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=aws_region.sh
+source "$SCRIPT_DIR/aws_region.sh"
+REGION="$(resolve_aws_region)"
 AGENT_STACK="${AGENT_STACK:-AgentCore-coreAgent-default}"
 DATA_STACK="${DATA_STACK:-AgentCore-coreAgent-data-${REGION}}"
 SANDBOX_STACK="${SANDBOX_STACK:-AgentCore-coreAgent-sandbox-${REGION}}"
@@ -122,7 +126,7 @@ if [[ "$ROLES_JSON" == "[]" || -z "$ROLES_JSON" ]]; then
   echo "  1. Find the agent's execution role in the IAM console" >&2
   echo "     (look for a role whose trust policy lets bedrock-agentcore.amazonaws.com assume it)." >&2
   echo "  2. Run:" >&2
-  echo "       aws iam attach-role-policy --role-name <role-name> \\\\" >&2
+  echo "       aws iam attach-role-policy --region $REGION --role-name <role-name> \\\\" >&2
   echo "           --policy-arn $DATA_POLICY_ARN" >&2
   exit 1
 fi
@@ -132,6 +136,7 @@ while IFS= read -r candidate_role; do
   [[ -n "$candidate_role" ]] || continue
   if ! role_json="$(
     aws iam get-role \
+      --region "$REGION" \
       --role-name "$candidate_role" \
       --output json 2>/dev/null
   )"; then
@@ -178,6 +183,7 @@ for i in "${!POLICY_ARNS[@]}"; do
   arn="${POLICY_ARNS[$i]}"
   label="${POLICY_LABELS[$i]}"
   if aws iam list-attached-role-policies \
+       --region "$REGION" \
        --role-name "$ROLE_NAME" \
        --query "AttachedPolicies[?PolicyArn=='$arn']" \
        --output text \
@@ -188,6 +194,7 @@ for i in "${!POLICY_ARNS[@]}"; do
   fi
   echo "  $label: attaching..."
   aws iam attach-role-policy \
+    --region "$REGION" \
     --role-name "$ROLE_NAME" \
     --policy-arn "$arn"
   echo "  $label: attached."

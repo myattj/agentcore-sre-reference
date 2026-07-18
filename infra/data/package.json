@@ -1,12 +1,20 @@
 {
   "name": "agentcore-data-infra",
   "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
   "description": "DynamoDB tables + IAM managed policy for the AgentCore multi-tenant agent platform. Sibling to coreAgent/agentcore/cdk/ (CLI-managed); this one is hand-authored.",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/myattj/agentcore-sre-reference.git",
+    "directory": "infra/data"
+  },
   "bin": {
     "data": "dist/bin/data.js"
   },
   "scripts": {
     "build": "tsc",
+    "test": "npm run build && node --test dist/test/aws-target.test.js",
     "watch": "tsc -w",
     "clean": "rm -rf dist cdk.out",
     "cdk": "npm run build && cdk",

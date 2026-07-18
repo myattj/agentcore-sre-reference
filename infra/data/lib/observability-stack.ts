@@ -28,6 +28,7 @@
  * pass it as a required param so a deploy with no subscriber still works.
  */
 import {
+  CfnMapping,
   CfnOutput,
   Duration,
   Stack,
@@ -73,6 +74,13 @@ export class ObservabilityStack extends Stack {
 
   constructor(scope: Construct, id: string, props: ObservabilityStackProps) {
     super(scope, id, props);
+
+    const consoleDomains = new CfnMapping(this, 'ConsoleDomains', {
+      mapping: {
+        aws: { domain: 'console.aws.amazon.com' },
+        'aws-us-gov': { domain: 'console.amazonaws-us-gov.com' },
+      },
+    });
 
     // --------------------------------------------------------------------
     // SNS topic for alarms. Optional email subscription.
@@ -371,7 +379,10 @@ export class ObservabilityStack extends Stack {
     });
 
     new CfnOutput(this, 'DashboardUrl', {
-      value: `https://${this.region}.console.aws.amazon.com/cloudwatch/home?region=${this.region}#dashboards:name=${this.dashboard.dashboardName}`,
+      value:
+        `https://${consoleDomains.findInMap(this.partition, 'domain')}` +
+        `/cloudwatch/home?region=${this.region}` +
+        `#dashboards:name=${this.dashboard.dashboardName}`,
       description: 'Direct URL to the CloudWatch dashboard',
     });
 

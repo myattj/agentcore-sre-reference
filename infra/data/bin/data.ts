@@ -2,12 +2,12 @@
 /**
  * CDK app entrypoint for the AgentCore data layer.
  *
- * Deploys one DataStack to us-west-2 using the account from the user's
- * default AWS profile (CDK_DEFAULT_ACCOUNT). The stack name mirrors the
+ * Deploys one DataStack using the account and region selected by the CDK
+ * credential chain. The stack name mirrors the
  * naming convention of the CLI-managed agent stack:
  *   AgentCore-coreAgent-data-<region>
  *
- * Override region by passing --context region=... .
+ * Override the profile region by passing --context region=... .
  */
 import { App, Fn } from 'aws-cdk-lib';
 import { DataStack } from '../lib/data-stack';
@@ -15,19 +15,34 @@ import { GatewayStack } from '../lib/gateway-stack';
 import { ObservabilityStack } from '../lib/observability-stack';
 import { SandboxStack } from '../lib/sandbox-stack';
 import { ServicesStack } from '../lib/services-stack';
+import {
+  validateAgentRuntimeArn,
+  validateAwsTarget,
+  validateRegionalArn,
+} from '../lib/aws-target';
 
 const app = new App();
 
-// Default all related AgentCore, Bedrock Memory, and data resources to
-// us-west-2. We intentionally do not inherit CDK_DEFAULT_REGION because a
-// developer shell may set it for unrelated work and split the platform's
-// resources across regions.
-//
-// Override via: npx cdk deploy --context region=eu-west-1
-// (only do this if you know what you're doing; AgentCore Runtime may not
-// be available in that region yet.)
+function requiredContext(name: string): string {
+  const value = app.node.tryGetContext(name) as string | undefined;
+  if (!value) {
+    throw new Error(`${name} context is required for this stack.`);
+  }
+  return value;
+}
+
+// Keep every related stack in the region selected by the active CDK profile.
+// An explicit context value wins, which lets CI and deployment wrappers use
+// one DEPLOY_REGION value without mutating cdk.json. The final fallback keeps
+// credential-free synth deterministic; real deployments should always have a
+// profile or explicit region.
 const account = process.env.CDK_DEFAULT_ACCOUNT;
-const region = (app.node.tryGetContext('region') as string | undefined) ?? 'us-west-2';
+const region =
+  (app.node.tryGetContext('region') as string | undefined) ??
+  process.env.CDK_DEFAULT_REGION ??
+  process.env.AWS_REGION ??
+  process.env.AWS_DEFAULT_REGION ??
+  'us-west-2';
 
 if (!account) {
   throw new Error(
@@ -36,6 +51,7 @@ if (!account) {
       'from your default profile).',
   );
 }
+validateAwsTarget(account, region);
 
 new DataStack(app, `AgentCore-coreAgent-data-${region}`, {
   env: { account, region },
@@ -130,6 +146,50 @@ const sandboxSecretsArn = app.node.tryGetContext('sandboxSecretsArn') as string 
 if (agentRuntimeArn) {
   const dataStackName = `AgentCore-coreAgent-data-${region}`;
 
+  const validatedRuntimeArn = validateAgentRuntimeArn(
+    'agentRuntimeArn',
+    agentRuntimeArn,
+    account,
+    region,
+  );
+  const slackSecretsArn = validateRegionalArn(
+    'slackSecretsArn',
+    requiredContext('slackSecretsArn'),
+    'secretsmanager',
+    'secret:',
+    account,
+    region,
+  );
+  const bridgeSecretsArn = validateRegionalArn(
+    'bridgeSecretsArn',
+    requiredContext('bridgeSecretsArn'),
+    'secretsmanager',
+    'secret:',
+    account,
+    region,
+  );
+  const certificateArn = app.node.tryGetContext('certificateArn') as string | undefined;
+  const validatedCertificateArn = certificateArn
+    ? validateRegionalArn(
+        'certificateArn',
+        certificateArn,
+        'acm',
+        'certificate/',
+        account,
+        region,
+      )
+    : undefined;
+  const validatedSandboxSecretsArn = sandboxSecretsArn
+    ? validateRegionalArn(
+        'sandboxSecretsArn',
+        sandboxSecretsArn,
+        'secretsmanager',
+        'secret:',
+        account,
+        region,
+      )
+    : undefined;
+
   new ServicesStack(app, `AgentCore-coreAgent-services-${region}`, {
     env: { account, region },
     description:
@@ -138,12 +198,12 @@ if (agentRuntimeArn) {
       'agentcore:project-name': 'coreAgent',
       'agentcore:stack-type': 'services',
     },
-    agentRuntimeArn,
-    certificateArn: app.node.tryGetContext('certificateArn') as string | undefined,
+    agentRuntimeArn: validatedRuntimeArn,
+    certificateArn: validatedCertificateArn,
     domainName: app.node.tryGetContext('domainName') as string | undefined,
-    slackSecretsArn: app.node.tryGetContext('slackSecretsArn') as string,
-    bridgeSecretsArn: app.node.tryGetContext('bridgeSecretsArn') as string,
-    sandboxSecretsArn,
+    slackSecretsArn,
+    bridgeSecretsArn,
+    sandboxSecretsArn: validatedSandboxSecretsArn,
     githubAppId: app.node.tryGetContext('githubAppId') as string | undefined,
     githubAppSlug: app.node.tryGetContext('githubAppSlug') as string | undefined,
     bridgeDataAccessPolicyArn: Fn.importValue(`${dataStackName}-BridgeDataAccessPolicyArn`),
@@ -204,6 +264,36 @@ if (sandboxSecretsArn && sandboxVpcId) {
     );
   }
 
+  const validatedSandboxSecretsArn = validateRegionalArn(
+    'sandboxSecretsArn',
+    sandboxSecretsArn,
+    'secretsmanager',
+    'secret:',
+    account,
+    region,
+  );
+  const validatedClusterArn = validateRegionalArn(
+    'sandboxClusterArn',
+    sandboxClusterArn!,
+    'ecs',
+    'cluster/',
+    account,
+    region,
+  );
+  const anthropicSecretsArn = app.node.tryGetContext('anthropicSecretsArn') as
+    | string
+    | undefined;
+  const validatedAnthropicSecretsArn = anthropicSecretsArn
+    ? validateRegionalArn(
+        'anthropicSecretsArn',
+        anthropicSecretsArn,
+        'secretsmanager',
+        'secret:',
+        account,
+        region,
+      )
+    : undefined;
+
   new SandboxStack(app, `AgentCore-coreAgent-sandbox-${region}`, {
     env: { account, region },
     description:
@@ -217,12 +307,11 @@ if (sandboxSecretsArn && sandboxVpcId) {
     availabilityZones: sandboxAvailabilityZones!,
     publicSubnetIds: sandboxPublicSubnetIds!,
     clusterName: sandboxClusterName!,
-    clusterArn: sandboxClusterArn!,
-    sandboxSecretsArn: sandboxSecretsArn!,
+    clusterArn: validatedClusterArn,
+    sandboxSecretsArn: validatedSandboxSecretsArn,
     githubAppId: sandboxGithubAppId!,
     callbackUrl: `https://${sandboxDomainName}/internal/sandbox_complete`,
-    anthropicSecretsArn:
-      (app.node.tryGetContext('anthropicSecretsArn') as string | undefined) || undefined,
+    anthropicSecretsArn: validatedAnthropicSecretsArn,
   });
 }
 
