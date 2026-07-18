@@ -3,10 +3,13 @@
 [![CI/CD](https://github.com/myattj/agentcore-sre-reference/actions/workflows/ci-cd.yml/badge.svg)](https://github.com/myattj/agentcore-sre-reference/actions/workflows/ci-cd.yml)
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 
-**An archived reference implementation of a multi-tenant AI SRE for Slack on AWS Bedrock AgentCore.**
+**A self-hostable, multi-tenant AI SRE for Slack on AWS Bedrock AgentCore. Bring your own AWS account, Slack app, model access, and integrations.**
 
 > [!IMPORTANT]
-> Agent is no longer an active product. This repository is published as a learning resource and creative systems-design example. It is not maintained as a hosted service, has not been independently security-audited, and is not production-ready without substantial review.
+> Agent deploys into infrastructure you own and operate. This project does not
+> provide a hosted service, security certification, compliance guarantee, or
+> support SLA. Review the IAM, tenant-isolation, data-retention, and cost
+> boundaries in [SECURITY.md](./SECURITY.md) before admitting real customer data.
 
 Agent started with a simple provocation: what if the alert in Slack could become the investigation, the proposed fix, and the artifact the team shares afterward?
 
@@ -47,7 +50,9 @@ The runtime hydrates a fresh <code>TenantConfig</code> for every invocation. A t
 
 ## What is here
 
-This is a reference tree, not a claim that every subsystem is equally mature.
+The supported first-run path deploys the Slack bridge, onboarding UI, shared
+tenant data, alarms, AgentCore runtime, and Gateway into one commercial AWS
+account and region. Optional subsystems have narrower safety boundaries.
 
 | Capability | Status in this repository | Important limit |
 |---|---|---|
@@ -57,12 +62,14 @@ This is a reference tree, not a claim that every subsystem is equally mature.
 | AgentCore Gateway integrations | Implemented as connector and provisioning patterns | Shared-Gateway tool metadata is not tenant-private; use per-tenant Gateways if target names or schemas are sensitive |
 | Incident/runbook/on-call/deploy skills | Implemented as built-in prompt-driven workflows | Output quality depends on connected data and the selected model |
 | GitHub code and commit correlation | Implemented through a GitHub App | Requires installation permissions, careful repository scoping, and an operator-approved installation-to-tenant binding |
-| Autonomous PR sandbox | Experimental reference; disabled by default | The current worker exposes in-task credentials to model-generated shell commands. Use only with disposable credentials while redesigning the trust boundary; see the sandbox warning |
-| Ephemeral interactive dashboards | Experimental reference implementation | Links are bearer capabilities: anyone with the URL can view until the 7-day expiry |
-| Onboarding, workspace settings, and operator views | Implemented reference UI | Authentication and RBAC are not a finished multi-user product |
+| Autonomous PR sandbox | Experimental; disabled by default | The current worker exposes in-task credentials to model-generated shell commands. Use only with disposable credentials while redesigning the trust boundary; see the sandbox warning |
+| Ephemeral interactive dashboards | Experimental | Links are bearer capabilities: anyone with the URL can view until the 7-day expiry |
+| Onboarding, workspace settings, and operator views | Implemented | Operator authentication uses a deployment-wide shared secret; replace it with your identity provider for a larger operator team |
 | Discord/Teams transports, billing, marketplace, durable dashboards | Not implemented | These remain design directions, not hidden features |
 
-No public Agent endpoint or cloud environment is part of this archive.
+No shared Agent cloud is included. Each operator deploys an isolated installation
+into their own AWS account and connects only the Slack workspaces and integrations
+they choose.
 
 ## Why it may be useful
 
@@ -76,6 +83,60 @@ The interesting reusable patterns are larger than this particular product:
 - Healthy/busy lifecycle tracking for background work.
 - Audit and spend records designed so observability failures never break the user path.
 - Conversation-native output that can become a temporary interactive artifact.
+
+## Self-host in your AWS account
+
+The guided installer is the primary deployment path. It uses the standard AWS
+credential chain, including named profiles, AWS SSO, environment credentials,
+and workload roles. It never asks for or stores raw AWS access keys.
+
+You need:
+
+- a commercial AWS account and a region listed in
+  [<code>scripts/agentcore_cli_regions.txt</code>](./scripts/agentcore_cli_regions.txt);
+- Bedrock access to the default model, or a tenant model you configure after install;
+- AWS CLI v2 credentials with permission to deploy the documented CDK and AgentCore resources;
+- Git, Python **3.13**, [uv](https://docs.astral.sh/uv/), Node.js **22+**, npm, Docker, jq, and OpenSSL;
+- a public domain plus a validated ACM certificate in the selected account and region; and
+- permission to create a Slack app and install it into a workspace.
+
+From a fresh clone:
+
+~~~bash
+make self-host SELF_HOST_ARGS="--profile my-sandbox-profile --region us-west-2"
+~~~
+
+The command:
+
+1. checks the local toolchain, Docker daemon, live AWS identity, AgentCore control plane, region, and CDK bootstrap;
+2. installs every locked dependency;
+3. asks for the public domain and matching ACM certificate;
+4. writes <code>.self-host/slack_manifest.json</code> with the correct OAuth, event, and interaction URLs so you can import it at [api.slack.com/apps](https://api.slack.com/apps);
+5. reads the resulting Slack credentials without echoing secrets;
+6. shows the exact AWS account and region and requires a typed confirmation before creating billable resources;
+7. creates or safely reuses the Secrets Manager values, configures the runtime with the selected region and public dashboard origin, then deploys data, alarms, the AgentCore runtime, bridge, onboarding UI, and shared tenant-scoped Gateway; and
+8. prints the ALB DNS target, waits for your DNS record, verifies HTTPS <code>/healthz</code>, and prints the Slack install URL.
+
+Reruns are idempotent: existing secrets are reused unless replacement values are
+provided through the documented environment variables, and CDK/AgentCore update
+the existing installation. The experimental PR sandbox remains disabled.
+
+For noninteractive secret injection, set <code>SLACK_CLIENT_ID</code>,
+<code>SLACK_CLIENT_SECRET</code>, <code>SLACK_SIGNING_SECRET</code>, and
+<code>SLACK_APP_ID</code> through your CI secret store or process environment.
+Do not put secret values directly into a shared shell history. Automation can
+add <code>--yes --skip-health-check</code>; verify <code>/healthz</code> after its
+DNS record is live.
+
+Preview the phases without contacting AWS or changing anything:
+
+~~~bash
+make self-host SELF_HOST_ARGS="--dry-run --domain agent.example.com --region us-west-2"
+~~~
+
+The guided path intentionally targets commercial AWS first. The CDK code can
+synthesize for GovCloud, but GovCloud requires a compatible non-global Bedrock
+model and a manual review of AgentCore feature availability.
 
 ## Try it locally — no cloud account required
 
@@ -139,9 +200,9 @@ out of the source-only secret scan.
 
 ## Prerequisites for the full AgentCore path
 
-For the AgentCore loop or an AWS deployment:
+For a manual AgentCore loop or lower-level deployment work:
 
-- The [Amazon Bedrock AgentCore CLI](https://github.com/aws/agentcore-cli), installed with <code>npm install -g @aws/agentcore@0.24.1</code>
+- The [Amazon Bedrock AgentCore CLI](https://github.com/aws/agentcore-cli). The guided installer invokes the pinned <code>@aws/agentcore@0.24.1</code> package through <code>npx</code>; install it globally only for direct CLI work.
 - AWS CLI v2 and credentials for your own account
 - AWS CDK v2
 - Access to a compatible Bedrock model in your chosen region
@@ -258,9 +319,11 @@ The repository includes two ways to explore the idea with synthetic data:
 
 Both labs write to external systems. Use disposable workspaces, accounts, repositories, and narrowly scoped credentials. Inspect the scripts before running them; the larger test environment is intentionally closer to a real deployment than a unit-test fixture.
 
-## Deploying the reference stack
+## Manual deployment and advanced integrations
 
-There is no single safe <code>deploy everything</code> command. A real deployment crosses several security and billing boundaries:
+Use <code>make self-host</code> for the supported installation. The lower-level
+steps remain available for operators who need custom IAM, GovCloud review,
+Memory strategies, GitHub code access, or another deployment topology:
 
 1. Review and synthesize the shared data and IAM stacks in [<code>infra/data/</code>](./infra/data/README.md).
 2. Configure and deploy the AgentCore runtime from [<code>coreAgent/</code>](./coreAgent/README.md); the runtime source is [<code>coreAgent/app/coreAgent/</code>](./coreAgent/app/coreAgent/).
@@ -348,13 +411,16 @@ The authoritative tenant schema is <code>coreAgent/app/coreAgent/tenant.py</code
 
 ## Project status
 
-Agent is archived. Issues and pull requests may be useful to future readers, but there is no roadmap, hosted service, support SLA, or promise of dependency updates.
+Agent is maintained as a self-hosted open-source project. It is not a hosted
+service and carries no support SLA or compatibility guarantee. Operators remain
+responsible for cloud costs, dependency review, upgrades, backups, security,
+and incident response for their installations.
 
-- Read [<code>NORTH_STAR.md</code>](./NORTH_STAR.md) for the archived product thesis.
+- Read [<code>NORTH_STAR.md</code>](./NORTH_STAR.md) for the original product thesis and archived exploration notes.
 - Browse the component guides for the [bridge](./bridge/README.md), [core agent](./coreAgent/README.md), [onboarding UI](./onboarding/README.md), [AWS infrastructure](./infra/data/README.md), and [PR sandbox](./infra/sandbox/README.md).
 - See [<code>CONTRIBUTING.md</code>](./CONTRIBUTING.md) before proposing a change.
-- Read [<code>SUPPORT.md</code>](./SUPPORT.md) for the archive's support boundaries.
+- Read [<code>SUPPORT.md</code>](./SUPPORT.md) for community support boundaries.
 - Report vulnerabilities through [<code>SECURITY.md</code>](./SECURITY.md).
-- Review the [<code>CHANGELOG.md</code>](./CHANGELOG.md) for the open-source archive snapshot.
+- Review the [<code>CHANGELOG.md</code>](./CHANGELOG.md) for release history and current work.
 
 Released under the [MIT License](./LICENSE).

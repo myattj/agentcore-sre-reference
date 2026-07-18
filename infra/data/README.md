@@ -1,8 +1,9 @@
 # AWS infrastructure
 
 This CDK application defines the durable data, observability, and optional
-service infrastructure for the archived AgentCore reference project. Nothing in
-this directory should be treated as a one-click production deployment.
+service infrastructure for the self-hosted AgentCore project. Use
+<code>make self-host</code> from the repository root for the guided deployment;
+this directory documents the lower-level CDK interfaces.
 
 See the [root README](../../README.md) for project status and architecture.
 
@@ -72,7 +73,7 @@ Keep those exports in the shell used for every CDK, AgentCore, and helper-script
 command. Mixing profiles or regions is rejected when an ARN no longer matches
 the active account, partition, or region.
 
-The reference uses account-global IAM names and fixed regional resource names.
+The current stacks use account-global IAM names and fixed regional resource names.
 Treat it as one installation per AWS account, deployed into one selected region,
 unless you first introduce and review a deployment-name prefix across the
 stacks, runtime configuration, and scripts.
@@ -141,7 +142,7 @@ the production workflow requires both and refuses an HTTP deployment. The
 runtime ARN may use either the current versioned
 <code>agent/&lt;uuid&gt;:&lt;version&gt;</code> resource or the legacy
 <code>runtime/&lt;id&gt;</code> form still present in AWS developer guidance. The
-reference stack routes the bridge and onboarding service
+supported stack routes the bridge and onboarding service
 through one public origin because the Slack OAuth callback sets the
 host-scoped HttpOnly onboarding cookie. GitHub App and sandbox contexts are
 also optional.
@@ -249,5 +250,5 @@ runtime, services, and the optional sandbox. Memory provisioning and the actual
 AgentCore Gateway remain separate operator steps.
 
 Review removal policies, account and region settings, secret handling, IAM
-scope, domains, TLS, alarms, and expected spend before deploying this archived
-example.
+scope, domains, TLS, alarms, and expected spend before deploying into an account
+you operate.

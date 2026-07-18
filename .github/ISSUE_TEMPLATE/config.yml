@@ -5,4 +5,4 @@ contact_links:
     about: Report vulnerabilities privately. Do not open a public issue.
   - name: Support boundaries
     url: https://github.com/myattj/agentcore-sre-reference/blob/main/SUPPORT.md
-    about: Read what this archived reference does and does not support.
+    about: Read the support boundaries for self-hosted operators.

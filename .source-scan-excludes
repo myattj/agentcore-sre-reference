@@ -31,6 +31,7 @@
 ./coreAgent/agentcore/.cache
 ./.smoke-logs
 ./.gstack
+./.self-host
 ./examples/dashboards
 cdk.context.json
 */cdk.context.json

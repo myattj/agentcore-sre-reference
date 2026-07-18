@@ -11,7 +11,8 @@ Checks the tools used by Agent's local setup, demo, and validation scripts.
 Required-tool failures produce a non-zero exit. Optional cloud tools never do.
 
 Required: Bash, Git, Python 3.13, uv, Node.js 22+, npm
-Optional: AWS CLI, AgentCore CLI, CDK, Docker, GitHub CLI, gitleaks
+Required for self-hosting: AWS CLI, Docker, jq, OpenSSL
+Optional for direct/manual work: AgentCore CLI, CDK, GitHub CLI, gitleaks
 EOF
 }
 
@@ -135,6 +136,8 @@ optional "AWS CLI" "aws" "aws --version" "install: https://docs.aws.amazon.com/c
 check_agentcore
 optional "AWS CDK" "cdk" "cdk --version" "not required globally; infra checks use the locked npx version"
 optional "Docker" "docker" "docker --version" "install only for container/deployment work: https://docs.docker.com/get-docker/"
+optional "jq" "jq" "jq --version" "install for self-hosted runtime configuration: https://jqlang.github.io/jq/download/"
+optional "OpenSSL" "openssl" "openssl version" "install for self-hosted Gateway JWT key generation: https://www.openssl.org/"
 optional "GitHub CLI" "gh" "gh --version" "install only for pull-request workflows: https://cli.github.com/"
 optional "gitleaks" "gitleaks" "gitleaks version" "CI always scans secrets; local install: https://github.com/gitleaks/gitleaks#installing"
 
@@ -144,7 +147,8 @@ if [ "$required_failures" -ne 0 ]; then
   exit 1
 fi
 if [ "$has_make" -eq 1 ]; then
-  printf 'Ready for: make setup, make demo, and make check.\n'
+  printf 'Ready for local work: make setup, make demo, and make check.\n'
+  printf 'For AWS deployment, resolve any optional AWS CLI, Docker, jq, or OpenSSL lines, then run make self-host.\n'
 else
   printf 'Ready for: ./scripts/setup.sh, ./scripts/demo.sh, and ./scripts/check.sh.\n'
 fi

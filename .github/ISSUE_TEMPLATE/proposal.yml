@@ -1,5 +1,5 @@
-name: Reference-improvement proposal
-description: Propose a larger change that belongs in the archived reference implementation
+name: Product improvement proposal
+description: Propose a larger change to the self-hosted product
 title: "[Proposal]: "
 labels:
   - enhancement
@@ -7,7 +7,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Agent is archived and has no active product roadmap. A proposal should make the reference safer, clearer, easier to run, or more reusable without turning it back into a hosted product.
+        Agent is a self-hosted open-source product, not a hosted service. A proposal should make installation, tenant safety, integrations, operation, or developer experience materially better.
   - type: textarea
     id: use_case
     attributes:
@@ -30,10 +30,10 @@ body:
     validations:
       required: true
   - type: textarea
-    id: archive_fit
+    id: product_fit
     attributes:
-      label: Why this belongs in the archive
-      description: Explain why this should land here instead of living in a fork or a new product.
+      label: Why this belongs in the shared product
+      description: Explain why this should land upstream instead of remaining specific to one operator's fork or AWS environment.
     validations:
       required: true
   - type: textarea

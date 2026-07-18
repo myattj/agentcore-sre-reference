@@ -1,7 +1,8 @@
-.PHONY: help setup doctor aws-doctor aws-configure agent-deploy check demo
+.PHONY: help setup doctor aws-doctor aws-configure agent-deploy self-host check demo
 
 AWS_CONFIGURE_ARGS ?=
 AGENTCORE_DEPLOY_ARGS ?=
+SELF_HOST_ARGS ?=
 
 help:
 	@printf '%s\n' \
@@ -11,6 +12,7 @@ help:
 	  '  make aws-doctor Verify the selected AWS identity, region, and AgentCore access' \
 	  '  make aws-configure Verify AWS and write the ignored AgentCore deployment target' \
 	  '  make agent-deploy Validate and deploy AgentCore with the selected AWS target' \
+	  '  make self-host Guided deployment into your AWS account and Slack app' \
 	  '  make demo    Run the bridge + web UI with a no-cloud incident dashboard' \
 	  '  make check   Run the same local validation gates used by CI' \
 	  '' \
@@ -31,6 +33,9 @@ aws-configure:
 
 agent-deploy:
 	@./scripts/deploy_agent.sh $(AGENTCORE_DEPLOY_ARGS)
+
+self-host:
+	@python3.13 ./scripts/self_host.py $(SELF_HOST_ARGS)
 
 check:
 	@./scripts/check.sh

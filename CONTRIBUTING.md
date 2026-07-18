@@ -1,8 +1,10 @@
 # Contributing
 
-Thank you for helping make Agent a better reference implementation.
+Thank you for helping make Agent a safer and easier self-hosted AI SRE.
 
-Agent is archived: there is no active product roadmap, support SLA, or guarantee that a pull request will be reviewed or released. Contributions are still welcome when they make the repository safer, clearer, easier to run, or more useful as an example.
+Agent is maintained as an open-source project without a support SLA or guaranteed
+review time. Contributions are welcome when they make self-hosting safer,
+clearer, more portable, or easier to operate.
 
 ## Good contributions
 
@@ -11,9 +13,11 @@ Agent is archived: there is no active product roadmap, support SLA, or guarantee
 - Improve local setup, examples, architecture explanations, or failure messages.
 - Add focused tests around tenant boundaries, authentication, async behavior, or tool auditing.
 - Update a dependency with a clear compatibility reason and verification notes.
-- Generalize a reusable pattern without turning the archive into a new product roadmap.
+- Improve the guided self-hosting path without weakening its fail-closed checks.
 
-Large feature proposals should start as an issue. Explain the use case, security boundary, operational cost, and why it belongs in an archived reference rather than a fork.
+Large feature proposals should start as an issue. Explain the use case, security
+boundary, operational cost, migration path, and why the capability belongs in
+the shared self-hosted product rather than a deployment-specific fork.
 
 ## Development setup
 
@@ -24,6 +28,7 @@ make doctor  # required vs optional tools, with fixes
 make setup   # locked dependencies + private matching local env files
 make demo    # bridge + web UI + synthetic dashboard, no cloud required
 make check   # full local validation suite
+make self-host SELF_HOST_ARGS="--dry-run --domain agent.example.com --region us-west-2"
 ~~~
 
 The root [README](./README.md#try-it-locally--no-cloud-account-required)

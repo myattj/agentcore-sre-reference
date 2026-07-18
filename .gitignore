@@ -47,6 +47,7 @@ build/
 # Test env runtime state (scripts/testenv)
 .smoke-logs/
 .gstack/
+.self-host/
 scripts/testenv/.testenv-state.json
 scripts/testenv/integrations/.*-seeded.json
 
