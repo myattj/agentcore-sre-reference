@@ -18,7 +18,7 @@ dependencies = [
     # slack-sdk's AsyncWebClient imports aiohttp at module load but does not
     # declare it as an install-time dependency. Without this line the OAuth
     # callback path explodes with ModuleNotFoundError on first install.
-    "aiohttp >= 3.9",
+    "aiohttp>=3.14.3",
     # PyJWT with the [crypto] extra pulls in `cryptography` for RS256
     # signing. Used by bridge/bridge/gateway_jwt.py to mint per-invocation
     # JWTs for AgentCore Gateway's CUSTOM_JWT authorizer.
